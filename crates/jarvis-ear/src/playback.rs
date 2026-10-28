@@ -13,6 +13,9 @@
 //! flux ouvert en permanence (la sortie peut se mettre en veille), et un changement de
 //! sortie par défaut (casque Bluetooth branché) est pris au son suivant. Sortie perdue ou
 //! bloquée : le son en cours est abandonné (journalisé), la sortie est rouverte au suivant.
+//!
+//! Une panique pendant un son l'abandonne seul. Si le thread meurt quand même, la lecture
+//! est dite finie pour de bon (sinon l'écoute d'une réponse attendrait indéfiniment).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -32,12 +35,15 @@ const QUEUE: usize = 8;
 /// Fermeture de la sortie après ce délai sans son.
 const IDLE_CLOSE: Duration = Duration::from_secs(30);
 /// La lecture est dite finie un peu après le dernier échantillon envoyé : le temps que
-/// le son sorte vraiment (Bluetooth compris), pour ne pas capter la fin de la phrase.
-const TAIL: Duration = Duration::from_millis(300);
+/// le son sorte vraiment (Bluetooth et PipeWire compris), pour ne pas capter la fin de
+/// la phrase.
+const TAIL: Duration = Duration::from_millis(500);
 /// Marge avant de déclarer la sortie bloquée.
 const STALL_MARGIN: Duration = Duration::from_secs(2);
 /// Période de surveillance pendant la lecture.
 const POLL: Duration = Duration::from_millis(20);
+/// Attente maximale du thread en quittant (bloqué dans l'ouverture de la sortie : abandonné).
+const QUIT_WAIT: Duration = Duration::from_secs(1);
 
 /// Sortie sonore (remplaçable dans les tests).
 pub trait Player: Send {
@@ -92,15 +98,26 @@ struct Shared {
     generation: Arc<AtomicU64>,
     /// Sons demandés et pas encore finis.
     pending: AtomicUsize,
+    /// Thread de lecture terminé : plus rien ne sera joué.
+    dead: AtomicBool,
     playing: watch::Sender<bool>,
 }
 
 impl Shared {
+    fn new() -> Self {
+        Self {
+            generation: Arc::new(AtomicU64::new(0)),
+            pending: AtomicUsize::new(0),
+            dead: AtomicBool::new(false),
+            playing: watch::channel(false).0,
+        }
+    }
+
     /// Recalcule `playing` sous le verrou du `watch` : deux appels concurrents ne peuvent
     /// pas laisser une valeur périmée.
     fn refresh(&self) {
         self.playing.send_if_modified(|p| {
-            let now = self.pending.load(Ordering::SeqCst) > 0;
+            let now = !self.dead.load(Ordering::SeqCst) && self.pending.load(Ordering::SeqCst) > 0;
             let changed = *p != now;
             *p = now;
             changed
@@ -197,6 +214,24 @@ pub struct CpalPlayer {
     shared: Arc<Shared>,
     rate: u32,
     thread: Option<JoinHandle<()>>,
+    /// Déconnecté quand le thread se termine.
+    done: std_mpsc::Receiver<()>,
+}
+
+/// Posée dans le thread : à sa fin, normale ou sur panique, la lecture est finie.
+struct Exit {
+    shared: Arc<Shared>,
+    _done: std_mpsc::Sender<()>,
+}
+
+impl Drop for Exit {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            tracing::error!("thread de lecture arrêté sur une panique : plus de son");
+        }
+        self.shared.dead.store(true, Ordering::SeqCst);
+        self.shared.refresh();
+    }
 }
 
 impl CpalPlayer {
@@ -210,17 +245,29 @@ impl CpalPlayer {
                 FALLBACK_RATE
             }
         };
-        let shared = Arc::new(Shared {
-            generation: Arc::new(AtomicU64::new(0)),
-            pending: AtomicUsize::new(0),
-            playing: watch::channel(false).0,
-        });
+        Self::start(rate, run)
+    }
+
+    /// Démarre `body` (la boucle du thread) ; remplaçable dans les tests.
+    fn start(
+        rate: u32,
+        body: impl FnOnce(std_mpsc::Receiver<Command>, Arc<Shared>) + Send + 'static,
+    ) -> anyhow::Result<Self> {
+        let shared = Arc::new(Shared::new());
         let (commands, rx) = std_mpsc::channel();
+        let (done_tx, done) = std_mpsc::channel();
         let thread = {
             let shared = shared.clone();
             std::thread::Builder::new()
                 .name("jarvis-playback".into())
-                .spawn(move || run(rx, shared))
+                .spawn(move || {
+                    // Libérée après `rx` : un son demandé ensuite échoue à l'envoi.
+                    let _exit = Exit {
+                        shared: shared.clone(),
+                        _done: done_tx,
+                    };
+                    body(rx, shared);
+                })
                 .context("démarrage du thread de lecture")?
         };
         Ok(Self {
@@ -228,6 +275,7 @@ impl CpalPlayer {
             shared,
             rate,
             thread: Some(thread),
+            done,
         })
     }
 }
@@ -268,8 +316,15 @@ impl Drop for CpalPlayer {
     fn drop(&mut self) {
         self.stop();
         let _ = self.commands.send(Command::Quit);
-        if let Some(t) = self.thread.take() {
-            let _ = t.join();
+        let Some(t) = self.thread.take() else { return };
+        // Thread bloqué (ouverture ALSA/Pulse) : on quitte sans lui.
+        match self.done.recv_timeout(QUIT_WAIT) {
+            Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                tracing::warn!("thread de lecture bloqué : abandonné en quittant");
+            }
+            _ => {
+                let _ = t.join();
+            }
         }
     }
 }
@@ -292,11 +347,9 @@ fn run(commands: std_mpsc::Receiver<Command>, shared: Arc<Shared>) {
                 samples,
                 rate,
                 generation,
-            }) => {
-                if !enqueue(&mut out, &shared, samples, rate, generation) {
-                    shared.finish(1);
-                }
-            }
+            }) => queue_or_finish(&shared, || {
+                enqueue(&mut out, &shared, samples, rate, generation)
+            }),
             Ok(Command::Quit) | Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
             Err(std_mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -326,6 +379,19 @@ fn run(commands: std_mpsc::Receiver<Command>, shared: Arc<Shared>) {
             releases.pop_front();
             shared.finish(1);
         }
+    }
+}
+
+/// Lance `queue` ; son refusé ou panique (rééchantillonnage, ouverture) : il est fini.
+/// `enqueue` ne touche à la sortie qu'une fois le son prêt, elle reste donc cohérente.
+fn queue_or_finish(shared: &Shared, queue: impl FnOnce() -> bool) {
+    let queued =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(queue)).unwrap_or_else(|_| {
+            tracing::error!("panique pendant la préparation d'un son : son abandonné");
+            false
+        });
+    if !queued {
+        shared.finish(1);
     }
 }
 
@@ -526,5 +592,72 @@ mod tests {
         let mut out = [0i16; 2];
         f.fill(&mut out, 1);
         assert_eq!(out, [16_384, -32_768]);
+    }
+
+    fn wait_until(what: &str, cond: impl Fn() -> bool) {
+        let start = Instant::now();
+        while !cond() {
+            assert!(
+                start.elapsed() < Duration::from_secs(2),
+                "délai dépassé : {what}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn panique_pendant_un_son_lecture_finie() {
+        let shared = Shared::new();
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        shared.refresh();
+        let playing = shared.playing.subscribe();
+        assert!(*playing.borrow());
+        queue_or_finish(&shared, || panic!("rééchantillonnage injecté"));
+        assert!(!*playing.borrow());
+    }
+
+    #[test]
+    fn son_en_file_reste_en_cours() {
+        let shared = Shared::new();
+        shared.pending.fetch_add(1, Ordering::SeqCst);
+        shared.refresh();
+        queue_or_finish(&shared, || true);
+        assert!(*shared.playing.borrow());
+    }
+
+    #[test]
+    fn thread_mort_lecture_finie_pour_de_bon() {
+        let mut p = CpalPlayer::start(FALLBACK_RATE, |commands, _| {
+            let _ = commands.recv();
+            panic!("panique injectée");
+        })
+        .unwrap();
+        let playing = p.playing();
+        p.play(vec![0.1; 10], 16_000);
+        wait_until("lecture finie", || !*playing.borrow());
+        p.play(vec![0.1; 10], 16_000);
+        assert!(!p.is_playing());
+    }
+
+    #[test]
+    fn quitter_n_attend_pas_un_thread_bloque() {
+        let (release, blocked) = std_mpsc::channel::<()>();
+        let p = CpalPlayer::start(FALLBACK_RATE, move |_, _| {
+            // Comme un `open()` qui ne rend jamais la main.
+            let _ = blocked.recv();
+        })
+        .unwrap();
+        let start = Instant::now();
+        drop(p);
+        assert!(start.elapsed() < QUIT_WAIT + Duration::from_millis(500));
+        drop(release);
+    }
+
+    #[test]
+    fn quitter_attend_le_thread_normal() {
+        let p = CpalPlayer::start(FALLBACK_RATE, run).unwrap();
+        let start = Instant::now();
+        drop(p);
+        assert!(start.elapsed() < QUIT_WAIT / 2);
     }
 }

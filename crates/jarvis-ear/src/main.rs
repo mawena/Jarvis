@@ -137,7 +137,8 @@ async fn run() -> anyhow::Result<()> {
         brain,
         commands_rx,
         tray_tx,
-    );
+    )
+    .with_wake_threshold(threshold);
     if let Some(path) = default_mute_file() {
         app = app.with_mute_file(path);
     }
