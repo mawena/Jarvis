@@ -19,7 +19,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 ## Phase 1 : compréhension et premières compétences (par le texte)
 *Plan : [phases 0 et 1](docs/superpowers/plans/2026-10-28-phases-0-1-fondations-comprehension.md), branche `feature/comprehension-texte`*
 
-- [ ] Raccourcis rapides sans IA (« suivant », « pause », « lance X »…) (tâche 4)
+- [x] Raccourcis rapides sans IA (« suivant », « pause », « lance X »…) (tâche 4)
 - [ ] Contrôle des médias via MPRIS et volume PipeWire (tâche 5)
 - [ ] Lancement et mise au premier plan des applications et jeux (tâche 6)
 - [ ] Compréhension par IA : Ollama (local) et Claude (en ligne) (tâche 7)
