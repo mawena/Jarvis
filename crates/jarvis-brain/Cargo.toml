@@ -9,6 +9,11 @@ path = "src/main.rs"
 
 [dependencies]
 jarvis-protocol.workspace = true
+jarvis-skills.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -19,3 +24,4 @@ directories.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+wiremock.workspace = true
