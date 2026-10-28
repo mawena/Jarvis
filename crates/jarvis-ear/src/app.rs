@@ -427,13 +427,19 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
     }
 
     /// Lecture finie et question en attente : écoute la réponse sans mot d'éveil.
+    /// Jamais en écoute coupée : seul le mot d'éveil peut y ouvrir une capture.
     fn on_playback(&mut self) {
         if !self.awaiting_reply || *self.playing.borrow_and_update() {
             return;
         }
         self.awaiting_reply = false;
-        if self.capturing || self.hard_muted || self.unavailable || self.downmixer.is_none() {
-            tracing::debug!("réponse non écoutée : micro occupé ou fermé");
+        if self.capturing
+            || self.muted
+            || self.hard_muted
+            || self.unavailable
+            || self.downmixer.is_none()
+        {
+            tracing::debug!("réponse non écoutée : écoute coupée, micro occupé ou fermé");
             return;
         }
         tracing::info!("écoute de la réponse");
@@ -651,6 +657,8 @@ mod tests {
         player: Arc<PlayerShared>,
         commands: mpsc::UnboundedSender<TrayCommand>,
         tray: watch::Receiver<TrayState>,
+        /// Injection directe d'événements internes (réponse tardive du cerveau).
+        internal: mpsc::UnboundedSender<Internal>,
         task: JoinHandle<anyhow::Result<()>>,
     }
 
@@ -755,6 +763,7 @@ mod tests {
             player,
             commands,
             tray,
+            internal: app.internal_tx.clone(),
             task: tokio::spawn(app.run()),
         }
     }
@@ -1386,6 +1395,53 @@ mod tests {
         h.wait_for("fin de capture", |h| !h.tray.borrow().capturing)
             .await;
         assert_eq!(h.wakes(), 1);
+    }
+
+    #[tokio::test]
+    async fn question_pendant_l_ecoute_coupee_pas_d_ecoute_de_reponse() {
+        let h = harness_question();
+        h.commands.send(TrayCommand::Mute).unwrap();
+        h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
+            .await;
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.feed(wake_then_silence()).await;
+        // Pas de bip de réveil en écoute coupée : seule la voix est lue.
+        h.wait_for("question lue", |h| h.played() == vec![voice_played()])
+            .await;
+        h.player.finish();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!h.tray.borrow().capturing, "pas d'écoute directe");
+        assert_eq!(h.follow_ups().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn reponse_tardive_pendant_l_ecoute_de_la_reponse_ignoree() {
+        let h = harness_question();
+        ask(&h).await;
+        let before = h.played();
+        // Réponse d'une phrase précédente qui arrive pendant l'écoute de la réponse.
+        h.internal
+            .send(Internal::Heard {
+                result: heard("autre", Some(EarAction::AwaitReply), Some(Sound::Success)),
+                muted: false,
+            })
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.played(), before, "rien n'est joué");
+        assert!(h.tray.borrow().capturing, "capture intacte");
+        // La réponse est toujours entendue, marquée follow_up.
+        let mut reply = vec![0.0; 256 * 20];
+        reply.extend(vec![0.9; 256 * 20]);
+        reply.extend(vec![0.0; 256 * 60]);
+        h.feed(reply).await;
+        h.wait_for("réponse entendue", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("oui")
+        })
+        .await;
+        assert_eq!(h.follow_ups().len(), 2);
+        assert!(h.follow_ups()[1].1);
+        assert!(!h.tray.borrow().capturing);
     }
 
     #[tokio::test]
