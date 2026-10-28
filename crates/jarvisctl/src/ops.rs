@@ -1,6 +1,8 @@
 //! Logique des sous-commandes de `jarvisctl`.
 
-use crate::paths::{BINARIES, DEFAULT_MODEL, Paths, SERVICE};
+use crate::paths::{
+    BINARIES, DEFAULT_MODEL, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, WHISPER_MODEL,
+};
 use crate::system::{OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
 use std::collections::HashMap;
@@ -95,6 +97,8 @@ fn build(sys: &dyn System, source: &Path) -> Result<()> {
                 "jarvis-cli",
                 "-p",
                 "jarvisctl",
+                "-p",
+                "jarvis-ear",
             ],
             Some(source),
         )
@@ -119,6 +123,44 @@ fn copy_binaries(source: &Path, paths: &Paths, out: &mut dyn Write) -> Result<()
     Ok(())
 }
 
+/// Noms de bibliothèques partagées : `libonnxruntime.so*` couvre les versions numérotées.
+fn is_shared_lib(name: &str) -> bool {
+    SHARED_LIBS.contains(&name) || name.starts_with("libonnxruntime.so")
+}
+
+/// Copie les bibliothèques de sherpa-onnx de `target/release` vers `~/.local/lib/jarvis/`.
+fn copy_libraries(source: &Path, paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    let release = source.join("target/release");
+    let mut libs: Vec<PathBuf> = fs::read_dir(&release)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| is_shared_lib(&e.file_name().to_string_lossy()) && e.path().is_file())
+        .map(|e| e.path())
+        .collect();
+    libs.sort();
+    // jarvis-brain est lié dynamiquement à sherpa-onnx : sans cette bibliothèque, il ne
+    // démarre pas du tout. Mieux vaut échouer ici que d'activer un service cassé.
+    let has_c_api = libs.iter().any(|p| {
+        p.file_name()
+            .is_some_and(|n| n == "libsherpa-onnx-c-api.so")
+    });
+    if !has_c_api {
+        bail!(
+            "libsherpa-onnx-c-api.so introuvable dans {} : le cerveau ne pourrait pas démarrer. \
+             Recompile avec `cargo build --release` (ou relance sans --no-build).",
+            release.display()
+        );
+    }
+    fs::create_dir_all(&paths.lib_dir)?;
+    for from in libs {
+        let to = paths.lib_dir.join(from.file_name().unwrap());
+        copy_atomic(&from, &to)?;
+        writeln!(out, "Installé : {}", to.display())?;
+    }
+    Ok(())
+}
+
 pub fn install(
     paths: &Paths,
     sys: &dyn System,
@@ -130,6 +172,7 @@ pub fn install(
         build(sys, &opts.source)?;
     }
     copy_binaries(&opts.source, paths, out)?;
+    copy_libraries(&opts.source, paths, out)?;
 
     fs::create_dir_all(paths.unit_path.parent().unwrap())?;
     fs::write(&paths.unit_path, brain_unit())?;
@@ -199,6 +242,7 @@ pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()
     writeln!(out, "Compilation (release) dans {}…", source.display())?;
     build(sys, &source)?;
     copy_binaries(&source, paths, out)?;
+    copy_libraries(&source, paths, out)?;
     let r = systemctl(sys, &["restart", SERVICE])?;
     if r.code != 0 {
         bail!("le redémarrage du service a échoué (code {})", r.code);
@@ -231,6 +275,14 @@ pub fn uninstall(
         }
     }
     writeln!(out, "Binaires supprimés de {}.", paths.bin_dir.display())?;
+    if paths.lib_dir.exists() {
+        fs::remove_dir_all(&paths.lib_dir)?;
+        writeln!(
+            out,
+            "Bibliothèques supprimées de {}.",
+            paths.lib_dir.display()
+        )?;
+    }
 
     if purge {
         let dirs = [&paths.config_dir, &paths.state_dir, &paths.data_dir];
@@ -307,6 +359,27 @@ fn api_key_set(paths: &Paths) -> bool {
         .unwrap_or(false)
 }
 
+/// Chemin du modèle `[section] model_path` de la configuration, `~` développé ;
+/// sinon le fichier par défaut dans `~/.local/share/jarvis/models/`.
+fn model_path(paths: &Paths, section: &str, default_file: &str) -> PathBuf {
+    let configured = fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        .and_then(|v| {
+            v.get(section)?
+                .get("model_path")?
+                .as_str()
+                .map(PathBuf::from)
+        });
+    match configured {
+        Some(p) => match p.strip_prefix("~") {
+            Ok(rest) => paths.home.join(rest),
+            Err(_) => p,
+        },
+        None => paths.data_dir.join("models").join(default_file),
+    }
+}
+
 fn local_model(paths: &Paths) -> String {
     fs::read_to_string(&paths.config_file)
         .ok()
@@ -355,10 +428,13 @@ pub fn status(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         writeln!(out, "Service   : inactif ({state}, {})", get("SubState"))?;
     }
 
-    let model = local_model(paths);
+    let mut model = local_model(paths);
     if active {
         match sys.brain_status() {
-            Some((mode, version)) => {
+            Some((mode, version, reported)) => {
+                if !reported.is_empty() {
+                    model = reported;
+                }
                 writeln!(out, "Mode      : {mode} ({model})")?;
                 writeln!(out, "Version   : {version}")?;
             }
@@ -513,7 +589,61 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
             "! Clé API Claude absente — optionnelle (mode en ligne) : `jarvisctl set-api-key`"
         )?;
     }
+    ear_diagnostics(paths, out)?;
     Ok(if failures > 0 { 1 } else { 0 })
+}
+
+/// Oreille du PC : avertissements seulement (le cerveau fonctionne sans).
+fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    let has_lib = |lib: &str| {
+        fs::read_dir(&paths.lib_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n == lib || (lib == "libonnxruntime.so" && n.starts_with("libonnxruntime.so"))
+            })
+    };
+    let missing: Vec<&str> = SHARED_LIBS.into_iter().filter(|l| !has_lib(l)).collect();
+    let items: [(bool, String, String); 5] = [
+        (
+            missing.is_empty(),
+            format!("Bibliothèques sherpa-onnx dans {}", paths.lib_dir.display()),
+            format!(
+                "manquantes : {} ; lancez `jarvisctl install` ou `jarvisctl update`",
+                missing.join(", ")
+            ),
+        ),
+        (
+            model_path(paths, "stt", WHISPER_MODEL).is_file(),
+            "Modèle Whisper".into(),
+            "lancez `scripts/download-models.sh all`".into(),
+        ),
+        (
+            model_path(paths, "speaker", SPEAKER_MODEL).is_file(),
+            "Modèle d'empreinte vocale".into(),
+            "lancez `scripts/download-models.sh speaker`".into(),
+        ),
+        (
+            paths.data_dir.join("wakeword/jarvis.rpw").is_file(),
+            "Mot d'éveil enregistré".into(),
+            "lancez `jarvis-ear enroll`".into(),
+        ),
+        (
+            paths.data_dir.join("voiceprint/charles.json").is_file(),
+            "Empreinte vocale enregistrée".into(),
+            "lancez `jarvis-ear enroll`".into(),
+        ),
+    ];
+    for (ok, label, hint) in items {
+        if ok {
+            writeln!(out, "✓ {label}")?;
+        } else {
+            writeln!(out, "! {label} absent — optionnel (oreille du PC) : {hint}")?;
+        }
+    }
+    Ok(())
 }
 
 /// Écrit ou remplace la ligne `ANTHROPIC_API_KEY=` ; ne l'affiche jamais.
@@ -567,7 +697,7 @@ mod tests {
         cmds: RefCell<Vec<String>>,
         replies: HashMap<String, (i32, String)>,
         http: HashMap<String, String>,
-        brain: Option<(Mode, String)>,
+        brain: Option<(Mode, String, String)>,
         path: Option<String>,
     }
 
@@ -591,7 +721,7 @@ mod tests {
         fn http_get(&self, _: &str, path: &str) -> Option<String> {
             self.http.get(path).cloned()
         }
-        fn brain_status(&self) -> Option<(Mode, String)> {
+        fn brain_status(&self) -> Option<(Mode, String, String)> {
             self.brain.clone()
         }
         fn env_var(&self, _: &str) -> Option<String> {
@@ -612,6 +742,15 @@ mod tests {
         for b in BINARIES {
             fs::write(rel.join(b), format!("bin {b}")).unwrap();
         }
+        for lib in [
+            "libsherpa-onnx-c-api.so",
+            "libsherpa-onnx-cxx-api.so",
+            "libonnxruntime.so",
+            "libonnxruntime.so.1.23.2",
+        ] {
+            fs::write(rel.join(lib), format!("lib {lib}")).unwrap();
+        }
+        fs::write(rel.join("libautre.so"), "pas à copier").unwrap();
         src
     }
 
@@ -819,7 +958,7 @@ mod tests {
             "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp".into(),
             (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n".into()),
         );
-        sys.brain = Some((Mode::Local, "0.1.0".into()));
+        sys.brain = Some((Mode::Local, "0.1.0".into(), String::new()));
         sys.http.insert("/api/version".into(), "{}".into());
         sys.http.insert(
             "/api/ps".into(),
@@ -844,5 +983,136 @@ mod tests {
         assert!(o.contains("! Clé API Claude absente"), "{o}");
         assert!(o.contains("✓ Binaires dans"), "{o}");
         assert!(o.contains("✗ Ollama joignable"), "{o}");
+    }
+
+    #[test]
+    fn install_copie_les_bibliotheques_sherpa() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        for lib in [
+            "libsherpa-onnx-c-api.so",
+            "libsherpa-onnx-cxx-api.so",
+            "libonnxruntime.so",
+            "libonnxruntime.so.1.23.2",
+        ] {
+            let p = paths.lib_dir.join(lib);
+            assert_eq!(fs::read_to_string(&p).unwrap(), format!("lib {lib}"));
+            assert_eq!(mode_of(&p), 0o755);
+        }
+        assert!(!paths.lib_dir.join("libautre.so").exists());
+        // Aucun fichier temporaire ne reste.
+        assert_eq!(fs::read_dir(&paths.lib_dir).unwrap().count(), 4);
+        assert!(paths.lib_dir.ends_with(".local/lib/jarvis"));
+    }
+
+    #[test]
+    fn install_refuse_sans_bibliotheque_sherpa() {
+        let (home, paths) = setup();
+        let src = fake_source(home.path());
+        fs::remove_file(src.join("target/release/libsherpa-onnx-c-api.so")).unwrap();
+        let err = copy_libraries(&src, &paths, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("libsherpa-onnx-c-api.so"), "{err}");
+    }
+
+    #[test]
+    fn update_recopie_les_bibliotheques() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        let src = home.path().join("src/target/release");
+        fs::write(src.join("libonnxruntime.so"), "nouvelle version").unwrap();
+        update(&paths, &sys, &mut Vec::new()).unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.lib_dir.join("libonnxruntime.so")).unwrap(),
+            "nouvelle version"
+        );
+    }
+
+    #[test]
+    fn uninstall_supprime_les_bibliotheques() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        assert!(paths.lib_dir.is_dir());
+        uninstall(
+            &paths,
+            &sys,
+            false,
+            false,
+            &mut io::BufReader::new(io::empty()),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(!paths.lib_dir.exists());
+    }
+
+    #[test]
+    fn doctor_avertit_pour_l_oreille_sans_echec() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        // Rien d'installé côté oreille : seulement des avertissements.
+        let mut out = Vec::new();
+        let sans_oreille = doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        for attendu in [
+            "! Bibliothèques sherpa-onnx",
+            "! Modèle Whisper absent",
+            "! Modèle d'empreinte vocale absent",
+            "! Mot d'éveil enregistré absent",
+            "! Empreinte vocale enregistrée absent",
+        ] {
+            assert!(o.contains(attendu), "{attendu}\n{o}");
+        }
+        // Tout est présent : cases cochées, et le code de sortie ne change pas.
+        do_install(home.path(), &paths, &sys);
+        let models = paths.data_dir.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join(WHISPER_MODEL), "").unwrap();
+        fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        fs::create_dir_all(paths.data_dir.join("wakeword")).unwrap();
+        fs::write(paths.data_dir.join("wakeword/jarvis.rpw"), "").unwrap();
+        fs::create_dir_all(paths.data_dir.join("voiceprint")).unwrap();
+        fs::write(paths.data_dir.join("voiceprint/charles.json"), "{}").unwrap();
+        let mut out = Vec::new();
+        let complet = doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        for attendu in [
+            "✓ Bibliothèques sherpa-onnx",
+            "✓ Modèle Whisper",
+            "✓ Modèle d'empreinte vocale",
+            "✓ Mot d'éveil enregistré",
+            "✓ Empreinte vocale enregistrée",
+        ] {
+            assert!(o.contains(attendu), "{attendu}\n{o}");
+        }
+        assert_eq!(sans_oreille, 1);
+        assert_eq!(
+            complet, 1,
+            "échec Ollama inchangé, aucune dépendance à l'oreille"
+        );
+    }
+
+    #[test]
+    fn doctor_suit_les_chemins_de_modeles_configures() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        fs::create_dir_all(home.path().join("ailleurs")).unwrap();
+        fs::write(home.path().join("ailleurs/whisper.bin"), "").unwrap();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.config_file,
+            "[stt]\nmodel_path = \"~/ailleurs/whisper.bin\"\n\n[speaker]\nmodel_path = \"/inexistant/voix.onnx\"\n",
+        )
+        .unwrap();
+        // Le modèle par défaut existe, mais la configuration pointe ailleurs.
+        let models = paths.data_dir.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        let mut out = Vec::new();
+        doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert!(o.contains("✓ Modèle Whisper"), "{o}");
+        assert!(o.contains("! Modèle d'empreinte vocale absent"), "{o}");
     }
 }

@@ -1,7 +1,9 @@
 //! Doublures de test partagées (`FakeLlm`, `FakeSkill`).
 
+use crate::ducking::Ducker;
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
+use crate::stt::Transcriber;
 use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,4 +115,90 @@ impl Skill for FakeSkill {
 /// Raccourci pour les tests : intention `Tool` sans arguments.
 pub fn tool_understanding(tool: &str) -> Understanding {
     Understanding::Tool(Intent::new(tool, serde_json::json!({})))
+}
+
+/// Transcripteur factice : texte programmé (ou échec), compte ses appels.
+pub struct FakeTranscriber {
+    text: Option<String>,
+    calls: AtomicUsize,
+}
+
+impl FakeTranscriber {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Transcripteur qui échoue à chaque appel.
+    pub fn failing() -> Self {
+        Self {
+            text: None,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl Transcriber for FakeTranscriber {
+    async fn transcribe(&self, _audio: &[f32]) -> anyhow::Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.text
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("transcription factice en échec"))
+    }
+}
+
+/// Baisse de son factice : enregistre les appels `duck` / `restore`.
+#[derive(Default)]
+pub struct FakeDucker {
+    events: Mutex<Vec<&'static str>>,
+}
+
+impl FakeDucker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appels dans l'ordre : `"duck"` ou `"restore"`.
+    pub fn events(&self) -> Vec<&'static str> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Ducker for FakeDucker {
+    async fn duck(&self) {
+        self.events.lock().unwrap().push("duck");
+    }
+
+    async fn restore(&self) {
+        self.events.lock().unwrap().push("restore");
+    }
+}
+
+/// Vérificateur de locuteur factice : l'empreinte renvoyée est `vectors[audio[0]]`.
+pub struct FakeVerifier {
+    vectors: Vec<Vec<f32>>,
+}
+
+impl FakeVerifier {
+    pub fn new(vectors: Vec<Vec<f32>>) -> Self {
+        Self { vectors }
+    }
+}
+
+impl crate::speaker::SpeakerVerifier for FakeVerifier {
+    fn embed(&self, audio: &[f32]) -> anyhow::Result<Vec<f32>> {
+        let id = audio.first().copied().unwrap_or(0.0) as usize;
+        self.vectors
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("empreinte factice inconnue"))
+    }
 }

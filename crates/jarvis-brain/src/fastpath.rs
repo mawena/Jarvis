@@ -1,6 +1,7 @@
 //! Raccourcis rapides : phrases courantes reconnues sans IA.
 
 use crate::intent::Intent;
+use jarvis_protocol::EarAction;
 use serde_json::json;
 
 fn strip_accent(c: char) -> char {
@@ -214,9 +215,44 @@ pub fn match_fast(text: &str) -> Option<Intent> {
         .or_else(|| launch(&phrase))
 }
 
+/// Commandes d'écoute (couper ou réactiver le micro), après `normalize`.
+pub fn match_ear_command(text: &str) -> Option<EarAction> {
+    match normalize(text).as_str() {
+        "coupe l ecoute" | "coupe le micro" | "arrete d ecouter" | "mute" => Some(EarAction::Mute),
+        "reactive l ecoute" | "reactive le micro" | "reprends l ecoute" | "ecoute a nouveau" => {
+            Some(EarAction::Unmute)
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commandes_ecoute_reconnues() {
+        for t in [
+            "coupe l'écoute",
+            "Coupe le micro !",
+            "arrête d'écouter",
+            "mute",
+            "Jarvis, coupe l'écoute.",
+        ] {
+            assert_eq!(match_ear_command(t), Some(EarAction::Mute), "{t}");
+        }
+        for t in [
+            "réactive l'écoute",
+            "réactive le micro",
+            "reprends l'écoute",
+            "écoute à nouveau",
+            "Jarvis, réactive l'écoute s'il te plaît",
+        ] {
+            assert_eq!(match_ear_command(t), Some(EarAction::Unmute), "{t}");
+        }
+        assert_eq!(match_ear_command("chanson suivante"), None);
+        assert_eq!(match_ear_command(""), None);
+    }
     use serde_json::json;
 
     fn intent(tool: &str, args: serde_json::Value) -> Option<Intent> {

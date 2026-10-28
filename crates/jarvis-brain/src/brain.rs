@@ -20,6 +20,7 @@ pub struct Brain {
     online: Arc<dyn LlmBackend>,
     modes: Arc<ModeStore>,
     skill_timeout: Duration,
+    local_model: String,
 }
 
 /// Résultat d'un appel de compétence.
@@ -43,7 +44,18 @@ impl Brain {
             online,
             modes,
             skill_timeout: SKILL_TIMEOUT,
+            local_model: String::new(),
         }
+    }
+
+    /// Nom du modèle local, affiché par `Status`.
+    pub fn with_local_model(mut self, model: impl Into<String>) -> Brain {
+        self.local_model = model.into();
+        self
+    }
+
+    pub fn local_model(&self) -> &str {
+        &self.local_model
     }
 
     /// Change le délai maximal d'un appel de compétence (tests).
@@ -102,6 +114,16 @@ impl Brain {
             Ok(Understanding::Answer(a)) => Reply::new(a),
             Err(e) => Reply::new(llm_error_phrase(&e, mode)),
         }
+    }
+
+    /// Raccourcis seuls, sans jamais consulter l'IA. `None` : aucun raccourci reconnu.
+    pub async fn handle_fast(&self, text: &str) -> Option<Reply> {
+        let intent = match_fast(text)?;
+        info!(phrase = %text, "phrase reçue (raccourci seul)");
+        Some(match self.run_intent(intent).await {
+            Outcome::Reply(r) => r,
+            Outcome::NotFound(m) => Reply::new(m),
+        })
     }
 
     async fn run_intent(&self, intent: Intent) -> Outcome {
@@ -207,6 +229,27 @@ mod tests {
         let r = s.brain.handle_text("suivant").await;
         assert_eq!(r.speech, "ok");
         assert_eq!(s.skill.calls()[0].0, "media_next");
+        assert_eq!(s.local.calls() + s.online.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn raccourci_seul_n_appelle_jamais_l_ia() {
+        let s = setup(answer("x"), answer("y"));
+        assert_eq!(s.brain.handle_fast("suivant").await.unwrap().speech, "ok");
+        assert!(s.brain.handle_fast("quel temps fait-il").await.is_none());
+        // Cible introuvable : le message est dit, sans repli sur l'IA.
+        let skill = FakeSkill::new(&["media_next"])
+            .with_result(Err(SkillError::NotFound("Aucun lecteur.".into())));
+        let brain = Brain::new(
+            vec![Arc::new(skill)],
+            s.local.clone(),
+            s.online.clone(),
+            Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
+        );
+        assert_eq!(
+            brain.handle_fast("suivant").await.unwrap().speech,
+            "Aucun lecteur."
+        );
         assert_eq!(s.local.calls() + s.online.calls(), 0);
     }
 
