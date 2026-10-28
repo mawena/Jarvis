@@ -19,6 +19,9 @@ use crate::tray::{BrainLink, TrayCommand, TrayState};
 /// Période d'interrogation du statut du cerveau.
 pub const STATUS_PERIOD: Duration = Duration::from_secs(5);
 
+/// Délai maximal de chaque requête envoyée en quittant.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Liaison avec le cerveau (remplaçable dans les tests).
 #[async_trait::async_trait]
 pub trait Brain: Send + Sync + 'static {
@@ -147,7 +150,32 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             self.publish();
         }
         self.capture.stop();
+        self.restore_on_quit().await;
         Ok(())
+    }
+
+    /// Quitter pendant une capture : la musique avait été baissée au réveil. On attend le
+    /// `Wake`, puis on envoie un `Listen` vide et on attend la réponse (une tâche
+    /// détachée mourrait avec le runtime).
+    async fn restore_on_quit(&mut self) {
+        if !self.capturing {
+            return;
+        }
+        self.capturing = false;
+        if let Some(wake) = self.pending_wake.take()
+            && tokio::time::timeout(QUIT_TIMEOUT, wake).await.is_err()
+        {
+            tracing::warn!("réveil toujours en cours en quittant");
+        }
+        let listen = ControlRequest::Listen {
+            audio: String::new(),
+            muted: self.muted,
+        };
+        match tokio::time::timeout(QUIT_TIMEOUT, self.brain.request(listen)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("musique non rétablie en quittant : {e}"),
+            Err(_) => tracing::warn!("le cerveau ne répond pas en quittant"),
+        }
     }
 
     fn on_capture(&mut self, event: CaptureEvent) {
@@ -748,6 +776,52 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(h.listens(), vec![false]);
         assert!(!h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
+    async fn quitter_pendant_la_capture_retablit_la_musique() {
+        let h = harness_one_wake();
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        // Réveil seul : la capture est en cours.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("capture en cours", |h| h.tray.borrow().capturing)
+            .await;
+        h.commands.send(TrayCommand::Quit).unwrap();
+        let brain = h.brain.clone();
+        h.task.await.unwrap().unwrap();
+        // Le `Listen` vide est parti avant la fin de `run`, pas dans une tâche détachée.
+        let sent: Vec<ControlRequest> = brain
+            .requests
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .filter(|r| !matches!(r, ControlRequest::Status))
+            .collect();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent[0], ControlRequest::Wake);
+        assert!(matches!(
+            &sent[1],
+            ControlRequest::Listen { muted: false, audio } if audio.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn quitter_hors_capture_n_envoie_pas_de_listen() {
+        let h = harness_one_wake();
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.commands.send(TrayCommand::Quit).unwrap();
+        let brain = h.brain.clone();
+        h.task.await.unwrap().unwrap();
+        let requests = brain.requests.lock().unwrap().clone();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, ControlRequest::Listen { .. })),
+            "{requests:?}"
+        );
     }
 
     #[tokio::test]
