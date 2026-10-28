@@ -62,7 +62,7 @@ impl Skill for AppsSkill {
         let LaunchArgs { name } =
             serde_json::from_value(args).map_err(|e| SkillError::BadArgs(e.to_string()))?;
         let Some(app) = self.index.find(&name, &self.aliases) else {
-            return Ok(Reply::new(format!(
+            return Err(SkillError::NotFound(format!(
                 "Je ne trouve pas l'application {name}."
             )));
         };
@@ -156,11 +156,14 @@ mod tests {
     #[tokio::test]
     async fn appli_introuvable() {
         let runner = Arc::new(FakeRunner::new());
-        let r = skill(runner.clone())
+        let err = skill(runner.clone())
             .call("app_launch", serde_json::json!({"name": "zorglub"}))
             .await
-            .unwrap();
-        assert_eq!(r.speech, "Je ne trouve pas l'application zorglub.");
+            .unwrap_err();
+        assert!(
+            matches!(&err, SkillError::NotFound(m) if m == "Je ne trouve pas l'application zorglub."),
+            "{err:?}"
+        );
         assert!(runner.calls().is_empty());
     }
 

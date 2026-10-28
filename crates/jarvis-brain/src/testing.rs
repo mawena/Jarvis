@@ -38,6 +38,7 @@ impl LlmBackend for FakeLlm {
             Err(LlmError::Unreachable(m)) => Err(LlmError::Unreachable(m.clone())),
             Err(LlmError::BadResponse(m)) => Err(LlmError::BadResponse(m.clone())),
             Err(LlmError::MissingApiKey(m)) => Err(LlmError::MissingApiKey(m.clone())),
+            Err(LlmError::Rejected(m)) => Err(LlmError::Rejected(m.clone())),
         }
     }
 }
@@ -47,6 +48,7 @@ pub struct FakeSkill {
     tool_names: Vec<String>,
     calls: Mutex<Vec<(String, serde_json::Value)>>,
     result: Mutex<Result<Reply, SkillError>>,
+    delay: std::time::Duration,
 }
 
 impl FakeSkill {
@@ -55,11 +57,18 @@ impl FakeSkill {
             tool_names: tool_names.iter().map(|s| s.to_string()).collect(),
             calls: Mutex::new(Vec::new()),
             result: Mutex::new(Ok(Reply::new("ok"))),
+            delay: std::time::Duration::ZERO,
         }
     }
 
     pub fn with_result(self, result: Result<Reply, SkillError>) -> Self {
         *self.result.lock().unwrap() = result;
+        self
+    }
+
+    /// Délai artificiel avant chaque réponse (tests de délai).
+    pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = delay;
         self
     }
 
@@ -84,10 +93,14 @@ impl Skill for FakeSkill {
 
     async fn call(&self, tool: &str, args: serde_json::Value) -> Result<Reply, SkillError> {
         self.calls.lock().unwrap().push((tool.to_string(), args));
+        if !self.delay.is_zero() {
+            tokio::time::sleep(self.delay).await;
+        }
         match &*self.result.lock().unwrap() {
             Ok(r) => Ok(r.clone()),
             Err(SkillError::UnknownTool(m)) => Err(SkillError::UnknownTool(m.clone())),
             Err(SkillError::BadArgs(m)) => Err(SkillError::BadArgs(m.clone())),
+            Err(SkillError::NotFound(m)) => Err(SkillError::NotFound(m.clone())),
             Err(SkillError::Failed(m)) => Err(SkillError::Failed(m.clone())),
         }
     }

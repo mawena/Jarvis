@@ -69,10 +69,18 @@ pub struct AppsConfig {
 impl Default for AppsConfig {
     fn default() -> Self {
         Self {
-            aliases: HashMap::from([
-                ("vs code".to_string(), "code".to_string()),
-                ("vscode".to_string(), "code".to_string()),
-            ]),
+            aliases: HashMap::from_iter(
+                [
+                    ("vs code", "com.microsoft.VSCode"),
+                    ("vscode", "com.microsoft.VSCode"),
+                    ("navigateur", "firefox_firefox"),
+                    ("fichiers", "org.gnome.Nautilus"),
+                    ("terminal", "org.gnome.Terminal"),
+                    ("calculatrice", "org.gnome.Calculator"),
+                    ("parametres", "org.gnome.Settings"),
+                ]
+                .map(|(k, v)| (k.to_string(), v.to_string())),
+            ),
         }
     }
 }
@@ -152,7 +160,15 @@ mod tests {
         let (_d, p) = write("[apps.aliases]\nmusique = \"spotify\"\n");
         let c = Config::load(&p).unwrap();
         assert_eq!(c.apps.aliases.get("musique").unwrap(), "spotify");
-        assert_eq!(c.apps.aliases.get("vs code").unwrap(), "code");
+        assert_eq!(
+            c.apps.aliases.get("vs code").unwrap(),
+            "com.microsoft.VSCode"
+        );
+        assert_eq!(c.apps.aliases.get("navigateur").unwrap(), "firefox_firefox");
+        assert_eq!(
+            c.apps.aliases.get("terminal").unwrap(),
+            "org.gnome.Terminal"
+        );
     }
 
     #[test]

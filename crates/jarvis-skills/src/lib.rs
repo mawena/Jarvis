@@ -46,6 +46,9 @@ pub enum SkillError {
     UnknownTool(String),
     #[error("arguments invalides : {0}")]
     BadArgs(String),
+    /// Cible introuvable ; le message est prêt à être dit.
+    #[error("{0}")]
+    NotFound(String),
     #[error("échec : {0}")]
     Failed(String),
 }
