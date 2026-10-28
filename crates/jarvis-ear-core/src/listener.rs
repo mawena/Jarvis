@@ -158,15 +158,19 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct FakeWake {
-        at_frame: usize,
+        at_frames: Vec<usize>,
         frame: usize,
         calls: Arc<AtomicUsize>,
     }
     impl FakeWake {
         fn new(at_frame: usize) -> (Self, Arc<AtomicUsize>) {
+            Self::multi(vec![at_frame])
+        }
+        /// Se déclenche à chacun des numéros d'appel `process` indiqués.
+        fn multi(at_frames: Vec<usize>) -> (Self, Arc<AtomicUsize>) {
             let calls = Arc::new(AtomicUsize::new(0));
             let w = Self {
-                at_frame,
+                at_frames,
                 frame: 0,
                 calls: calls.clone(),
             };
@@ -180,18 +184,23 @@ mod tests {
         fn process(&mut self, _: &[f32]) -> Option<f32> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.frame += 1;
-            (self.frame == self.at_frame).then_some(0.9)
+            self.at_frames.contains(&self.frame).then_some(0.9)
         }
     }
 
     /// VAD piloté par une table : parole pour les trames dans `speech`.
     struct FakeVad {
         speech: std::ops::Range<usize>,
+        speech2: std::ops::Range<usize>,
         frame: usize,
     }
     impl FakeVad {
         fn new(speech: std::ops::Range<usize>) -> Self {
-            Self { speech, frame: 0 }
+            Self {
+                speech,
+                speech2: 0..0,
+                frame: 0,
+            }
         }
     }
     impl Vad for FakeVad {
@@ -199,7 +208,7 @@ mod tests {
             256
         }
         fn is_speech(&mut self, _: &[f32]) -> bool {
-            let r = self.speech.contains(&self.frame);
+            let r = self.speech.contains(&self.frame) || self.speech2.contains(&self.frame);
             self.frame += 1;
             r
         }
@@ -254,10 +263,46 @@ mod tests {
         let (w, _) = FakeWake::new(10);
         let mut l = Listener::new(w, FakeVad::new(0..10_000));
         let ev = run(&mut l, &ramp(1_600 + 170_000));
+        assert_eq!(ev[0], ListenEvent::Wake { score: 0.9 });
         let ListenEvent::Utterance(u) = &ev[1] else {
             panic!("{ev:?}")
         };
         assert_eq!(u.len(), 1_600 + 160_000);
+        assert_eq!(ev.len(), 2);
+    }
+
+    #[test]
+    fn second_reveil() {
+        // Deuxième réveil 10 trames après la fin de la première capture.
+        let (w, _) = FakeWake::multi(vec![10, 20]);
+        let mut vad = FakeVad::new(32..95);
+        vad.speech2 = 160..190;
+        let mut l = Listener::new(w, vad);
+        let sig = ramp(1_600 + 37_120 + 1_600 + 70_000);
+        let ev = run(&mut l, &sig);
+        assert_eq!(ev.len(), 4, "{ev:?}");
+        assert_eq!(ev[0], ListenEvent::Wake { score: 0.9 });
+        assert!(matches!(ev[1], ListenEvent::Utterance(_)));
+        assert_eq!(ev[2], ListenEvent::Wake { score: 0.9 });
+        let ListenEvent::Utterance(u) = &ev[3] else {
+            panic!("{ev:?}")
+        };
+        // L'anneau a été vidé : seules les 10 trames d'attente précèdent le réveil.
+        assert_eq!(u[0], sig[38_720]);
+        assert_eq!(u.len(), 1_600 + (15 + 30 + 50) * 256);
+    }
+
+    #[test]
+    fn independant_du_decoupage() {
+        let sig = ramp(24_000 + 40_000);
+        let make = || {
+            let (w, _) = FakeWake::new(150);
+            Listener::new(w, FakeVad::new(32..95))
+        };
+        let by_chunks = run(&mut make(), &sig);
+        let whole = make().push(&sig);
+        assert_eq!(by_chunks, whole);
+        assert_eq!(whole.len(), 2);
     }
 
     #[test]
