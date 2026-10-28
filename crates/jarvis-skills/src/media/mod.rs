@@ -47,6 +47,19 @@ pub struct MediaSkill {
 }
 
 const NO_PLAYER: &str = "Aucun lecteur n'est ouvert.";
+const NO_ACCESSIBLE_PLAYER: &str =
+    "Je ne vois aucun lecteur accessible. Les vidéos de Firefox (snap) ne me sont pas visibles.";
+
+/// X11 media key GNOME handles for each command (used when no MPRIS player
+/// is reachable, e.g. a snap Firefox confined by AppArmor).
+fn media_key(cmd: PlayerCommand) -> &'static str {
+    match cmd {
+        PlayerCommand::Play => "XF86AudioPlay",
+        PlayerCommand::Pause => "XF86AudioPause",
+        PlayerCommand::Next => "XF86AudioNext",
+        PlayerCommand::Previous => "XF86AudioPrev",
+    }
+}
 
 impl MediaSkill {
     pub fn new(players: Arc<dyn MediaPlayers>, runner: Arc<dyn CommandRunner>) -> Self {
@@ -66,20 +79,53 @@ impl MediaSkill {
             .or_else(|| list.first().cloned()))
     }
 
+    /// Send the media key through xdotool; `NO_PLAYER` if that fails.
+    fn send_media_key(&self, cmd: PlayerCommand) -> Reply {
+        let args = ["key", media_key(cmd)].map(String::from);
+        match self.runner.run("xdotool", &args) {
+            Ok(out) if out.success => Reply::new(""),
+            Ok(_) => {
+                tracing::warn!("xdotool a échoué pour {}", media_key(cmd));
+                Reply::new(NO_PLAYER)
+            }
+            Err(e) => {
+                tracing::warn!("xdotool indisponible : {e}");
+                Reply::new(NO_PLAYER)
+            }
+        }
+    }
+
     async fn send(&self, cmd: PlayerCommand) -> Result<Reply, SkillError> {
         let Some(player) = self.target().await? else {
-            return Ok(Reply::new(NO_PLAYER));
+            return Ok(self.send_media_key(cmd));
         };
-        self.players
-            .command(&player.bus_name, cmd)
-            .await
-            .map_err(|e| SkillError::Failed(format!("commande à {} : {e}", player.identity)))?;
+        let already = match cmd {
+            PlayerCommand::Play => player.status == PlaybackStatus::Playing,
+            PlayerCommand::Pause => player.status != PlaybackStatus::Playing,
+            _ => false,
+        };
+        if already {
+            return Ok(Reply::new(""));
+        }
+        if let Err(e) = self.players.command(&player.bus_name, cmd).await {
+            tracing::warn!(player = %player.bus_name, "commande {cmd:?} refusée : {e:#}");
+            let who = if player.identity.is_empty() {
+                player
+                    .bus_name
+                    .trim_start_matches("org.mpris.MediaPlayer2.")
+            } else {
+                &player.identity
+            };
+            return Ok(Reply::new(format!(
+                "Le lecteur {who} n'a pas accepté la commande."
+            )));
+        }
         Ok(Reply::new(""))
     }
 
     async fn now_playing(&self) -> Result<Reply, SkillError> {
         let Some(p) = self.target().await? else {
-            return Ok(Reply::new(NO_PLAYER));
+            return Ok(Reply::new(NO_ACCESSIBLE_PLAYER));
         };
         Ok(Reply::new(match (p.title, p.artist) {
             (Some(title), Some(artist)) => format!("C'est {title} de {artist}."),
@@ -234,7 +280,14 @@ mod tests {
 
     #[tokio::test]
     async fn sans_lecteur_reponse_claire() {
-        let (s, p, _) = skill(vec![]);
+        let (s, p, runner) = skill(vec![]);
+        runner.respond(
+            "xdotool",
+            crate::CommandOutput {
+                success: false,
+                stdout: String::new(),
+            },
+        );
         let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
         assert_eq!(r.speech, "Aucun lecteur n'est ouvert.");
         assert!(p.sent.lock().unwrap().is_empty());
@@ -277,5 +330,92 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(e, SkillError::UnknownTool(_)));
+    }
+
+    fn xdotool(key: &str) -> (String, Vec<String>) {
+        (
+            "xdotool".to_string(),
+            vec!["key".to_string(), key.to_string()],
+        )
+    }
+
+    #[tokio::test]
+    async fn touches_multimedia_sans_lecteur() {
+        for (tool, key) in [
+            ("media_next", "XF86AudioNext"),
+            ("media_previous", "XF86AudioPrev"),
+            ("media_play", "XF86AudioPlay"),
+            ("media_pause", "XF86AudioPause"),
+        ] {
+            let (s, _, runner) = skill(vec![]);
+            let r = s.call(tool, serde_json::json!({})).await.unwrap();
+            assert_eq!(r.speech, "");
+            assert_eq!(runner.calls(), vec![xdotool(key)]);
+        }
+    }
+
+    #[tokio::test]
+    async fn sans_lecteur_ni_xdotool() {
+        let (s, _, runner) = skill(vec![]);
+        runner.respond(
+            "xdotool",
+            crate::CommandOutput {
+                success: false,
+                stdout: String::new(),
+            },
+        );
+        let r = s.call("media_next", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.speech, "Aucun lecteur n'est ouvert.");
+    }
+
+    #[tokio::test]
+    async fn deja_en_lecture_pas_de_commande() {
+        let (s, p, runner) = skill(vec![player("vlc", PlaybackStatus::Playing)]);
+        let r = s.call("media_play", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.speech, "");
+        assert!(p.sent.lock().unwrap().is_empty());
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn deja_en_pause_pas_de_commande() {
+        for st in [PlaybackStatus::Paused, PlaybackStatus::Stopped] {
+            let (s, p, _) = skill(vec![player("vlc", st)]);
+            let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+            assert_eq!(r.speech, "");
+            assert!(p.sent.lock().unwrap().is_empty());
+        }
+    }
+
+    struct FailingPlayers(PlayerInfo);
+
+    #[async_trait::async_trait]
+    impl MediaPlayers for FailingPlayers {
+        async fn players(&self) -> anyhow::Result<Vec<PlayerInfo>> {
+            Ok(vec![self.0.clone()])
+        }
+        async fn command(&self, _: &str, _: PlayerCommand) -> anyhow::Result<()> {
+            Err(anyhow::anyhow!("Access denied org.mpris"))
+        }
+    }
+
+    #[tokio::test]
+    async fn erreur_lecteur_phrase_courte() {
+        let mut info = player("firefox.instance_1_154", PlaybackStatus::Playing);
+        info.identity = "Firefox".into();
+        let s = MediaSkill::new(Arc::new(FailingPlayers(info)), Arc::new(FakeRunner::new()));
+        let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.speech, "Le lecteur Firefox n'a pas accepté la commande.");
+        assert!(!r.speech.contains("denied"));
+    }
+
+    #[tokio::test]
+    async fn quoi_qui_passe_sans_lecteur_accessible() {
+        let (s, _, _) = skill(vec![]);
+        let r = s
+            .call("media_now_playing", serde_json::json!({}))
+            .await
+            .unwrap();
+        assert!(r.speech.starts_with("Je ne vois aucun lecteur accessible."));
     }
 }
