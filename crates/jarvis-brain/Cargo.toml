@@ -7,6 +7,9 @@ edition.workspace = true
 name = "jarvis-brain"
 path = "src/main.rs"
 
+[features]
+test-util = ["jarvis-skills/test-util"]
+
 [dependencies]
 jarvis-protocol.workspace = true
 jarvis-skills.workspace = true
