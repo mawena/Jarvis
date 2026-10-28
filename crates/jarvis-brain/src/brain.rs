@@ -20,6 +20,7 @@ pub struct Brain {
     online: Arc<dyn LlmBackend>,
     modes: Arc<ModeStore>,
     skill_timeout: Duration,
+    local_model: String,
 }
 
 /// Résultat d'un appel de compétence.
@@ -43,7 +44,18 @@ impl Brain {
             online,
             modes,
             skill_timeout: SKILL_TIMEOUT,
+            local_model: String::new(),
         }
+    }
+
+    /// Nom du modèle local, affiché par `Status`.
+    pub fn with_local_model(mut self, model: impl Into<String>) -> Brain {
+        self.local_model = model.into();
+        self
+    }
+
+    pub fn local_model(&self) -> &str {
+        &self.local_model
     }
 
     /// Change le délai maximal d'un appel de compétence (tests).

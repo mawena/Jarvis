@@ -50,17 +50,81 @@ impl FromStr for Mode {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
-    Say { text: String },
+    Say {
+        text: String,
+    },
     Status,
-    SetMode { mode: Mode },
+    SetMode {
+        mode: Mode,
+    },
+    /// « Jarvis » entendu : le cerveau baisse le son.
+    Wake,
+    /// Phrase captée : `audio` = i16 little-endian 16 kHz mono en base64 (vide si rien
+    /// n'a été dit). Rétablit toujours le son.
+    Listen {
+        audio: String,
+        muted: bool,
+    },
+}
+
+/// Action demandée à l'oreille après une phrase entendue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EarAction {
+    Mute,
+    Unmute,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlResponse {
-    Reply { speech: String },
-    Status { mode: Mode, version: String },
-    Error { message: String },
+    Reply {
+        speech: String,
+    },
+    Status {
+        mode: Mode,
+        version: String,
+        #[serde(default)]
+        local_model: String,
+    },
+    Heard {
+        text: String,
+        speech: String,
+        ear_action: Option<EarAction>,
+    },
+    Error {
+        message: String,
+    },
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtocolError {
+    #[error("audio base64 invalide : {0}")]
+    Base64(#[from] base64::DecodeError),
+    #[error("audio de longueur impaire")]
+    OddLength,
+}
+
+/// Encode des échantillons i16 (little-endian) en base64 standard.
+pub fn encode_pcm(samples: &[i16]) -> String {
+    use base64::Engine;
+    let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Inverse de [`encode_pcm`].
+pub fn decode_pcm(b64: &str) -> Result<Vec<i16>, ProtocolError> {
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(b64)?;
+    if bytes.len() % 2 != 0 {
+        return Err(ProtocolError::OddLength);
+    }
+    Ok(bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|c| i16::from_le_bytes(*c))
+        .collect())
 }
 
 /// Chemin du socket de contrôle du cerveau.
@@ -109,6 +173,7 @@ mod tests {
             ControlResponse::Status {
                 mode: Mode::Local,
                 version: "0.1.0".into(),
+                local_model: "llama3.2:3b".into(),
             },
             ControlResponse::Error {
                 message: "Erreur.".into(),
@@ -118,6 +183,60 @@ mod tests {
             let json = serde_json::to_string(&r).unwrap();
             assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
         }
+    }
+
+    #[test]
+    fn wake_serialise() {
+        let json = serde_json::to_string(&ControlRequest::Wake).unwrap();
+        assert_eq!(json, r#"{"type":"wake"}"#);
+    }
+
+    #[test]
+    fn listen_aller_retour() {
+        let r = ControlRequest::Listen {
+            audio: encode_pcm(&[1, 2, 3]),
+            muted: true,
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn heard_avec_action() {
+        let r = ControlResponse::Heard {
+            text: "coupe l'écoute".into(),
+            speech: "D'accord.".into(),
+            ear_action: Some(EarAction::Mute),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""ear_action":"mute""#), "{json}");
+        assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn status_sans_local_model_reste_lisible() {
+        let r: ControlResponse =
+            serde_json::from_str(r#"{"type":"status","mode":"local","version":"0.1.0"}"#).unwrap();
+        assert_eq!(
+            r,
+            ControlResponse::Status {
+                mode: Mode::Local,
+                version: "0.1.0".into(),
+                local_model: String::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn pcm_aller_retour() {
+        let samples = [0, 1, -1, i16::MAX, i16::MIN];
+        assert_eq!(decode_pcm(&encode_pcm(&samples)).unwrap(), samples);
+        assert_eq!(decode_pcm("").unwrap(), Vec::<i16>::new());
+    }
+
+    #[test]
+    fn pcm_base64_invalide() {
+        assert!(decode_pcm("!!pas du base64!!").is_err());
     }
 
     #[test]

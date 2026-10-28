@@ -355,10 +355,13 @@ pub fn status(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         writeln!(out, "Service   : inactif ({state}, {})", get("SubState"))?;
     }
 
-    let model = local_model(paths);
+    let mut model = local_model(paths);
     if active {
         match sys.brain_status() {
-            Some((mode, version)) => {
+            Some((mode, version, reported)) => {
+                if !reported.is_empty() {
+                    model = reported;
+                }
                 writeln!(out, "Mode      : {mode} ({model})")?;
                 writeln!(out, "Version   : {version}")?;
             }
@@ -567,7 +570,7 @@ mod tests {
         cmds: RefCell<Vec<String>>,
         replies: HashMap<String, (i32, String)>,
         http: HashMap<String, String>,
-        brain: Option<(Mode, String)>,
+        brain: Option<(Mode, String, String)>,
         path: Option<String>,
     }
 
@@ -591,7 +594,7 @@ mod tests {
         fn http_get(&self, _: &str, path: &str) -> Option<String> {
             self.http.get(path).cloned()
         }
-        fn brain_status(&self) -> Option<(Mode, String)> {
+        fn brain_status(&self) -> Option<(Mode, String, String)> {
             self.brain.clone()
         }
         fn env_var(&self, _: &str) -> Option<String> {
@@ -819,7 +822,7 @@ mod tests {
             "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp".into(),
             (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n".into()),
         );
-        sys.brain = Some((Mode::Local, "0.1.0".into()));
+        sys.brain = Some((Mode::Local, "0.1.0".into(), String::new()));
         sys.http.insert("/api/version".into(), "{}".into());
         sys.http.insert(
             "/api/ps".into(),

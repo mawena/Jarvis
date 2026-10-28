@@ -2,6 +2,7 @@
 
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
+use crate::stt::Transcriber;
 use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -113,4 +114,41 @@ impl Skill for FakeSkill {
 /// Raccourci pour les tests : intention `Tool` sans arguments.
 pub fn tool_understanding(tool: &str) -> Understanding {
     Understanding::Tool(Intent::new(tool, serde_json::json!({})))
+}
+
+/// Transcripteur factice : texte programmé (ou échec), compte ses appels.
+pub struct FakeTranscriber {
+    text: Option<String>,
+    calls: AtomicUsize,
+}
+
+impl FakeTranscriber {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: Some(text.into()),
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    /// Transcripteur qui échoue à chaque appel.
+    pub fn failing() -> Self {
+        Self {
+            text: None,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    pub fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl Transcriber for FakeTranscriber {
+    async fn transcribe(&self, _audio: &[f32]) -> anyhow::Result<String> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        self.text
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("transcription factice en échec"))
+    }
 }

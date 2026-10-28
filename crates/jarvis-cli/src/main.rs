@@ -35,14 +35,22 @@ fn main() -> ExitCode {
         Command::Mode { mode } => ControlRequest::SetMode { mode },
     };
     match exchange(&request) {
-        Ok(ControlResponse::Reply { speech }) => {
+        Ok(ControlResponse::Reply { speech } | ControlResponse::Heard { speech, .. }) => {
             if !speech.is_empty() {
                 println!("{speech}");
             }
             ExitCode::SUCCESS
         }
-        Ok(ControlResponse::Status { mode, version }) => {
-            println!("Mode : {mode} (jarvis-brain {version})");
+        Ok(ControlResponse::Status {
+            mode,
+            version,
+            local_model,
+        }) => {
+            if mode == Mode::Local && !local_model.is_empty() {
+                println!("Mode : {mode} ({local_model}) (jarvis-brain {version})");
+            } else {
+                println!("Mode : {mode} (jarvis-brain {version})");
+            }
             ExitCode::SUCCESS
         }
         Ok(ControlResponse::Error { message }) => fail(&message, 1),

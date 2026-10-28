@@ -32,12 +32,15 @@ async fn main() -> anyhow::Result<()> {
         )),
     ];
     let local = Arc::new(OllamaBackend::new(&config.local, &config.address));
-    let brain = Arc::new(Brain::new(
-        skills,
-        local.clone(),
-        Arc::new(ClaudeBackend::from_env(&config.online, &config.address)),
-        modes,
-    ));
+    let brain = Arc::new(
+        Brain::new(
+            skills,
+            local.clone(),
+            Arc::new(ClaudeBackend::from_env(&config.online, &config.address)),
+            modes,
+        )
+        .with_local_model(config.local.model.clone()),
+    );
     if brain.mode() == Mode::Local {
         let tools = brain.tools();
         tokio::spawn(async move {

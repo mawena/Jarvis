@@ -1,0 +1,8 @@
+[package]
+name = "jarvis-ear-core"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+rustpotter.workspace = true
+earshot.workspace = true

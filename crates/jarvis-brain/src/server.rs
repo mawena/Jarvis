@@ -76,6 +76,9 @@ async fn respond(brain: &Brain, request: ControlRequest) -> ControlResponse {
             speech: brain.handle_text(&text).await.speech,
         },
         ControlRequest::Status => status(brain),
+        ControlRequest::Wake | ControlRequest::Listen { .. } => ControlResponse::Error {
+            message: "écoute pas encore implémentée".into(),
+        },
         ControlRequest::SetMode { mode } => match brain.set_mode(mode) {
             Ok(()) => status(brain),
             Err(e) => ControlResponse::Error {
@@ -89,5 +92,6 @@ fn status(brain: &Brain) -> ControlResponse {
     ControlResponse::Status {
         mode: brain.mode(),
         version: env!("CARGO_PKG_VERSION").into(),
+        local_model: brain.local_model().into(),
     }
 }

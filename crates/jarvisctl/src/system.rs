@@ -22,8 +22,8 @@ pub trait System {
     fn run_inherit(&self, prog: &str, args: &[&str], cwd: Option<&Path>) -> io::Result<i32>;
     /// Corps de la réponse d'un `GET` HTTP (None si injoignable ou statut != 200).
     fn http_get(&self, addr: &str, path: &str) -> Option<String>;
-    /// Réponse `Status` du cerveau via son socket.
-    fn brain_status(&self) -> Option<(Mode, String)>;
+    /// Réponse `Status` du cerveau via son socket : (mode, version, modèle local).
+    fn brain_status(&self) -> Option<(Mode, String, String)>;
     fn env_var(&self, name: &str) -> Option<String>;
 }
 
@@ -71,7 +71,7 @@ impl System for RealSystem {
             .then(|| body.to_string())
     }
 
-    fn brain_status(&self) -> Option<(Mode, String)> {
+    fn brain_status(&self) -> Option<(Mode, String, String)> {
         let mut s = UnixStream::connect(jarvis_protocol::socket_path()).ok()?;
         s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
         let line = serde_json::to_string(&ControlRequest::Status).ok()?;
@@ -79,7 +79,11 @@ impl System for RealSystem {
         let mut reply = String::new();
         BufReader::new(s).read_line(&mut reply).ok()?;
         match serde_json::from_str(&reply).ok()? {
-            ControlResponse::Status { mode, version } => Some((mode, version)),
+            ControlResponse::Status {
+                mode,
+                version,
+                local_model,
+            } => Some((mode, version, local_model)),
             _ => None,
         }
     }

@@ -81,7 +81,8 @@ async fn status_et_set_mode() {
         r,
         ControlResponse::Status {
             mode: Mode::Online,
-            version: env!("CARGO_PKG_VERSION").into()
+            version: env!("CARGO_PKG_VERSION").into(),
+            local_model: String::new()
         }
     );
 }
