@@ -54,3 +54,4 @@ pub trait Skill: Send + Sync {
     fn tools(&self) -> Vec<ToolSpec>;
     async fn call(&self, tool: &str, args: serde_json::Value) -> Result<Reply, SkillError>;
 }
+pub mod media;
