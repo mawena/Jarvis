@@ -97,6 +97,8 @@ fn build(sys: &dyn System, source: &Path) -> Result<()> {
                 "jarvis-cli",
                 "-p",
                 "jarvisctl",
+                "-p",
+                "jarvis-ear",
             ],
             Some(source),
         )

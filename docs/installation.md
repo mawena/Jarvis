@@ -15,8 +15,8 @@ Depuis le dépôt :
 cargo run --release -p jarvisctl -- install
 ```
 
-Cela compile, copie `jarvis-brain`, `jarvis` et `jarvisctl` dans `~/.local/bin/`,
-installe l'unité `~/.config/systemd/user/jarvis-brain.service`, crée
+Cela compile, copie `jarvis-brain`, `jarvis`, `jarvisctl` et `jarvis-ear` dans `~/.local/bin/`,
+copie les bibliothèques de l'empreinte vocale (sherpa-onnx) dans `~/.local/lib/jarvis/`, installe l'unité `~/.config/systemd/user/jarvis-brain.service`, crée
 `~/.config/jarvis/{env,config.toml,install.toml}` puis active et démarre le service.
 Options : `--source <dépôt>`, `--no-build`.
 

@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 pub const SERVICE: &str = "jarvis-brain.service";
-pub const BINARIES: [&str; 3] = ["jarvis-brain", "jarvis", "jarvisctl"];
+pub const BINARIES: [&str; 4] = ["jarvis-brain", "jarvis", "jarvisctl", "jarvis-ear"];
 /// Bibliothèques partagées de sherpa-onnx (le binaire du cerveau les cherche dans
 /// `$ORIGIN/../lib/jarvis`, soit `~/.local/lib/jarvis`).
 pub const SHARED_LIBS: [&str; 3] = [
