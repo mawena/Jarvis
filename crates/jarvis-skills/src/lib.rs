@@ -1,5 +1,6 @@
 //! Skill abstraction and command execution for Jarvis.
 
+pub mod apps;
 pub mod runner;
 
 #[cfg(any(test, feature = "test-util"))]

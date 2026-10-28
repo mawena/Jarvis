@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Spotify
+Exec=/snap/bin/spotify %U
+StartupWMClass=spotify
