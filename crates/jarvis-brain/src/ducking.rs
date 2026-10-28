@@ -57,11 +57,10 @@ impl WpctlDucker {
         }
     }
 
-    async fn set_volume(&self, volume: f32) {
+    /// Renvoie `true` si `wpctl` a confirmé le changement.
+    async fn set_volume(&self, volume: f32) -> bool {
         let args = vec!["set-volume".into(), SINK.into(), format!("{volume:.2}")];
-        if !self.wpctl(args).await.is_some_and(|o| o.success) {
-            warn!("wpctl set-volume a échoué");
-        }
+        self.wpctl(args).await.is_some_and(|o| o.success)
     }
 
     async fn read_volume(&self) -> Option<f32> {
@@ -88,14 +87,23 @@ impl Ducker for WpctlDucker {
             debug!("volume illisible, pas de baisse du son");
             return;
         };
+        // Enregistré avant la baisse : même si `set-volume` échoue ou s'applique en retard,
+        // le prochain `restore` remettra le volume d'origine.
         *saved = Some(volume);
-        self.set_volume(volume * DUCK_RATIO).await;
+        if !self.set_volume(volume * DUCK_RATIO).await {
+            warn!("baisse du son non confirmée");
+        }
     }
 
     async fn restore(&self) {
         let mut saved = self.saved.lock().await;
-        if let Some(volume) = saved.take() {
-            self.set_volume(volume).await;
+        let Some(volume) = *saved else { return };
+        // L'état n'est vidé qu'après un rétablissement confirmé : sinon le prochain
+        // `restore` réessaiera, au lieu de laisser le son baissé pour de bon.
+        if self.set_volume(volume).await {
+            *saved = None;
+        } else {
+            warn!("rétablissement du son non confirmé, nouvel essai au prochain passage");
         }
     }
 }
@@ -133,6 +141,32 @@ mod tests {
         d.duck().await;
         d.restore().await;
         assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
+    }
+
+    #[tokio::test]
+    async fn restauration_echouee_reessayee() {
+        let (d, runner) = ducker();
+        d.duck().await;
+        runner.respond(
+            "wpctl",
+            CommandOutput {
+                success: false,
+                stdout: String::new(),
+            },
+        );
+        d.restore().await;
+        runner.respond(
+            "wpctl",
+            CommandOutput {
+                success: true,
+                stdout: "Volume: 0.18\n".into(),
+            },
+        );
+        // Le duck suivant ne doit pas prendre le volume baissé pour l'original.
+        d.duck().await;
+        d.restore().await;
+        d.restore().await;
+        assert_eq!(set_calls(&runner), ["0.18", "0.60", "0.60"]);
     }
 
     #[tokio::test]
