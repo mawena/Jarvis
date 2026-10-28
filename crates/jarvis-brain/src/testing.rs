@@ -181,3 +181,24 @@ impl Ducker for FakeDucker {
         self.events.lock().unwrap().push("restore");
     }
 }
+
+/// Vérificateur de locuteur factice : l'empreinte renvoyée est `vectors[audio[0]]`.
+pub struct FakeVerifier {
+    vectors: Vec<Vec<f32>>,
+}
+
+impl FakeVerifier {
+    pub fn new(vectors: Vec<Vec<f32>>) -> Self {
+        Self { vectors }
+    }
+}
+
+impl crate::speaker::SpeakerVerifier for FakeVerifier {
+    fn embed(&self, audio: &[f32]) -> anyhow::Result<Vec<f32>> {
+        let id = audio.first().copied().unwrap_or(0.0) as usize;
+        self.vectors
+            .get(id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("empreinte factice inconnue"))
+    }
+}

@@ -14,6 +14,7 @@ pub struct Config {
     pub online: OnlineLlmConfig,
     pub apps: AppsConfig,
     pub stt: SttConfig,
+    pub speaker: SpeakerConfig,
 }
 
 impl Default for Config {
@@ -25,6 +26,7 @@ impl Default for Config {
             online: OnlineLlmConfig::default(),
             apps: AppsConfig::default(),
             stt: SttConfig::default(),
+            speaker: SpeakerConfig::default(),
         }
     }
 }
@@ -127,6 +129,50 @@ impl Default for SttConfig {
     }
 }
 
+/// Empreinte vocale (vérification du locuteur).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SpeakerConfig {
+    pub enabled: bool,
+    /// Modèle CAM++ (`~/` accepté en tête de chemin).
+    pub model_path: PathBuf,
+    /// Seuil de similarité cosinus pour une phrase d'au moins 2 s.
+    pub threshold: f32,
+    /// Seuil pour une phrase de 1 à 2 s.
+    pub strict_threshold: f32,
+    pub threads: i32,
+}
+
+impl Default for SpeakerConfig {
+    fn default() -> Self {
+        let model_path = match directories::ProjectDirs::from("", "", "jarvis") {
+            Some(dirs) => dirs
+                .data_dir()
+                .join("models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"),
+            None => PathBuf::from(
+                ".local/share/jarvis/models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx",
+            ),
+        };
+        Self {
+            enabled: true,
+            model_path,
+            threshold: 0.55,
+            strict_threshold: 0.65,
+            threads: 2,
+        }
+    }
+}
+
+/// Remplace un `~` en tête de chemin par `$HOME`.
+pub fn expand_home(p: &Path) -> PathBuf {
+    if let Ok(rest) = p.strip_prefix("~")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
+}
+
 impl Config {
     /// Fichier absent : valeurs par défaut. TOML invalide : erreur citant le chemin.
     pub fn load(path: &Path) -> anyhow::Result<Config> {
@@ -215,6 +261,19 @@ mod tests {
         let c = Config::load(&p).unwrap();
         assert_eq!(c.stt.threads, 4);
         assert_eq!(c.stt.model_path, SttConfig::default().model_path);
+    }
+
+    #[test]
+    fn speaker_config_defauts() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        assert!(c.speaker.enabled);
+        assert_eq!(c.speaker.threshold, 0.55);
+        assert_eq!(c.speaker.strict_threshold, 0.65);
+        let (_d, p) = write("[speaker]\nenabled = false\nthreshold = 0.5\n");
+        let c = Config::load(&p).unwrap();
+        assert!(!c.speaker.enabled);
+        assert_eq!(c.speaker.threshold, 0.5);
+        assert_eq!(c.speaker.strict_threshold, 0.65);
     }
 
     #[test]
