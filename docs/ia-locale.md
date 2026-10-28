@@ -24,6 +24,16 @@ ANTHROPIC_API_KEY=... cargo test -p jarvis-brain --test phrases -- --ignored cla
 
 ## Résultats
 
+Mesuré le 2026-10-28 sur le portable de Charles (Intel Core Ultra 7 155U, sans GPU dédié, 14 Go de RAM), Ollama 0.40.12, 31 phrases.
+
 | Modèle | Réussite | Temps médian |
 |--------|----------|--------------|
-|        |          |              |
+| `llama3.2:3b` | 26/31 (84 %) | 2,4 s |
+| `qwen2.5:3b` | 20/31 (65 %) | 3,0 s |
+
+**Modèle retenu : `llama3.2:3b`** (défaut de `LocalLlmConfig`).
+
+Constats :
+- `qwen2.5:3b` répond souvent par une phrase au lieu d'appeler l'outil (« Voulez-vous que je la fasse maintenant ? »).
+- `llama3.2:3b` se trompe parfois d'outil (« reprends » → pause, « qu'est-ce qui passe » → suivant) ; ces phrases courtes passent de toute façon par les raccourcis rapides, sans IA.
+- **Premier chargement trop lent** : la toute première phrase après le démarrage d'Ollama (ou après un changement de modèle) dépasse le délai de 20 s et échoue. À corriger : préchauffer le modèle au démarrage du cerveau et garder le modèle chargé (`keep_alive`).

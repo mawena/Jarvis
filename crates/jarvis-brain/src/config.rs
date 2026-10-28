@@ -38,7 +38,7 @@ impl Default for LocalLlmConfig {
     fn default() -> Self {
         Self {
             url: "http://127.0.0.1:11434".to_string(),
-            model: "qwen2.5:3b".to_string(),
+            model: "llama3.2:3b".to_string(),
         }
     }
 }
@@ -141,7 +141,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = Config::load(&dir.path().join("absent.toml")).unwrap();
         assert_eq!(c.mode, Mode::Local);
-        assert_eq!(c.local.model, "qwen2.5:3b");
+        assert_eq!(c.local.model, "llama3.2:3b");
         assert_eq!(c.online.model, "claude-haiku-5-5");
         assert_eq!(c.address, "Monsieur");
     }

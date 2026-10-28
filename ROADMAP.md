@@ -26,7 +26,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Orchestrateur et switch de mode persistant (tâche 8)
 - [x] Service `jarvis-brain` et outil `jarvis` (tâche 9)
 - [x] Jeu de phrases de référence et tests de l'IA (tâche 10)
-- [ ] Installer Ollama, comparer `qwen2.5:3b` et `llama3.2:3b`, choisir le modèle local (voir `docs/ia-locale.md`)
+- [x] Installer Ollama, comparer `qwen2.5:3b` et `llama3.2:3b`, choisir le modèle local (voir `docs/ia-locale.md`) → `llama3.2:3b`, 84 %, 2,4 s
+- [ ] Préchauffer le modèle local au démarrage du cerveau et le garder chargé (premier appel > 20 s)
 - [ ] Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
 
 ## Phase 2 : oreille du PC (écoute permanente)
