@@ -29,7 +29,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 1.8 Installer Ollama, comparer `qwen2.5:3b` et `llama3.2:3b`, choisir le modèle local (voir `docs/ia-locale.md`) → `llama3.2:3b`, 84 %, 2,4 s
 - [x] 1.9 Préchauffer le modèle local au démarrage du cerveau et le garder chargé (première phrase : > 20 s → 2,9 s)
 - [x] 1.10 Rendre l'IA locale robuste : appel d'outil écrit en texte reconnu, outils système retirés de l'IA (≈ 82-89 % sur le jeu de phrases)
-- [ ] 1.11 Questions libres en mode local : `llama3.2:3b` appelle encore un outil au hasard (« capitale du Pérou » → musique) ; prévoir une étape d'aiguillage « commande ou conversation » avant l'appel d'outils
+- [x] 1.11 Aiguillage « commande ou conversation » en mode local : questions libres répondues en texte (12-14/14), commandes inchangées (82-84 %)
 - [x] 1.12 Raccourcis élargis (« reprendre », « continue », « mets pause »…) et politesses ignorées (« Jarvis, tu peux… s'il te plaît »)
 - [x] 1.13 Lecteurs inaccessibles (Firefox snap) ignorés, touches multimédia en repli, messages d'erreur courts
 - [x] 1.14 Cerveau en service systemd utilisateur (`jarvis-brain.service`) et outil de gestion `jarvisctl` (install, uninstall, start, stop, restart, status, logs, doctor, set-api-key, update) — voir `docs/installation.md`
