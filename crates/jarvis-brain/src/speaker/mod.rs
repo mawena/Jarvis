@@ -142,7 +142,10 @@ impl SpeakerGate {
         let mut mean: Vec<f32> = Vec::new();
         for audio in samples {
             let mut e = self.verifier.embed(audio)?;
-            anyhow::ensure!(is_usable(&e), "empreinte invalide (valeurs non finies ou nulle)");
+            anyhow::ensure!(
+                is_usable(&e),
+                "empreinte invalide (valeurs non finies ou nulle)"
+            );
             normalize(&mut e);
             if mean.is_empty() {
                 mean = vec![0.0; e.len()];
@@ -322,7 +325,11 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = gate(
             d.path(),
-            vec![vec![f32::NAN, 1.0], vec![0.0, 0.0], vec![f32::INFINITY, 0.0]],
+            vec![
+                vec![f32::NAN, 1.0],
+                vec![0.0, 0.0],
+                vec![f32::INFINITY, 0.0],
+            ],
         );
         for id in 0..3 {
             assert!(g.enroll(&[audio(id, 2.0)]).is_err(), "id {id}");

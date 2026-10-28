@@ -271,7 +271,11 @@ pub fn uninstall(
     if paths.lib_dir.exists() {
         fs::remove_dir_all(&paths.lib_dir)?;
     }
-    writeln!(out, "Bibliothèques supprimées de {}.", paths.lib_dir.display())?;
+    writeln!(
+        out,
+        "Bibliothèques supprimées de {}.",
+        paths.lib_dir.display()
+    )?;
 
     if purge {
         let dirs = [&paths.config_dir, &paths.state_dir, &paths.data_dir];
@@ -1047,6 +1051,9 @@ mod tests {
             assert!(o.contains(attendu), "{attendu}\n{o}");
         }
         assert_eq!(sans_oreille, 1);
-        assert_eq!(complet, 1, "échec Ollama inchangé, aucune dépendance à l'oreille");
+        assert_eq!(
+            complet, 1,
+            "échec Ollama inchangé, aucune dépendance à l'oreille"
+        );
     }
 }
