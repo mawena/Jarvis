@@ -12,7 +12,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Initialiser le dépôt git avec git flow (`main` / `develop`)
 - [x] Rédiger le document de conception
 - [x] Rédiger la feuille de route et le plan des phases 0 et 1
-- [ ] Workspace Cargo et protocole partagé (tâche 1)
+- [x] Workspace Cargo et protocole partagé (tâche 1)
 - [ ] Configuration TOML, mode persistant, journaux (tâche 2)
 - [ ] Trait `Skill` et exécuteur de commandes (tâche 3)
 
