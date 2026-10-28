@@ -1,0 +1,18 @@
+[package]
+name = "jarvisctl"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "jarvisctl"
+path = "src/main.rs"
+
+[dependencies]
+jarvis-protocol.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
