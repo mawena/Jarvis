@@ -51,10 +51,10 @@ impl Skill for SystemSkill {
                 self.modes
                     .set(mode)
                     .map_err(|e| SkillError::Failed(e.to_string()))?;
-                Ok(Reply::done(format!("Mode {mode} activé.")))
+                Ok(Reply::done(format!("Je passe en mode {mode}.")))
             }
             "status" => Ok(Reply::new(format!(
-                "Je suis en mode {}. Tout va bien.",
+                "Je suis en mode {}, tout est en ordre.",
                 self.modes.get()
             ))),
             other => Err(SkillError::UnknownTool(other.into())),
@@ -87,6 +87,6 @@ mod tests {
         let (s, modes, _d) = skill();
         modes.set(Mode::Online).unwrap();
         let r = s.call("status", serde_json::json!({})).await.unwrap();
-        assert_eq!(r.speech, "Je suis en mode en ligne. Tout va bien.");
+        assert_eq!(r.speech, "Je suis en mode en ligne, tout est en ordre.");
     }
 }

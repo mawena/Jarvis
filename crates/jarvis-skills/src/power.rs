@@ -2,6 +2,11 @@
 
 use crate::{CommandRunner, Reply, Risk, Skill, SkillError, ToolSpec};
 use std::sync::Arc;
+use std::time::Duration;
+
+/// Délai entre la réponse et la commande : le temps de synthétiser la confirmation
+/// et de la dire dans l'oreille.
+pub const POWER_DELAY: Duration = Duration::from_secs(4);
 
 pub struct PowerSkill {
     runner: Arc<dyn CommandRunner>,
@@ -68,19 +73,28 @@ impl Skill for PowerSkill {
         find(tool).map(|t| t.question.to_string())
     }
 
+    /// Répond tout de suite ; la commande part [`POWER_DELAY`] plus tard, pour que
+    /// la confirmation soit dite avant la veille ou l'arrêt. Un échec de `systemctl`
+    /// n'est donc que journalisé.
     async fn call(&self, tool: &str, _args: serde_json::Value) -> Result<Reply, SkillError> {
         let Some(&Tool { verb, said, .. }) = find(tool) else {
             return Err(SkillError::UnknownTool(tool.into()));
         };
-        let out = self
-            .runner
-            .run("systemctl", &[verb.to_string()])
-            .map_err(|e| SkillError::Failed(format!("systemctl : {e}")))?;
-        if out.success {
-            Ok(Reply::done(said))
-        } else {
-            Err(SkillError::Failed(format!("systemctl {verb} a échoué")))
-        }
+        let runner = self.runner.clone();
+        tracing::info!(
+            "systemctl {verb} programmé dans {} s",
+            POWER_DELAY.as_secs()
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(POWER_DELAY).await;
+            // Appel bref : systemctl ne fait que transmettre la demande à logind.
+            match runner.run("systemctl", &[verb.to_string()]) {
+                Ok(out) if out.success => {}
+                Ok(_) => tracing::warn!("systemctl {verb} a échoué"),
+                Err(e) => tracing::warn!("systemctl {verb} impossible : {e}"),
+            }
+        });
+        Ok(Reply::done(said))
     }
 }
 
@@ -94,22 +108,35 @@ mod tests {
         (PowerSkill::new(runner.clone()), runner)
     }
 
-    #[tokio::test]
-    async fn power_appelle_systemctl() {
-        for (tool, verb) in [
-            ("suspend", "suspend"),
-            ("reboot", "reboot"),
-            ("shutdown", "poweroff"),
+    const PEU: Duration = Duration::from_millis(100);
+
+    #[tokio::test(start_paused = true)]
+    async fn power_appelle_systemctl_apres_la_reponse() {
+        for (tool, verb, said) in [
+            ("suspend", "suspend", "Je mets le PC en veille."),
+            ("reboot", "reboot", "Je redémarre le PC."),
+            ("shutdown", "poweroff", "J'éteins le PC."),
         ] {
             let (s, runner) = skill();
+            // La réponse revient tout de suite, avant la commande.
             let r = s.call(tool, serde_json::json!({})).await.unwrap();
-            assert_eq!(r.outcome, Outcome::Done, "{tool}");
+            assert_eq!(r, Reply::done(said), "{tool}");
+            assert!(runner.calls().is_empty(), "{tool}");
+            // Rien avant le délai : Jarvis a le temps de dire sa phrase.
+            tokio::time::sleep(POWER_DELAY - PEU).await;
+            assert!(runner.calls().is_empty(), "{tool}");
+            tokio::time::sleep(2 * PEU).await;
             assert_eq!(
                 runner.calls(),
                 vec![("systemctl".to_string(), vec![verb.to_string()])],
                 "{tool}"
             );
         }
+    }
+
+    #[test]
+    fn delai_d_environ_quatre_secondes() {
+        assert_eq!(POWER_DELAY, Duration::from_secs(4));
     }
 
     #[test]
@@ -132,8 +159,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn echec_de_systemctl() {
+    #[tokio::test(start_paused = true)]
+    async fn echec_de_systemctl_journalise_sans_paniquer() {
         let (s, runner) = skill();
         runner.respond(
             "systemctl",
@@ -142,8 +169,11 @@ mod tests {
                 stdout: String::new(),
             },
         );
-        let r = s.call("reboot", serde_json::json!({})).await;
-        assert!(matches!(r, Err(SkillError::Failed(_))));
+        // L'échec arrive après la réponse : il n'est que journalisé.
+        let r = s.call("reboot", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, Outcome::Done);
+        tokio::time::sleep(POWER_DELAY + PEU).await;
+        assert_eq!(runner.calls().len(), 1);
     }
 
     #[tokio::test]

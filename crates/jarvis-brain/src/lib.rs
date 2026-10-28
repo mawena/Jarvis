@@ -7,6 +7,7 @@ pub mod listen;
 pub mod llm;
 pub mod logging;
 pub mod mode_store;
+pub mod persona;
 pub mod server;
 pub mod speaker;
 pub mod stt;

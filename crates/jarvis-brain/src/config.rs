@@ -10,6 +10,8 @@ pub struct Config {
     pub mode: Mode,
     /// Nom par lequel Jarvis s'adresse à l'utilisateur.
     pub address: String,
+    /// Une action réussie par un raccourci est confirmée par un bip, sans phrase.
+    pub sound_only_for_success: bool,
     pub local: LocalLlmConfig,
     pub online: OnlineLlmConfig,
     pub apps: AppsConfig,
@@ -23,6 +25,7 @@ impl Default for Config {
         Self {
             mode: Mode::Local,
             address: "Monsieur".to_string(),
+            sound_only_for_success: false,
             local: LocalLlmConfig::default(),
             online: OnlineLlmConfig::default(),
             apps: AppsConfig::default(),
@@ -231,6 +234,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persona::Persona;
     use jarvis_protocol::Mode;
     use std::path::PathBuf;
 
@@ -328,6 +332,18 @@ mod tests {
         assert_eq!(c.tts.speed, 1.2);
         assert_eq!(c.tts.speaker, 1);
         assert_eq!(c.tts.model_dir, TtsConfig::default().model_dir);
+    }
+
+    #[test]
+    fn bip_seul_pour_reussite_desactive_par_defaut() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        assert!(!c.sound_only_for_success);
+        let (_d, p) = write("address = \"Charles\"\nsound_only_for_success = true\n");
+        let c = Config::load(&p).unwrap();
+        assert!(c.sound_only_for_success);
+        let persona = Persona::from(&c);
+        assert_eq!(persona.address, "Charles");
+        assert!(persona.sound_only_for_success);
     }
 
     #[test]
