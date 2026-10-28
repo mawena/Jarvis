@@ -39,6 +39,9 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] Reconnaissance vocale Whisper (`whisper-rs`), choix `base` / `small` après mesure
 - [ ] Baisse automatique de la musique après « Jarvis »
 - [ ] Brancher la chaîne vocale sur `Brain::handle_text`
+- [ ] Commandes « coupe / réactive l'écoute » et coupure totale du micro pour l'oreille du PC (déplacées ici depuis la phase 9)
+- [ ] Icône dans la zone de notification GNOME : statut (écoute, micro coupé, cerveau injoignable, mode, modèle)
+- [ ] Menu de l'icône : couper / réactiver l'écoute, coupure totale, mode local / en ligne, statut détaillé, quitter
 - [ ] Mesurer le taux de fausses détections sur une journée
 
 ## Phase 3 : voix de Jarvis
@@ -65,7 +68,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] Liaisons UniFFI de `jarvis-ear-core` pour Kotlin, compilation Android
 - [ ] Service au premier plan avec écoute continue, écran éteint
 - [ ] Écran d'appairage (scan du QR code)
-- [ ] Démarrage automatique et bouton de coupure totale du micro
+- [ ] Démarrage automatique
+- [ ] Notification permanente avec statut et boutons « Couper / Réactiver l'écoute » et « Coupure totale »
 - [ ] Essai de bout en bout depuis une autre pièce
 
 ## Phase 6 : recherche et vidéos
@@ -93,7 +97,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 ## Phase 9 : mise en service
 - [ ] Rédiger le plan de la phase 9
 - [ ] Services systemd utilisateur pour le cerveau et l'oreille du PC
-- [ ] « Coupe le micro » / « réactive le micro » et coupure totale (`jarvis mute --hard`)
+- [ ] Statut détaillé dans l'icône : oreilles connectées, tâches d'agent en cours
 - [ ] Option `inhibit_sleep_on_ac`
 - [ ] Mesure des critères de réussite (vitesse, fausses détections, doubles exécutions)
 - [ ] Première version `release/1.0.0` via git flow

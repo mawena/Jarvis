@@ -142,6 +142,17 @@ Chaque outil a un niveau de risque :
 - Journaux avec `tracing`. Le texte des phrases est journalisé, **le son jamais** (sauf mode débogage activé explicitement).
 - **« Jarvis, coupe le micro »** : l'oreille arrête d'envoyer du son au cerveau, mais continue d'écouter le mot d'éveil **sur l'appareil**, pour entendre « Jarvis, réactive le micro ». Rien ne sort de l'appareil pendant ce temps. Pour une coupure **totale** (micro réellement fermé), on passe par l'interface : bouton dans l'appli mobile, ou `jarvis-cli mute --hard` sur le PC.
 
+### 5.7 bis Icône dans la zone de notification (PC) — demande de Charles
+- Une icône Jarvis dans la zone de notification de GNOME (protocole StatusNotifierItem / AppIndicator, pris en charge par l'extension Ubuntu AppIndicators), lancée avec l'oreille du PC.
+- **Statut visible d'un coup d'œil** (icône et infobulle) : à l'écoute, en train d'écouter une phrase, micro coupé, coupure totale, cerveau injoignable ; plus le mode actif (local / en ligne) et le modèle utilisé.
+- **Menu** :
+  - « Couper l'écoute » / « Réactiver l'écoute » : même effet que la commande vocale (le mot d'éveil reste écouté sur l'appareil) ;
+  - « Coupure totale du micro » : le micro est réellement fermé, seul ce menu (ou le CLI) peut le rouvrir ;
+  - « Mode local » / « Mode en ligne » (choix exclusif) ;
+  - « Statut détaillé » : oreilles connectées, dernière phrase entendue et sa réponse, tâches d'agent en cours (à partir de la phase 7) ;
+  - « Quitter l'oreille ».
+- L'icône lit l'état via le socket du cerveau (requête `Status` enrichie) et se met à jour d'elle-même.
+
 ### 5.8 Personnes et rôles
 
 - Le cerveau connaît des **personnes** ; chaque oreille appairée appartient à une personne. Au départ, il n'y a qu'une personne : Charles, avec le rôle **admin**.
@@ -180,7 +191,8 @@ Changer de mode, « qu'est-ce que tu fais ? », « annule », couper/réactiver 
 
 ### 7.1 Android (Pixel 4 XL)
 - Appli Kotlin minimale autour de `jarvis-ear-core`, avec un **service au premier plan** de type micro (notification permanente « Jarvis écoute »). Android l'autorise et l'écoute continue fonctionne même écran éteint.
-- Démarrage automatique au démarrage du téléphone, bouton de coupure totale du micro, écran d'appairage (scan du QR code).
+- Démarrage automatique au démarrage du téléphone, écran d'appairage (scan du QR code).
+- **Notification permanente avec actions** (demande de Charles) : elle affiche le statut (à l'écoute, micro coupé, PC injoignable, mode local / en ligne) et propose les boutons « Couper l'écoute » / « Réactiver l'écoute » et « Coupure totale », sans ouvrir l'appli.
 - Le Pixel 4 XL peut servir de téléphone au quotidien ou d'oreille fixe branchée dans une pièce : l'appli marche dans les deux cas.
 
 ### 7.2 iOS (iPhone 14 Pro)
