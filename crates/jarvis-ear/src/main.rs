@@ -1,10 +1,12 @@
-//! Oreille de Jarvis : micro, mot d'éveil, détection de fin de phrase.
+//! Oreille de Jarvis : micro, mot d'éveil, détection de fin de phrase, voix de Jarvis.
 
 mod app;
 mod capture;
 mod client;
 mod config;
 mod enroll;
+mod playback;
+mod sounds;
 mod tray;
 
 use std::sync::Arc;
@@ -20,6 +22,7 @@ use tokio::sync::{mpsc, watch};
 use crate::app::{App, SocketBrain, default_mute_file};
 use crate::capture::CpalCapture;
 use crate::config::EarConfig;
+use crate::playback::CpalPlayer;
 use crate::tray::{BrainLink, JarvisTray, TrayCommand, TrayState};
 
 #[derive(Parser)]
@@ -137,6 +140,11 @@ async fn run() -> anyhow::Result<()> {
     );
     if let Some(path) = default_mute_file() {
         app = app.with_mute_file(path);
+    }
+    // Sans sortie audio, l'oreille fonctionne quand même, sans son.
+    match CpalPlayer::new() {
+        Ok(player) => app = app.with_player(Box::new(player)),
+        Err(e) => tracing::warn!("lecture des sons impossible, l'oreille reste muette : {e:#}"),
     }
     let result = app.run().await.context("boucle principale");
     if let Some(handle) = tray_handle {
