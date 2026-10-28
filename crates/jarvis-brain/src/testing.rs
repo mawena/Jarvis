@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 pub struct FakeLlm {
     response: Mutex<Result<Understanding, LlmError>>,
     calls: AtomicUsize,
+    tools: Mutex<Vec<String>>,
 }
 
 impl FakeLlm {
@@ -17,7 +18,13 @@ impl FakeLlm {
         Self {
             response: Mutex::new(response),
             calls: AtomicUsize::new(0),
+            tools: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Noms des outils reçus lors du dernier appel.
+    pub fn last_tools(&self) -> Vec<String> {
+        self.tools.lock().unwrap().clone()
     }
 
     pub fn calls(&self) -> usize {
@@ -27,11 +34,8 @@ impl FakeLlm {
 
 #[async_trait::async_trait]
 impl LlmBackend for FakeLlm {
-    async fn understand(
-        &self,
-        _text: &str,
-        _tools: &[ToolSpec],
-    ) -> Result<Understanding, LlmError> {
+    async fn understand(&self, _text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
+        *self.tools.lock().unwrap() = tools.iter().map(|t| t.name.clone()).collect();
         self.calls.fetch_add(1, Ordering::SeqCst);
         match &*self.response.lock().unwrap() {
             Ok(u) => Ok(u.clone()),

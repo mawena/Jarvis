@@ -28,7 +28,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Jeu de phrases de référence et tests de l'IA (tâche 10)
 - [x] Installer Ollama, comparer `qwen2.5:3b` et `llama3.2:3b`, choisir le modèle local (voir `docs/ia-locale.md`) → `llama3.2:3b`, 84 %, 2,4 s
 - [x] Préchauffer le modèle local au démarrage du cerveau et le garder chargé (première phrase : > 20 s → 2,9 s)
-- [ ] Rendre l'IA locale robuste : appel d'outil écrit en texte (`{"name":…}`) et outil absurde pour une question libre
+- [x] Rendre l'IA locale robuste : appel d'outil écrit en texte reconnu, outils système retirés de l'IA (≈ 82-89 % sur le jeu de phrases)
+- [ ] Questions libres en mode local : `llama3.2:3b` appelle encore un outil au hasard (« capitale du Pérou » → musique) ; prévoir une étape d'aiguillage « commande ou conversation » avant l'appel d'outils
 - [ ] Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
 
 ## Phase 2 : oreille du PC (écoute permanente)
