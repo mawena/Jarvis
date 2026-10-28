@@ -80,10 +80,57 @@ au bout de 15 s, à l'arrêt du cerveau, ou à son redémarrage.
 
 ## Commandes vocales
 
-- « Jarvis, coupe l'écoute » (ou « coupe le micro », « arrête d'écouter »).
-- « Jarvis, réactive l'écoute » (ou « réactive le micro »).
+Commandes rapides, comprises sans IA (toujours précédées de « Jarvis ») :
 
-Pendant l'écoute coupée, les autres phrases ne sont ni exécutées ni journalisées.
+- Écoute : « coupe l'écoute » (ou « coupe le micro », « arrête d'écouter ») ; « réactive
+  l'écoute » (ou « réactive le micro »).
+- Musique et vidéo : « pause », « reprends », « suivant », « précédent », « plus fort »,
+  « moins fort », « qu'est-ce qui passe ? ».
+- Applications : « ouvre Spotify », « lance VS Code »…
+- Mode : « passe en mode local », « passe en mode en ligne », « statut ».
+- Alimentation, toujours confirmée par un « oui » : « mets le PC en veille », « redémarre le
+  PC », « éteins le PC ».
+- « annule » et « répète » (voir plus bas).
+
+Les autres phrases vont à l'IA du mode courant. Pendant l'écoute coupée, les autres phrases ne
+sont ni exécutées ni journalisées.
+
+## Voix et réponses
+
+Jarvis répond en majordome discret : une phrase brève, en te vouvoyant, et en te nommant
+de temps en temps (« Je mets le PC en veille, Monsieur ? »).
+
+**Bips** joués par l'oreille :
+
+- **réveil** (une note montante) : « Jarvis » est entendu, tu peux parler ;
+- **réussite** (deux notes montantes) : l'action est faite, avant la phrase de Jarvis ;
+- **échec** (deux notes graves descendantes) : l'action n'a pas pu se faire ; la raison est
+  toujours dite.
+
+**Veille, redémarrage et arrêt** demandent une confirmation : Jarvis pose la question (« Je mets
+le PC en veille, Monsieur ? ») et l'oreille écoute la réponse sans « Jarvis », 8 s au plus.
+Seule ta voix compte.
+
+- Oui : « oui », « ouais », « ok », « vas-y », « allez-y », « d'accord », « confirme »,
+  « fais-le ».
+- Non : « non », « annule », « laisse tomber », « surtout pas », « pas maintenant ».
+
+Toute autre phrase, le silence ou une autre voix : rien n'est fait. Après un « oui », Jarvis
+dit sa phrase, et la commande part 4 s plus tard, une fois la phrase dite.
+
+**« Jarvis, annule »** (ou « laisse tomber ») efface la question en attente. **« Jarvis,
+répète »** (ou « tu peux répéter ? », « qu'est-ce que tu as dit ? ») redit la dernière réponse
+sans rien refaire ; si une question attend, elle est reposée et le délai de 8 s repart.
+
+Deux réglages dans `~/.config/jarvis/config.toml` (puis `jarvisctl restart`) :
+
+```toml
+# address = "Monsieur"            # nom par lequel Jarvis s'adresse à toi ; "" : jamais nommé
+# sound_only_for_success = false  # vrai : une commande rapide réussie n'est confirmée que par le bip
+```
+
+Avec `sound_only_for_success = true`, « Jarvis, suivant » donne le seul bip de réussite au lieu
+de « Bien. ». Un échec, une réponse de l'IA et une action confirmée par « oui » restent dits.
 
 ## Voix de Jarvis
 
