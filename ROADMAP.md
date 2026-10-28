@@ -20,8 +20,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 *Plan : [phases 0 et 1](docs/superpowers/plans/2026-10-28-phases-0-1-fondations-comprehension.md), branche `feature/comprehension-texte`*
 
 - [x] Raccourcis rapides sans IA (« suivant », « pause », « lance X »…) (tâche 4)
-- [ ] Contrôle des médias via MPRIS et volume PipeWire (tâche 5)
-- [ ] Lancement et mise au premier plan des applications et jeux (tâche 6)
+- [x] Contrôle des médias via MPRIS et volume PipeWire (tâche 5)
+- [x] Lancement et mise au premier plan des applications et jeux (tâche 6)
 - [x] Compréhension par IA : Ollama (local) et Claude (en ligne) (tâche 7)
 - [ ] Orchestrateur et switch de mode persistant (tâche 8)
 - [ ] Service `jarvis-brain` et outil `jarvis` (tâche 9)
