@@ -71,6 +71,10 @@ fn imperatif(verbe: &str) -> &str {
         "reprendre" | "reprenez" => "reprends",
         "continuer" | "continuez" => "continue",
         "jouer" => "joue",
+        "eteindre" | "eteignez" => "eteins",
+        "redemarrer" | "redemarrez" => "redemarre",
+        "annuler" | "annulez" => "annule",
+        "repeter" | "repetez" => "repete",
         other => other,
     }
 }
@@ -90,15 +94,19 @@ fn strip_politesse(mut words: Vec<&str>) -> Vec<&str> {
     }
 }
 
-/// Minuscules, accents retirés, ponctuation en espaces, espaces fusionnés,
-/// politesses retirées (début et fin), verbe initial ramené à l'impératif.
-pub fn normalize(text: &str) -> String {
-    let cleaned: String = text
-        .to_lowercase()
+/// Minuscules, accents retirés, ponctuation en espaces.
+fn clean(text: &str) -> String {
+    text.to_lowercase()
         .chars()
         .map(strip_accent)
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
-        .collect();
+        .collect()
+}
+
+/// Minuscules, accents retirés, ponctuation en espaces, espaces fusionnés,
+/// politesses retirées (début et fin), verbe initial ramené à l'impératif.
+pub fn normalize(text: &str) -> String {
+    let cleaned = clean(text);
     let mut words = strip_politesse(cleaned.split_whitespace().collect());
     if let Some(first) = words.first_mut() {
         *first = imperatif(first);
@@ -175,6 +183,12 @@ fn exact(phrase: &str) -> Option<Intent> {
         "passe en mode en ligne" | "mode en ligne" | "passe en ligne" => mode("online"),
         // status
         "qu est ce que tu fais" | "statut" => simple("status"),
+        // alimentation (toujours confirmée)
+        "mets le pc en veille" | "mets l ordinateur en veille" | "mets en veille" => {
+            simple("suspend")
+        }
+        "redemarre le pc" | "redemarre l ordinateur" => simple("reboot"),
+        "eteins le pc" | "eteins l ordinateur" => simple("shutdown"),
         _ => None,
     }
 }
@@ -213,6 +227,64 @@ pub fn match_fast(text: &str) -> Option<Intent> {
     exact(&phrase)
         .or_else(|| piste(&phrase))
         .or_else(|| launch(&phrase))
+}
+
+/// Commandes traitées par le cerveau lui-même.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrainCommand {
+    /// Efface l'action en attente de confirmation.
+    Cancel,
+    /// Redit la dernière réponse, sans rien réexécuter.
+    Repeat,
+}
+
+pub fn match_brain_command(text: &str) -> Option<BrainCommand> {
+    match normalize(text).as_str() {
+        "annule" | "annule ca" | "annule tout" | "laisse tomber" => Some(BrainCommand::Cancel),
+        "repete" | "repete ca" | "redis le" | "qu est ce que tu as dit" | "tu as dit quoi" => {
+            Some(BrainCommand::Repeat)
+        }
+        _ => None,
+    }
+}
+
+/// Phrase reconnue sans IA (raccourci ou commande du cerveau).
+pub fn is_shortcut(text: &str) -> bool {
+    match_fast(text).is_some() || match_brain_command(text).is_some()
+}
+
+/// Réponse à une question de confirmation : `Some(true)` pour oui, `Some(false)` pour
+/// non, `None` pour toute autre phrase.
+pub fn match_confirmation(text: &str) -> Option<bool> {
+    let cleaned = clean(text);
+    let mut words: Vec<&str> = cleaned.split_whitespace().collect();
+    // Pas `strip_politesse` : « vas-y » et « allez-y » sont ici des réponses.
+    loop {
+        let before = words.len();
+        if words.first() == Some(&"jarvis") {
+            words.remove(0);
+        }
+        if let Some(s) = SUFFIXES
+            .iter()
+            .filter(|s| !matches!(s.first(), Some(&"vas" | &"allez")))
+            .find(|s| words.ends_with(s))
+        {
+            words.truncate(words.len() - s.len());
+        }
+        if words.len() == before {
+            break;
+        }
+    }
+    match words.join(" ").as_str() {
+        "oui" | "ouais" | "oui oui" | "ok" | "okay" | "vas y" | "allez y" | "oui vas y"
+        | "oui allez y" | "confirme" | "je confirme" | "oui je confirme" | "oui confirme"
+        | "d accord" | "oui d accord" | "fais le" | "faites le" | "oui fais le" => Some(true),
+        "non" | "non non" | "annule" | "non annule" | "laisse tomber" | "non laisse tomber"
+        | "surtout pas" | "non surtout pas" | "pas maintenant" | "non pas maintenant" => {
+            Some(false)
+        }
+        _ => None,
+    }
 }
 
 /// Commandes d'écoute (couper ou réactiver le micro), après `normalize`.
@@ -532,6 +604,99 @@ mod tests {
         assert_eq!(match_fast("lance la vidéo de Squeezie"), None);
         assert_eq!(match_fast("ouvre une video de chats"), None);
         assert_eq!(match_fast("demarre la video"), None);
+    }
+
+    #[test]
+    fn raccourcis_alimentation() {
+        verifie(
+            "suspend",
+            &[
+                "mets le PC en veille",
+                "Jarvis, mets le PC en veille.",
+                "mettre l'ordinateur en veille",
+                "mets en veille",
+            ],
+        );
+        verifie(
+            "reboot",
+            &[
+                "redémarre le PC",
+                "redémarrer l'ordinateur",
+                "redémarrez le PC",
+            ],
+        );
+        verifie(
+            "shutdown",
+            &["éteins le PC", "éteindre l'ordinateur", "éteignez le PC"],
+        );
+        // « redémarre » n'est pas « démarre » (lancer une appli).
+        assert_eq!(match_fast("redémarre spotify"), None);
+    }
+
+    #[test]
+    fn commandes_du_cerveau() {
+        for t in [
+            "annule",
+            "Jarvis, annule.",
+            "annule ça",
+            "laisse tomber",
+            "annuler",
+        ] {
+            assert_eq!(match_brain_command(t), Some(BrainCommand::Cancel), "{t}");
+        }
+        for t in [
+            "répète",
+            "Tu peux répéter ?",
+            "répète s'il te plaît",
+            "répéter",
+        ] {
+            assert_eq!(match_brain_command(t), Some(BrainCommand::Repeat), "{t}");
+        }
+        assert_eq!(match_brain_command("suivant"), None);
+        assert!(is_shortcut("annule") && is_shortcut("suivant"));
+        assert!(!is_shortcut("quel temps fait-il"));
+    }
+
+    #[test]
+    fn reponses_de_confirmation() {
+        for t in [
+            "oui",
+            "Oui.",
+            "Oui !",
+            "vas-y",
+            "Vas-y.",
+            "allez-y",
+            "oui, vas-y",
+            "confirme",
+            "je confirme",
+            "d'accord",
+            "fais-le",
+            "oui merci",
+            "Jarvis, oui",
+            "oui s'il te plaît",
+        ] {
+            assert_eq!(match_confirmation(t), Some(true), "{t}");
+        }
+        for t in [
+            "non",
+            "Non.",
+            "non merci",
+            "annule",
+            "laisse tomber",
+            "non, annule",
+        ] {
+            assert_eq!(match_confirmation(t), Some(false), "{t}");
+        }
+        for t in [
+            "",
+            "merci",
+            "pas d'accord",
+            "mets pause",
+            "oui mais non",
+            "jarvis",
+        ] {
+            assert_eq!(match_confirmation(t), None, "{t}");
+        }
     }
 
     #[test]

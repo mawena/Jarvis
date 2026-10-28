@@ -241,3 +241,34 @@ impl Synthesizer for FakeSynthesizer {
             .ok_or_else(|| anyhow::anyhow!("voix en panne"))
     }
 }
+
+/// Horloge qui n'avance que sur demande.
+pub struct ManualClock {
+    start: std::time::Instant,
+    offset: Mutex<std::time::Duration>,
+}
+
+impl ManualClock {
+    pub fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            offset: Mutex::new(std::time::Duration::ZERO),
+        }
+    }
+
+    pub fn advance(&self, d: std::time::Duration) {
+        *self.offset.lock().unwrap() += d;
+    }
+}
+
+impl Default for ManualClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::brain::Clock for ManualClock {
+    fn now(&self) -> std::time::Instant {
+        self.start + *self.offset.lock().unwrap()
+    }
+}

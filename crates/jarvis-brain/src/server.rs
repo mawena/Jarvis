@@ -190,8 +190,16 @@ async fn respond(
             listen.wake().await;
             status(brain)
         }
-        ControlRequest::Listen { audio, muted, .. } => match decode_pcm(&audio) {
-            Ok(samples) => voice.speak(listen.listen(&samples, muted).await).await,
+        ControlRequest::Listen {
+            audio,
+            muted,
+            follow_up,
+        } => match decode_pcm(&audio) {
+            Ok(samples) => {
+                voice
+                    .speak(listen.listen(&samples, muted, follow_up).await)
+                    .await
+            }
             Err(_) => ControlResponse::Error {
                 message: "audio invalide".into(),
             },

@@ -83,14 +83,14 @@ impl MediaSkill {
     fn send_media_key(&self, cmd: PlayerCommand) -> Reply {
         let args = ["key", media_key(cmd)].map(String::from);
         match self.runner.run("xdotool", &args) {
-            Ok(out) if out.success => Reply::new(""),
+            Ok(out) if out.success => Reply::done(""),
             Ok(_) => {
                 tracing::warn!("xdotool a échoué pour {}", media_key(cmd));
-                Reply::new(NO_PLAYER)
+                Reply::failed(NO_PLAYER)
             }
             Err(e) => {
                 tracing::warn!("xdotool indisponible : {e}");
-                Reply::new(NO_PLAYER)
+                Reply::failed(NO_PLAYER)
             }
         }
     }
@@ -105,7 +105,7 @@ impl MediaSkill {
             _ => false,
         };
         if already {
-            return Ok(Reply::new(""));
+            return Ok(Reply::done(""));
         }
         if let Err(e) = self.players.command(&player.bus_name, cmd).await {
             tracing::warn!(player = %player.bus_name, "commande {cmd:?} refusée : {e:#}");
@@ -116,11 +116,11 @@ impl MediaSkill {
             } else {
                 &player.identity
             };
-            return Ok(Reply::new(format!(
+            return Ok(Reply::failed(format!(
                 "Le lecteur {who} n'a pas accepté la commande."
             )));
         }
-        Ok(Reply::new(""))
+        Ok(Reply::done(""))
     }
 
     async fn now_playing(&self) -> Result<Reply, SkillError> {
@@ -141,7 +141,7 @@ impl MediaSkill {
             .run("wpctl", &args)
             .map_err(|e| SkillError::Failed(format!("wpctl : {e}")))?;
         if out.success {
-            Ok(Reply::new(""))
+            Ok(Reply::done(""))
         } else {
             Err(SkillError::Failed("wpctl a échoué".into()))
         }
@@ -289,6 +289,7 @@ mod tests {
             },
         );
         let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Failed);
         assert_eq!(r.speech, "Aucun lecteur n'est ouvert.");
         assert!(p.sent.lock().unwrap().is_empty());
     }
@@ -297,6 +298,7 @@ mod tests {
     async fn volume_appelle_wpctl() {
         let (s, _, runner) = skill(vec![]);
         let r = s.call("volume_up", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Done);
         assert_eq!(r.speech, "");
         assert_eq!(
             runner.calls(),
