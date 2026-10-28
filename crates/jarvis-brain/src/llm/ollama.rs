@@ -6,11 +6,14 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// Le premier chargement du modèle en mémoire peut dépasser largement TIMEOUT.
+const WARM_UP_TIMEOUT: Duration = Duration::from_secs(120);
 
 pub struct OllamaBackend {
     client: reqwest::Client,
     url: String,
     model: String,
+    keep_alive: String,
     address: String,
 }
 
@@ -20,14 +23,28 @@ impl OllamaBackend {
             client: reqwest::Client::new(),
             url: cfg.url.trim_end_matches('/').to_string(),
             model: cfg.model.clone(),
+            keep_alive: cfg.keep_alive.clone(),
             address: address.to_string(),
         }
     }
-}
 
-#[async_trait::async_trait]
-impl LlmBackend for OllamaBackend {
-    async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
+    /// Charge le modèle et lui fait lire les consignes et les outils, sans rien générer :
+    /// Ollama garde ce préfixe en cache, et la première vraie phrase est rapide.
+    pub async fn warm_up(&self, tools: &[ToolSpec]) -> Result<(), LlmError> {
+        let mut body = self.chat_body("bonjour", tools);
+        body["options"] = json!({"num_predict": 1});
+        let resp = self
+            .client
+            .post(format!("{}/api/chat", self.url))
+            .timeout(WARM_UP_TIMEOUT)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Unreachable(e.to_string()))?;
+        check_status(resp.status())
+    }
+
+    fn chat_body(&self, text: &str, tools: &[ToolSpec]) -> Value {
         let tools: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -35,7 +52,7 @@ impl LlmBackend for OllamaBackend {
                     "name": t.name, "description": t.description, "parameters": t.parameters}})
             })
             .collect();
-        let body = json!({
+        json!({
             "model": self.model,
             "stream": false,
             "messages": [
@@ -43,7 +60,25 @@ impl LlmBackend for OllamaBackend {
                 {"role": "user", "content": text},
             ],
             "tools": tools,
-        });
+            "keep_alive": self.keep_alive,
+        })
+    }
+}
+
+fn check_status(status: reqwest::StatusCode) -> Result<(), LlmError> {
+    if status.is_client_error() {
+        return Err(LlmError::Rejected(format!("Ollama a répondu {status}")));
+    }
+    if !status.is_success() {
+        return Err(LlmError::Unreachable(format!("Ollama a répondu {status}")));
+    }
+    Ok(())
+}
+
+#[async_trait::async_trait]
+impl LlmBackend for OllamaBackend {
+    async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
+        let body = self.chat_body(text, tools);
         let resp = self
             .client
             .post(format!("{}/api/chat", self.url))
@@ -52,13 +87,7 @@ impl LlmBackend for OllamaBackend {
             .send()
             .await
             .map_err(|e| LlmError::Unreachable(e.to_string()))?;
-        let status = resp.status();
-        if status.is_client_error() {
-            return Err(LlmError::Rejected(format!("Ollama a répondu {status}")));
-        }
-        if !status.is_success() {
-            return Err(LlmError::Unreachable(format!("Ollama a répondu {status}")));
-        }
+        check_status(resp.status())?;
         let v: Value = resp
             .json()
             .await
@@ -105,6 +134,7 @@ mod tests {
         let cfg = LocalLlmConfig {
             url: url.to_string(),
             model: "qwen2.5:3b".to_string(),
+            keep_alive: "30m".to_string(),
         };
         OllamaBackend::new(&cfg, "Monsieur")
     }
@@ -216,6 +246,66 @@ mod tests {
             .understand("salut", &[])
             .await
             .unwrap_err();
+        assert!(matches!(err, LlmError::Rejected(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn ollama_envoie_keep_alive() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message": {"content": "ok"}})),
+            )
+            .mount(&server)
+            .await;
+        backend(&server.uri()).understand("x", &[]).await.unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["keep_alive"], "30m");
+    }
+
+    #[tokio::test]
+    async fn prechauffage_lit_les_outils() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message": {"content": "ok"}})),
+            )
+            .mount(&server)
+            .await;
+        let b = backend(&server.uri());
+        b.warm_up(&[tool()]).await.unwrap();
+        b.understand("ouvre firefox", &[tool()]).await.unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let warm: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        let real: Value = serde_json::from_slice(&reqs[1].body).unwrap();
+        // Même préfixe (modèle, consignes, outils) que les vraies phrases, pour qu'Ollama le garde en cache.
+        assert_eq!(warm["model"], real["model"]);
+        assert_eq!(warm["messages"][0], real["messages"][0]);
+        assert_eq!(warm["tools"], real["tools"]);
+        assert_eq!(warm["keep_alive"], "30m");
+        assert_eq!(warm["options"]["num_predict"], 1);
+    }
+
+    #[tokio::test]
+    async fn prechauffage_injoignable() {
+        let err = backend("http://127.0.0.1:1")
+            .warm_up(&[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Unreachable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn prechauffage_modele_absent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = backend(&server.uri()).warm_up(&[]).await.unwrap_err();
         assert!(matches!(err, LlmError::Rejected(_)), "{err:?}");
     }
 }

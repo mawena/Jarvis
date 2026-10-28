@@ -50,6 +50,11 @@ impl Brain {
         self
     }
 
+    /// Tous les outils que l'IA peut appeler.
+    pub fn tools(&self) -> Vec<ToolSpec> {
+        self.skills.iter().flat_map(|s| s.tools()).collect()
+    }
+
     pub fn mode(&self) -> Mode {
         self.modes.get()
     }
@@ -76,7 +81,7 @@ impl Brain {
             Mode::Online => (&self.online, "online"),
         };
         debug!(route, "compréhension par IA");
-        let tools: Vec<ToolSpec> = self.skills.iter().flat_map(|s| s.tools()).collect();
+        let tools = self.tools();
         match backend.understand(text, &tools).await {
             Ok(Understanding::Tool(intent)) => {
                 if mode == Mode::Local

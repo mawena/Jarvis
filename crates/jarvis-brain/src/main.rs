@@ -5,12 +5,13 @@ use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::server::serve;
+use jarvis_protocol::Mode;
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaSkill, MprisPlayers};
 use jarvis_skills::{Skill, SystemRunner};
 use std::sync::Arc;
 use tokio::signal::unix::{SignalKind, signal};
-use tracing::info;
+use tracing::{info, warn};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -30,12 +31,22 @@ async fn main() -> anyhow::Result<()> {
             runner,
         )),
     ];
+    let local = Arc::new(OllamaBackend::new(&config.local, &config.address));
     let brain = Arc::new(Brain::new(
         skills,
-        Arc::new(OllamaBackend::new(&config.local, &config.address)),
+        local.clone(),
         Arc::new(ClaudeBackend::from_env(&config.online, &config.address)),
         modes,
     ));
+    if brain.mode() == Mode::Local {
+        let tools = brain.tools();
+        tokio::spawn(async move {
+            match local.warm_up(&tools).await {
+                Ok(()) => info!("modèle local prêt"),
+                Err(e) => warn!(erreur = %e, "préchauffage du modèle local impossible"),
+            }
+        });
+    }
 
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
