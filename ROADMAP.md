@@ -33,12 +33,12 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Raccourcis élargis (« reprendre », « continue », « mets pause »…) et politesses ignorées (« Jarvis, tu peux… s'il te plaît »)
 - [x] Lecteurs inaccessibles (Firefox snap) ignorés, touches multimédia en repli, messages d'erreur courts
 - [x] Cerveau en service systemd utilisateur (`jarvis-brain.service`) et outil de gestion `jarvisctl` (install, uninstall, start, stop, restart, status, logs, doctor, set-api-key, update) — voir `docs/installation.md`
-- [ ] Installer le service avec `jarvisctl install` sur le PC de Charles
-- [ ] Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
+- [x] Installer le service avec `jarvisctl install` sur le PC de Charles
+- [x] Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
 
 ## Phase 2 : oreille du PC (écoute permanente)
 - [x] Rédiger le plan de la phase 2 ([plan](docs/superpowers/plans/2026-10-28-phase-2-oreille-pc.md))
-- [ ] Installer les prérequis système : `sudo apt install libasound2-dev libclang-dev` (Charles)
+- [x] Installer les prérequis système : `sudo apt install libasound2-dev libclang-dev` (Charles)
 - [ ] Socle : protocole d'écoute (`Wake`, `Listen`, `Heard`), crates `jarvis-ear-core` et `jarvis-ear` (tâche 1)
 - [ ] Capture du micro en 16 kHz mono (`cpal`)
 - [ ] Mot d'éveil « Jarvis » (`rustpotter`) et outil d'enregistrement des échantillons de voix
