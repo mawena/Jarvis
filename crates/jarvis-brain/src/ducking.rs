@@ -2,10 +2,12 @@
 
 use jarvis_skills::CommandOutput;
 use jarvis_skills::CommandRunner;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 /// Part du volume d'origine conservée pendant l'écoute.
@@ -32,6 +34,8 @@ pub struct WpctlDucker {
 struct Inner {
     runner: Arc<dyn CommandRunner>,
     state: Mutex<State>,
+    /// Copie sur disque du volume d'origine : survit à un arrêt brutal du cerveau.
+    file: Option<PathBuf>,
 }
 
 #[derive(Default)]
@@ -43,14 +47,80 @@ struct State {
 }
 
 impl WpctlDucker {
+    /// Sans copie sur disque.
     pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
+        Self::build(runner, None)
+    }
+
+    /// Garde aussi le volume d'origine dans `file` tant que le son est baissé.
+    pub fn persistent(runner: Arc<dyn CommandRunner>, file: PathBuf) -> Self {
+        Self::build(runner, Some(file))
+    }
+
+    fn build(runner: Arc<dyn CommandRunner>, file: Option<PathBuf>) -> Self {
         Self {
             inner: Arc::new(Inner {
                 runner,
                 state: Mutex::new(State::default()),
+                file,
             }),
         }
     }
+
+    /// `$XDG_RUNTIME_DIR/jarvis/ducked-volume`, à côté du socket du cerveau.
+    pub fn default_file() -> PathBuf {
+        jarvis_protocol::socket_path().with_file_name("ducked-volume")
+    }
+
+    /// Au démarrage : un volume laissé sur disque par un arrêt brutal est rétabli.
+    pub async fn recover(&self) {
+        let Some(path) = &self.inner.file else { return };
+        let text = match std::fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return,
+            Err(e) => {
+                warn!(erreur = %e, "volume enregistré illisible");
+                return;
+            }
+        };
+        let mut state = self.inner.state.lock().await;
+        match text.trim().parse::<f32>() {
+            Ok(volume) if volume.is_finite() && volume >= 0.0 => {
+                info!("son resté baissé par un arrêt précédent, rétablissement");
+                state.saved = Some(volume);
+                self.inner.restore_locked(&mut state).await;
+            }
+            _ => {
+                warn!("volume enregistré invalide, ignoré");
+                self.inner.forget_file();
+            }
+        }
+    }
+}
+
+/// Écriture atomique (fichier temporaire puis renommage), fichier 0600, dossier 0700.
+fn write_volume(path: &Path, volume: f32) -> io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    if let Some(parent) = path.parent() {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(parent)?;
+    }
+    let tmp = path.with_extension("tmp");
+    // Un ancien fichier temporaire garderait ses droits.
+    let _ = std::fs::remove_file(&tmp);
+    let result = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&tmp)
+        .and_then(|mut f| writeln!(f, "{volume}"))
+        .and_then(|()| std::fs::rename(&tmp, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 impl Inner {
@@ -91,6 +161,23 @@ impl Inner {
             .and_then(|v| v.parse().ok())
     }
 
+    fn save_file(&self, volume: f32) {
+        if let Some(path) = &self.file
+            && let Err(e) = write_volume(path, volume)
+        {
+            warn!(erreur = %e, "volume d'origine non enregistré sur disque");
+        }
+    }
+
+    fn forget_file(&self) {
+        if let Some(path) = &self.file
+            && let Err(e) = std::fs::remove_file(path)
+            && e.kind() != io::ErrorKind::NotFound
+        {
+            warn!(erreur = %e, "volume enregistré non supprimé");
+        }
+    }
+
     /// (Re)lance la surveillance : sans `restore` d'ici `WATCHDOG_DELAY`, le son revient
     /// tout seul. Appelé verrou pris.
     fn arm_watchdog(self: &Arc<Self>, state: &mut State) {
@@ -115,6 +202,7 @@ impl Inner {
         // `restore` réessaiera, au lieu de laisser le son baissé pour de bon.
         if self.set_volume(volume).await {
             state.saved = None;
+            self.forget_file();
             // Annule la surveillance en cours.
             state.generation += 1;
         } else {
@@ -141,6 +229,7 @@ impl Ducker for WpctlDucker {
         // Enregistré avant la baisse : même si `set-volume` échoue ou s'applique en retard,
         // le prochain `restore` remettra le volume d'origine.
         state.saved = Some(volume);
+        inner.save_file(volume);
         inner.arm_watchdog(&mut state);
         if !inner.set_volume(volume * DUCK_RATIO).await {
             warn!("baisse du son non confirmée");
@@ -252,6 +341,94 @@ mod tests {
         assert_eq!(set_calls(&runner), ["0.18"]);
         tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
+    }
+
+    fn persistent(path: &std::path::Path) -> (WpctlDucker, Arc<FakeRunner>) {
+        let runner = Arc::new(FakeRunner::new());
+        runner.respond(
+            "wpctl",
+            CommandOutput {
+                success: true,
+                stdout: "Volume: 0.60\n".into(),
+            },
+        );
+        (
+            WpctlDucker::persistent(runner.clone(), path.to_path_buf()),
+            runner,
+        )
+    }
+
+    fn mode(path: &std::path::Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[tokio::test]
+    async fn volume_d_origine_sur_disque_pendant_la_baisse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jarvis/ducked-volume");
+        let (d, _) = persistent(&path);
+        d.duck().await;
+        assert_eq!(std::fs::read_to_string(&path).unwrap().trim(), "0.6");
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(mode(path.parent().unwrap()), 0o700);
+        // Écriture atomique : pas de fichier temporaire laissé.
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+        d.restore().await;
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn fichier_garde_si_le_retablissement_echoue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ducked-volume");
+        let (d, runner) = persistent(&path);
+        d.duck().await;
+        runner.respond(
+            "wpctl",
+            CommandOutput {
+                success: false,
+                stdout: String::new(),
+            },
+        );
+        d.restore().await;
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn volume_retabli_au_demarrage_apres_un_arret_brutal() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ducked-volume");
+        std::fs::write(&path, "0.6\n").unwrap();
+        let (d, runner) = persistent(&path);
+        d.recover().await;
+        assert_eq!(set_calls(&runner), ["0.60"]);
+        assert!(!path.exists());
+        // Rien de plus à rétablir ensuite.
+        d.restore().await;
+        assert_eq!(set_calls(&runner), ["0.60"]);
+    }
+
+    #[tokio::test]
+    async fn demarrage_sans_fichier_ne_touche_pas_au_son() {
+        let dir = tempfile::tempdir().unwrap();
+        let (d, runner) = persistent(&dir.path().join("ducked-volume"));
+        d.recover().await;
+        assert!(runner.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fichier_illisible_supprime_sans_toucher_au_son() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ducked-volume");
+        std::fs::write(&path, "n'importe quoi").unwrap();
+        let (d, runner) = persistent(&path);
+        d.recover().await;
+        assert!(runner.calls().is_empty());
+        assert!(!path.exists());
     }
 
     #[tokio::test]

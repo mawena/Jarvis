@@ -86,7 +86,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(NoTranscriber)
         }
     };
-    let ducker = Arc::new(WpctlDucker::new(runner));
+    let ducker = Arc::new(WpctlDucker::persistent(runner, WpctlDucker::default_file()));
+    ducker.recover().await;
     let listen = Arc::new(
         ListenService::new(brain.clone(), stt, ducker.clone())
             .with_speaker(speaker.gate().cloned()),
