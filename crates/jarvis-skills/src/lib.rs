@@ -26,16 +26,47 @@ pub struct ToolSpec {
     pub risk: Risk,
 }
 
+/// Issue d'une réponse : décide du bip joué par l'oreille.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Outcome {
+    /// Action faite (bip de réussite).
+    Done,
+    /// Échec (bip d'échec).
+    Failed,
+    /// Simple information, sans bip.
+    #[default]
+    Info,
+}
+
 /// What Jarvis says after a skill ran.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reply {
     pub speech: String,
+    pub outcome: Outcome,
 }
 
 impl Reply {
+    /// Information, sans bip.
     pub fn new(speech: impl Into<String>) -> Self {
         Self {
             speech: speech.into(),
+            outcome: Outcome::Info,
+        }
+    }
+
+    /// Action réussie.
+    pub fn done(speech: impl Into<String>) -> Self {
+        Self {
+            speech: speech.into(),
+            outcome: Outcome::Done,
+        }
+    }
+
+    /// Échec.
+    pub fn failed(speech: impl Into<String>) -> Self {
+        Self {
+            speech: speech.into(),
+            outcome: Outcome::Failed,
         }
     }
 }

@@ -213,6 +213,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         let listen = ControlRequest::Listen {
             audio: String::new(),
             muted: self.muted,
+            follow_up: false,
         };
         match tokio::time::timeout(QUIT_TIMEOUT, self.brain.request(listen)).await {
             Ok(Ok(_)) => {}
@@ -288,7 +289,13 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             if let Some(wake) = wake {
                 let _ = wake.await;
             }
-            let result = brain.request(ControlRequest::Listen { audio, muted }).await;
+            let result = brain
+                .request(ControlRequest::Listen {
+                    audio,
+                    muted,
+                    follow_up: false,
+                })
+                .await;
             let _ = tx.send(Internal::Heard { result, muted });
         });
     }
@@ -375,7 +382,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     match ear_action {
                         Some(EarAction::Mute) => self.set_muted(true),
                         Some(EarAction::Unmute) => self.set_muted(false),
-                        None => {}
+                        // Écoute sans mot d'éveil : branchée avec la lecture (phase 3, tâche 3).
+                        Some(EarAction::AwaitReply) | None => {}
                     }
                 }
                 Ok(ControlResponse::Error { message }) => {
@@ -671,6 +679,8 @@ mod tests {
                     text: "quelle heure est-il".into(),
                     speech: "Il est midi.".into(),
                     ear_action: None,
+                    audio: None,
+                    sound: None,
                 }),
                 _ => status_ok(),
             },
@@ -692,7 +702,7 @@ mod tests {
         assert_eq!(sent[0], ControlRequest::Wake);
         assert!(matches!(
             &sent[1],
-            ControlRequest::Listen { muted: false, audio } if audio.is_empty()
+            ControlRequest::Listen { muted: false, audio, .. } if audio.is_empty()
         ));
     }
 
@@ -704,6 +714,8 @@ mod tests {
                     text: "coupe l'écoute".into(),
                     speech: "D'accord.".into(),
                     ear_action: Some(EarAction::Mute),
+                    audio: None,
+                    sound: None,
                 }),
                 _ => status_ok(),
             },
@@ -735,6 +747,8 @@ mod tests {
                     text: "secret".into(),
                     speech: String::new(),
                     ear_action: None,
+                    audio: None,
+                    sound: None,
                 }),
                 _ => status_ok(),
             },
@@ -850,7 +864,7 @@ mod tests {
         assert_eq!(sent[0], ControlRequest::Wake);
         assert!(matches!(
             &sent[1],
-            ControlRequest::Listen { muted: false, audio } if audio.is_empty()
+            ControlRequest::Listen { muted: false, audio, .. } if audio.is_empty()
         ));
     }
 
@@ -917,6 +931,8 @@ mod tests {
                     text: "coupe l'écoute".into(),
                     speech: "D'accord.".into(),
                     ear_action: Some(EarAction::Mute),
+                    audio: None,
+                    sound: None,
                 }),
                 _ => status_ok(),
             },
@@ -962,7 +978,9 @@ mod tests {
             .requests()
             .into_iter()
             .find_map(|r| match r {
-                ControlRequest::Listen { audio, muted: true } => Some(audio),
+                ControlRequest::Listen {
+                    audio, muted: true, ..
+                } => Some(audio),
                 _ => None,
             })
             .expect("Listen muted");

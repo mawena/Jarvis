@@ -190,6 +190,7 @@ async fn server_listen_et_status_local_model() {
         .send(ControlRequest::Listen {
             audio: encode_pcm(&[1, 2, 3]),
             muted: false,
+            follow_up: false,
         })
         .await;
     assert_eq!(
@@ -197,13 +198,16 @@ async fn server_listen_et_status_local_model() {
         ControlResponse::Heard {
             text: "suivant".into(),
             speech: "ok".into(),
-            ear_action: None
+            ear_action: None,
+            audio: None,
+            sound: None,
         }
     );
     let r = c
         .send(ControlRequest::Listen {
             audio: "!!".into(),
             muted: false,
+            follow_up: false,
         })
         .await;
     assert!(matches!(r, ControlResponse::Error { .. }));

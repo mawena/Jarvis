@@ -4,6 +4,7 @@ use crate::ducking::Ducker;
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::stt::Transcriber;
+use crate::tts::{Speech, Synthesizer};
 use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -200,5 +201,43 @@ impl crate::speaker::SpeakerVerifier for FakeVerifier {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("empreinte factice inconnue"))
+    }
+}
+
+/// Voix programmée (son fixe ou échec), qui garde les phrases reçues.
+pub struct FakeSynthesizer {
+    speech: Option<Speech>,
+    texts: Mutex<Vec<String>>,
+}
+
+impl FakeSynthesizer {
+    /// Répond toujours `speech`.
+    pub fn new(speech: Speech) -> Self {
+        Self {
+            speech: Some(speech),
+            texts: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Échoue à chaque appel.
+    pub fn failing() -> Self {
+        Self {
+            speech: None,
+            texts: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Phrases reçues, dans l'ordre.
+    pub fn texts(&self) -> Vec<String> {
+        self.texts.lock().unwrap().clone()
+    }
+}
+
+impl Synthesizer for FakeSynthesizer {
+    fn synthesize(&self, text: &str) -> anyhow::Result<Speech> {
+        self.texts.lock().unwrap().push(text.to_string());
+        self.speech
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("voix en panne"))
     }
 }

@@ -39,6 +39,8 @@ fn heard(text: &str, speech: &str, ear_action: Option<EarAction>) -> ControlResp
         text: text.into(),
         speech: speech.into(),
         ear_action,
+        audio: None,
+        sound: None,
     }
 }
 
@@ -137,14 +139,15 @@ impl ListenService {
         match action {
             Some(EarAction::Mute) => heard(&text, "Écoute coupée.", Some(EarAction::Mute)),
             Some(EarAction::Unmute) => heard(&text, "L'écoute est déjà active.", None),
-            None if unverified => {
+            // `AwaitReply` ne vient jamais d'une commande d'écoute.
+            Some(EarAction::AwaitReply) | None if unverified => {
                 let speech = match self.brain.handle_fast(&text).await {
                     Some(r) => r.speech,
                     None => String::new(),
                 };
                 heard(&text, &speech, None)
             }
-            None => {
+            Some(EarAction::AwaitReply) | None => {
                 let speech = self.brain.handle_text(&text).await.speech;
                 heard(&text, &speech, None)
             }
