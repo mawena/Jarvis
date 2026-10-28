@@ -1,7 +1,9 @@
 //! Logique pure de l'oreille de Jarvis : traits de détection, états du micro.
 
+pub mod earshot;
 pub mod listener;
 pub mod resample;
+pub mod rustpotter;
 
 /// Fréquence d'échantillonnage de tout le traitement audio (Hz, mono).
 pub const SAMPLE_RATE: u32 = 16_000;

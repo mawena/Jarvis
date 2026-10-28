@@ -1362,11 +1362,14 @@ dependencies = [
  "anyhow",
  "clap",
  "cpal",
+ "directories",
  "earshot",
+ "hound",
  "jarvis-ear-core",
  "jarvis-protocol",
  "ksni",
  "rustpotter",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
@@ -1376,8 +1379,12 @@ dependencies = [
 name = "jarvis-ear-core"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
+ "directories",
  "earshot",
+ "hound",
  "rustpotter",
+ "tempfile",
 ]
 
 [[package]]
