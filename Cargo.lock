@@ -1360,6 +1360,7 @@ name = "jarvis-ear"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "clap",
  "cpal",
  "directories",
@@ -1369,8 +1370,12 @@ dependencies = [
  "jarvis-protocol",
  "ksni",
  "rustpotter",
+ "serde",
+ "serde_json",
  "tempfile",
+ "thiserror 2.0.21",
  "tokio",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]

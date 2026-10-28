@@ -9,7 +9,12 @@ use std::time::Duration;
 use anyhow::{Context, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use jarvis_ear_core::SAMPLE_RATE;
+use jarvis_ear_core::resample::Downmixer;
 use jarvis_ear_core::rustpotter::build_reference;
+
+/// Pause entre l'appui sur Entrée et le début de la prise (le bruit de la touche,
+/// puis le temps de se préparer, ne coupent pas le début de « Jarvis »).
+const START_DELAY: Duration = Duration::from_millis(800);
 
 /// Durée de chaque prise (secondes).
 const TAKE_SECONDS: f32 = 1.5;
@@ -31,25 +36,21 @@ pub fn samples_per_take() -> usize {
     (SAMPLE_RATE as f32 * TAKE_SECONDS) as usize
 }
 
-/// Mélange en mono (moyenne des canaux) et ramène à 16 kHz (moyenne par fenêtre).
-pub fn to_mono_16k(interleaved: &[f32], channels: usize, rate: u32) -> Vec<f32> {
-    let channels = channels.max(1);
-    let mono: Vec<f32> = interleaved
-        .chunks_exact(channels)
-        .map(|f| f.iter().sum::<f32>() / channels as f32)
-        .collect();
-    if rate == SAMPLE_RATE {
-        return mono;
+/// Supprime les anciennes prises `jarvis-NN.wav` (un `--count` plus petit ne doit pas
+/// laisser d'anciens échantillons). Renvoie le nombre de fichiers supprimés.
+pub fn clear_samples(dir: &Path) -> anyhow::Result<usize> {
+    let mut removed = 0;
+    for path in list_samples(dir)? {
+        let old_take = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("jarvis-"));
+        if old_take {
+            std::fs::remove_file(&path)?;
+            removed += 1;
+        }
     }
-    let ratio = rate as f64 / SAMPLE_RATE as f64;
-    let out_len = (mono.len() as f64 / ratio) as usize;
-    (0..out_len)
-        .map(|i| {
-            let start = (i as f64 * ratio) as usize;
-            let end = (((i + 1) as f64 * ratio) as usize).clamp(start + 1, mono.len());
-            mono[start..end].iter().sum::<f32>() / (end - start) as f32
-        })
-        .collect()
+    Ok(removed)
 }
 
 /// Écrit une prise en WAV 16 bits mono 16 kHz.
@@ -137,7 +138,7 @@ fn record_take() -> anyhow::Result<Vec<f32>> {
     }
     drop(stream);
     let raw = buffer.lock().map_err(|_| anyhow!("verrou"))?.clone();
-    Ok(to_mono_16k(&raw, channels, rate))
+    Ok(Downmixer::new(rate, channels as u16).push(&raw))
 }
 
 /// Point d'entrée de `jarvis-ear enroll`.
@@ -148,6 +149,10 @@ pub fn run(count: usize) -> anyhow::Result<()> {
     let dir = wakeword_dir()?;
     let samples_dir = dir.join("samples");
     std::fs::create_dir_all(&samples_dir)?;
+    let removed = clear_samples(&samples_dir)?;
+    if removed > 0 {
+        println!("{removed} ancienne(s) prise(s) supprimée(s).");
+    }
     let stdin = std::io::stdin();
     println!("Enrôlement du mot d'éveil : dis « Jarvis » à chaque prise ({count} au total).");
     println!(
@@ -158,6 +163,9 @@ pub fn run(count: usize) -> anyhow::Result<()> {
         print!("Prise {i}/{count} : appuie sur Entrée puis dis « Jarvis »… ");
         std::io::stdout().flush()?;
         stdin.lock().read_line(&mut String::new())?;
+        std::thread::sleep(START_DELAY);
+        print!("parle… ");
+        std::io::stdout().flush()?;
         let take = record_take()?;
         write_wav(&samples_dir.join(sample_file_name(i)), &take)?;
         println!("ok");
@@ -184,11 +192,16 @@ mod tests {
     }
 
     #[test]
-    fn mono_et_reechantillonnage_48k() {
-        let stereo: Vec<f32> = (0..4800).flat_map(|_| [0.2, 0.4]).collect();
-        let out = to_mono_16k(&stereo, 2, 48_000);
-        assert_eq!(out.len(), 1600);
-        assert!(out.iter().all(|s| (s - 0.3).abs() < 1e-6));
+    fn anciennes_prises_supprimees() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 1..=5 {
+            write_wav(&dir.path().join(sample_file_name(i)), &[0.0; 16]).unwrap();
+        }
+        write_wav(&dir.path().join("autre.wav"), &[0.0; 16]).unwrap();
+        assert_eq!(clear_samples(dir.path()).unwrap(), 5);
+        let left = list_samples(dir.path()).unwrap();
+        assert_eq!(left.len(), 1);
+        assert!(left[0].ends_with("autre.wav"));
     }
 
     #[test]
