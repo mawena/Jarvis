@@ -102,7 +102,7 @@ fast = false
 text = "ouvre-moi le navigateur"
 tool = "app_launch"
 args = { name = "navigateur" }
-fast = false
+fast = true
 
 [[phrase]]
 text = "je veux écouter autre chose"
@@ -162,7 +162,7 @@ fast = false
 text = "lance-moi le terminal"
 tool = "app_launch"
 args = { name = "terminal" }
-fast = false
+fast = true
 
 [[phrase]]
 text = "chanson précédente"

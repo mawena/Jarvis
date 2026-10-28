@@ -53,6 +53,9 @@ impl LlmBackend for OllamaBackend {
             .await
             .map_err(|e| LlmError::Unreachable(e.to_string()))?;
         let status = resp.status();
+        if status.is_client_error() {
+            return Err(LlmError::Rejected(format!("Ollama a répondu {status}")));
+        }
         if !status.is_success() {
             return Err(LlmError::Unreachable(format!("Ollama a répondu {status}")));
         }
@@ -200,5 +203,19 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::Unreachable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn ollama_4xx_refuse() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = backend(&server.uri())
+            .understand("salut", &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Rejected(_)), "{err:?}");
     }
 }

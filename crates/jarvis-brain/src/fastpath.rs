@@ -65,7 +65,20 @@ fn launch(phrase: &str) -> Option<Intent> {
     {
         return None;
     }
-    Some(Intent::new("app_launch", json!({ "name": rest })))
+    let name = rest
+        .split(' ')
+        .skip_while(|w| {
+            matches!(
+                *w,
+                "moi" | "le" | "la" | "les" | "l" | "un" | "une" | "mon" | "ma" | "mes"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    if name.is_empty() {
+        return None;
+    }
+    Some(Intent::new("app_launch", json!({ "name": name })))
 }
 
 /// Reconnaît une phrase courante sans passer par l'IA.
@@ -154,6 +167,25 @@ mod tests {
             match_fast("démarre Firefox"),
             intent("app_launch", json!({"name": "firefox"}))
         );
+    }
+
+    #[test]
+    fn lance_retire_articles_et_pronoms() {
+        for (phrase, name) in [
+            ("ouvre-moi le navigateur", "navigateur"),
+            ("lance le terminal", "terminal"),
+            ("ouvre la calculatrice", "calculatrice"),
+            ("lance-moi le terminal", "terminal"),
+            ("ouvre mon l'éditeur", "editeur"),
+        ] {
+            assert_eq!(
+                match_fast(phrase),
+                intent("app_launch", json!({ "name": name })),
+                "phrase: {phrase}"
+            );
+        }
+        assert_eq!(match_fast("ouvre le"), None);
+        assert_eq!(match_fast("lance moi la"), None);
     }
 
     #[test]

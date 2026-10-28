@@ -4,6 +4,7 @@ use crate::intent::Intent;
 use jarvis_skills::ToolSpec;
 use serde_json::{Value, json};
 use std::time::Duration;
+use tracing::warn;
 
 const TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -49,10 +50,12 @@ impl LlmBackend for ClaudeBackend {
             .collect();
         let body = json!({
             "model": self.model,
-            "max_tokens": 300,
+            "max_tokens": 1024,
             "system": system_prompt(&self.address),
             "messages": [{"role": "user", "content": text}],
             "tools": tools,
+            // Documenté pour claude-haiku-5-5 (GA, sans en-tête bêta).
+            "output_config": {"effort": "low"},
         });
         let resp = self
             .client
@@ -65,6 +68,11 @@ impl LlmBackend for ClaudeBackend {
             .await
             .map_err(|e| LlmError::Unreachable(e.to_string()))?;
         let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(LlmError::Rejected(format!(
+                "l'API Claude a répondu {status}"
+            )));
+        }
         if !status.is_success() {
             return Err(LlmError::Unreachable(format!(
                 "l'API Claude a répondu {status}"
@@ -94,11 +102,23 @@ fn parse(v: &Value) -> Result<Understanding, LlmError> {
         let input = b.get("input").cloned().unwrap_or_else(|| json!({}));
         return Ok(Understanding::Tool(Intent::new(name, input)));
     }
+    let stop_reason = v.get("stop_reason").and_then(Value::as_str);
+    if matches!(stop_reason, Some("max_tokens" | "refusal")) {
+        warn!(stop_reason = ?stop_reason, "réponse Claude inexploitable");
+        return Err(LlmError::BadResponse(format!(
+            "arrêt du modèle : {}",
+            stop_reason.unwrap_or_default()
+        )));
+    }
+    // Les blocs `thinking` sont ignorés : seuls les blocs `text` comptent.
     let text: String = blocks
         .iter()
         .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
         .filter_map(|b| b.get("text").and_then(Value::as_str))
         .collect();
+    if text.trim().is_empty() {
+        return Err(LlmError::BadResponse("réponse sans outil ni texte".into()));
+    }
     Ok(Understanding::Answer(text))
 }
 
@@ -141,7 +161,7 @@ mod tests {
         let reqs = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["model"], "claude-haiku-5-5");
-        assert_eq!(body["max_tokens"], 300);
+        assert_eq!(body["max_tokens"], 1024);
     }
 
     #[tokio::test]
@@ -190,5 +210,112 @@ mod tests {
             matches!(&err, LlmError::Unreachable(m) if m.contains("500")),
             "{err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn claude_corps_de_requete() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"content": [{"type": "text", "text": "ok"}]})),
+            )
+            .mount(&server)
+            .await;
+        let tool = ToolSpec {
+            name: "media_next".into(),
+            description: "Piste suivante".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+            risk: jarvis_skills::Risk::Direct,
+        };
+        backend(&server.uri(), Some("k"))
+            .understand("suivant", &[tool])
+            .await
+            .unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(body["system"].as_str().unwrap().starts_with("Tu es Jarvis"));
+        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(body["output_config"], json!({"effort": "low"}));
+        assert_eq!(body["tools"][0]["name"], "media_next");
+        assert_eq!(body["tools"][0]["description"], "Piste suivante");
+        assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    }
+
+    #[tokio::test]
+    async fn claude_max_tokens_sans_outil() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": [{"type": "thinking", "thinking": "hmm", "signature": "s"}],
+                "stop_reason": "max_tokens"
+            })))
+            .mount(&server)
+            .await;
+        let err = backend(&server.uri(), Some("k"))
+            .understand("salut", &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::BadResponse(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn claude_ignore_thinking_et_refuse_reponse_vide() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": [
+                    {"type": "thinking", "thinking": "hmm", "signature": "s"},
+                    {"type": "text", "text": "Bonjour."}
+                ],
+                "stop_reason": "end_turn"
+            })))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        let got = backend(&server.uri(), Some("k"))
+            .understand("salut", &[])
+            .await
+            .unwrap();
+        assert_eq!(got, Understanding::Answer("Bonjour.".into()));
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": [{"type": "thinking", "thinking": "hmm", "signature": "s"}],
+                "stop_reason": "end_turn"
+            })))
+            .mount(&server)
+            .await;
+        let err = backend(&server.uri(), Some("k"))
+            .understand("salut", &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::BadResponse(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn claude_cle_vide() {
+        let server = MockServer::start().await;
+        let err = backend(&server.uri(), Some(""))
+            .understand("salut", &[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::MissingApiKey(_)), "{err:?}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_cle_refusee() {
+        for code in [401, 403] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(code))
+                .mount(&server)
+                .await;
+            let err = backend(&server.uri(), Some("k"))
+                .understand("salut", &[])
+                .await
+                .unwrap_err();
+            assert!(matches!(err, LlmError::Rejected(_)), "{code}: {err:?}");
+        }
     }
 }

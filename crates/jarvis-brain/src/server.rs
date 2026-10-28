@@ -9,11 +9,12 @@ use std::path::Path;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{UnixListener, UnixStream};
-use tracing::{debug, warn};
+use tracing::{debug, info, warn};
 
 /// Écoute sur `socket` jusqu'à une erreur d'acceptation. Chaque client a sa tâche.
 pub async fn serve(brain: Arc<Brain>, socket: &Path) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
+    info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
     loop {
         let (stream, _) = listener.accept().await.context("acceptation d'un client")?;
         let brain = brain.clone();

@@ -22,6 +22,8 @@ pub enum LlmError {
     Unreachable(String),
     #[error("réponse inattendue du modèle : {0}")]
     BadResponse(String),
+    #[error("requête refusée par le modèle : {0}")]
+    Rejected(String),
     #[error("clé d'API absente (variable d'environnement {0})")]
     MissingApiKey(String),
 }

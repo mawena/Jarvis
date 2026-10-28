@@ -78,6 +78,13 @@ fn raccourcis_couvrent_leurs_phrases() {
     }
 }
 
+#[test]
+fn phrases_ia_ne_passent_pas_par_les_raccourcis() {
+    for p in phrases().iter().filter(|p| !p.fast) {
+        assert_eq!(match_fast(&p.text), None, "phrase: {}", p.text);
+    }
+}
+
 async fn run_set(label: &str, backend: &dyn LlmBackend) {
     let tools = real_tools();
     let all = phrases();
