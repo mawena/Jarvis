@@ -1,4 +1,5 @@
-//! Conversion du flux micro (format du périphérique) vers du mono 16 kHz en `f32`.
+//! Conversion du flux micro (format du périphérique) vers du mono 16 kHz en `f32`, et
+//! rééchantillonnage d'un son complet (voix de Jarvis vers la sortie).
 
 use crate::SAMPLE_RATE;
 
@@ -113,6 +114,72 @@ impl Downmixer {
     }
 }
 
+/// Demi-largeur du filtre de [`resample`], en passages par zéro.
+const ZERO_CROSSINGS: f64 = 16.0;
+/// Points de la table du filtre par échantillon d'entrée.
+const TABLE_STEPS: f64 = 256.0;
+
+/// Rééchantillonne un son mono complet de `from` vers `to` Hz (sinus cardinal fenêtré,
+/// passe-bas sous la plus petite des deux moitiés de fréquence).
+///
+/// # Panics
+/// Si une des fréquences vaut 0.
+pub fn resample(input: &[f32], from: u32, to: u32) -> Vec<f32> {
+    use std::f64::consts::PI;
+    assert!(from > 0 && to > 0, "fréquence nulle");
+    if from == to {
+        return input.to_vec();
+    }
+    let ratio = to as f64 / from as f64;
+    // Coupure en cycles par échantillon d'entrée, avec une marge de transition.
+    let cutoff = 0.5 * ratio.min(1.0) * 0.92;
+    let half = ZERO_CROSSINGS / (2.0 * cutoff);
+    // Filtre tabulé sur [0, half] (il est symétrique), lu par interpolation linéaire.
+    let points = (half * TABLE_STEPS).ceil() as usize + 2;
+    let table: Vec<f64> = (0..points)
+        .map(|k| {
+            let d = k as f64 / TABLE_STEPS;
+            if d >= half {
+                return 0.0;
+            }
+            let arg = 2.0 * cutoff * d;
+            let sinc = if arg == 0.0 {
+                1.0
+            } else {
+                (PI * arg).sin() / (PI * arg)
+            };
+            // Fenêtre de Blackman.
+            let w = 0.42 + 0.5 * (PI * d / half).cos() + 0.08 * (2.0 * PI * d / half).cos();
+            2.0 * cutoff * sinc * w
+        })
+        .collect();
+    let kernel = |d: f64| {
+        let pos = d.abs() * TABLE_STEPS;
+        let k = pos as usize;
+        if k + 1 >= points {
+            return 0.0;
+        }
+        let frac = pos - k as f64;
+        table[k] * (1.0 - frac) + table[k + 1] * frac
+    };
+    let len = (input.len() as f64 * ratio).round() as usize;
+    (0..len)
+        .map(|j| {
+            let t = j as f64 / ratio;
+            let first = (t - half).ceil().max(0.0) as usize;
+            let last = ((t + half).floor() as usize).min(input.len().saturating_sub(1));
+            let acc: f64 = input
+                .iter()
+                .enumerate()
+                .take(last + 1)
+                .skip(first)
+                .map(|(i, &x)| x as f64 * kernel(t - i as f64))
+                .sum();
+            acc as f32
+        })
+        .collect()
+}
+
 /// Sinus cardinal fenêtré (Hamming), gain continu normalisé à 1.
 /// `cutoff` est exprimé en fraction de la fréquence d'échantillonnage.
 fn lowpass_kernel(cutoff: f32) -> Vec<f32> {
@@ -223,6 +290,45 @@ mod tests {
         for (a, b) in whole.iter().zip(&chunked) {
             assert!((a - b).abs() < 1e-4);
         }
+    }
+
+    fn sine(freq: f32, rate: u32, n: usize) -> Vec<f32> {
+        (0..n)
+            .map(|i| (2.0 * std::f32::consts::PI * freq * i as f32 / rate as f32).sin() * 0.5)
+            .collect()
+    }
+
+    #[test]
+    fn reechantillonnage_meme_frequence_identique() {
+        let input = sine(440.0, 22_050, 1_000);
+        assert_eq!(resample(&input, 22_050, 22_050), input);
+        assert!(resample(&[], 22_050, 48_000).is_empty());
+    }
+
+    #[test]
+    fn reechantillonnage_22050_vers_48000_fidele() {
+        let out = resample(&sine(440.0, 22_050, 22_050), 22_050, 48_000);
+        assert_eq!(out.len(), 48_000);
+        let ideal = sine(440.0, 48_000, 48_000);
+        // Hors des bords, la sinusoïde est reproduite à 1 % près.
+        let err = out[1_000..47_000]
+            .iter()
+            .zip(&ideal[1_000..47_000])
+            .fold(0.0f32, |m, (a, b)| m.max((a - b).abs()));
+        assert!(err < 0.005, "erreur = {err}");
+    }
+
+    #[test]
+    fn reechantillonnage_vers_le_bas_sans_repliement() {
+        // 10 kHz ne passe pas à 16 kHz (au-delà de 8 kHz) : il doit disparaître.
+        let out = resample(&sine(10_000.0, 48_000, 48_000), 48_000, 16_000);
+        assert_eq!(out.len(), 16_000);
+        let peak = out[500..15_500].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak < 0.01, "pic = {peak}");
+        // 1 kHz passe intact.
+        let out = resample(&sine(1_000.0, 48_000, 48_000), 48_000, 16_000);
+        let peak = out[500..15_500].iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!((peak - 0.5).abs() < 0.01, "pic = {peak}");
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! Machine d'états d'écoute : attente du mot d'éveil, puis capture de la phrase.
 
 use std::collections::VecDeque;
+use std::time::Duration;
 
 use crate::{SAMPLE_RATE, Vad, WakeDetector};
 
@@ -15,6 +16,8 @@ const END_SILENCE: usize = RATE * 8 / 10;
 const NO_SPEECH: usize = RATE * 4;
 /// Durée maximale de la phrase, mesurée depuis le réveil.
 const MAX_UTTERANCE: usize = RATE * 10;
+/// Temps de parole garanti même si elle commence à la fin du délai.
+const MIN_SPEECH: usize = MAX_UTTERANCE - NO_SPEECH;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ListenEvent {
@@ -35,6 +38,10 @@ enum State {
         speech_start: Option<usize>,
         /// Silence consécutif depuis la dernière parole (échantillons).
         silence: usize,
+        /// Abandon si aucune parole avant cette longueur de `post`.
+        no_speech: usize,
+        /// Longueur maximale de `post`.
+        max_len: usize,
     },
 }
 
@@ -88,6 +95,8 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
                         post: Vec::new(),
                         speech_start: None,
                         silence: 0,
+                        no_speech: NO_SPEECH,
+                        max_len: MAX_UTTERANCE,
                     };
                     events.push(ListenEvent::Wake { score });
                 } else {
@@ -113,6 +122,8 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
             post,
             speech_start,
             silence,
+            no_speech,
+            max_len,
         } = &mut self.state
         else {
             return;
@@ -127,11 +138,11 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
         self.vad_buf.clear();
 
         match *speech_start {
-            None if post.len() >= NO_SPEECH => {
+            None if post.len() >= *no_speech => {
                 events.push(ListenEvent::NoSpeech);
                 self.reset();
             }
-            Some(start) if *silence >= END_SILENCE || post.len() >= MAX_UTTERANCE => {
+            Some(start) if *silence >= END_SILENCE || post.len() >= *max_len => {
                 let from = start.saturating_sub(PRE_ROLL);
                 let mut utterance = std::mem::take(&mut self.head);
                 utterance.extend_from_slice(&post[from..]);
@@ -140,6 +151,20 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
             }
             _ => {}
         }
+    }
+
+    /// Capture tout de suite, sans mot d'éveil (réponse à une question de Jarvis) :
+    /// abandon si personne ne parle avant `wait`. La phrase n'a pas de seconde de tête.
+    pub fn listen_now(&mut self, wait: Duration) {
+        self.reset();
+        let no_speech = (wait.as_secs_f64() * RATE as f64) as usize;
+        self.state = State::Capturing {
+            post: Vec::new(),
+            speech_start: None,
+            silence: 0,
+            no_speech,
+            max_len: no_speech + MIN_SPEECH,
+        };
     }
 
     /// Abandonne la capture en cours et vide les tampons (coupure totale, perte du micro).
@@ -157,6 +182,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct FakeWake {
         at_frames: Vec<usize>,
@@ -314,6 +340,50 @@ mod tests {
         let after_wake = calls.load(Ordering::SeqCst);
         run(&mut l, &ramp(50_000));
         assert_eq!(calls.load(Ordering::SeqCst), after_wake);
+    }
+
+    #[test]
+    fn ecoute_directe_sans_mot_d_eveil() {
+        let (w, calls) = FakeWake::new(1);
+        let mut l = Listener::new(w, FakeVad::new(30..50));
+        l.listen_now(Duration::from_secs(8));
+        // Exactement jusqu'à la fin de la phrase (20 trames de parole, 50 de silence).
+        let sig = ramp((30 + 20 + 50) * 256);
+        let ev = run(&mut l, &sig);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "mot d'éveil non consulté");
+        let [ListenEvent::Utterance(u)] = ev.as_slice() else {
+            panic!("{ev:?}")
+        };
+        // Pas de seconde de tête : la phrase commence au pré-enregistrement.
+        assert_eq!(u[0], sig[30 * 256 - PRE_ROLL]);
+        assert_eq!(u.len(), PRE_ROLL + (20 + 50) * 256);
+    }
+
+    #[test]
+    fn ecoute_directe_sans_parole_abandon_apres_le_delai() {
+        let (w, _) = FakeWake::new(usize::MAX);
+        let mut l = Listener::new(w, FakeVad::new(0..0));
+        l.listen_now(Duration::from_secs(8));
+        // 4 s ne suffisent plus : le délai demandé est de 8 s.
+        assert!(run(&mut l, &ramp(5 * RATE)).is_empty());
+        assert_eq!(
+            run(&mut l, &ramp(3 * RATE + 512)),
+            vec![ListenEvent::NoSpeech]
+        );
+    }
+
+    #[test]
+    fn ecoute_directe_parole_tardive_pas_coupee_trop_tot() {
+        let (w, _) = FakeWake::new(usize::MAX);
+        // Parole à partir de 7,5 s, pendant 4 s.
+        let start = 7 * RATE / 256 + 31;
+        let mut l = Listener::new(w, FakeVad::new(start..start + 250));
+        l.listen_now(Duration::from_secs(8));
+        let ev = run(&mut l, &ramp(16 * RATE));
+        let [ListenEvent::Utterance(u)] = ev.as_slice() else {
+            panic!("{ev:?}")
+        };
+        assert_eq!(u.len(), PRE_ROLL + (250 + 50) * 256);
     }
 
     #[test]
