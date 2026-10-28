@@ -5,9 +5,6 @@ use jarvis_brain::config::{LocalLlmConfig, OnlineLlmConfig};
 use jarvis_brain::fastpath::match_fast;
 use jarvis_brain::intent::Intent;
 use jarvis_brain::llm::{ClaudeBackend, LlmBackend, OllamaBackend, Understanding};
-use jarvis_brain::mode_store::ModeStore;
-use jarvis_brain::system_skill::SystemSkill;
-use jarvis_protocol::Mode;
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaPlayers, MediaSkill, PlayerCommand, PlayerInfo};
 use jarvis_skills::{FakeRunner, Skill, ToolSpec};
@@ -51,12 +48,7 @@ fn real_tools() -> Vec<ToolSpec> {
     let runner = Arc::new(FakeRunner::new());
     let media = MediaSkill::new(Arc::new(NoPlayers), runner.clone());
     let apps = AppsSkill::new(AppIndex::load(&[]), HashMap::new(), runner);
-    let modes = Arc::new(ModeStore::new(
-        std::env::temp_dir().join("jarvis-test-phrases-mode"),
-        Mode::Local,
-    ));
-    let system = SystemSkill::new(modes);
-    [media.tools(), apps.tools(), system.tools()].concat()
+    [media.tools(), apps.tools()].concat()
 }
 
 #[test]
@@ -87,7 +79,11 @@ fn phrases_ia_ne_passent_pas_par_les_raccourcis() {
 
 async fn run_set(label: &str, backend: &dyn LlmBackend) {
     let tools = real_tools();
-    let all = phrases();
+    // Les outils système ne sont pas proposés à l'IA : leurs phrases passent par les raccourcis.
+    let all: Vec<Phrase> = phrases()
+        .into_iter()
+        .filter(|p| tools.iter().any(|t| t.name == p.tool))
+        .collect();
     let mut ok = 0usize;
     let mut times: Vec<Duration> = Vec::new();
     for p in &all {
