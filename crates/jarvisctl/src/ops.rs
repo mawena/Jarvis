@@ -1,7 +1,7 @@
 //! Logique des sous-commandes de `jarvisctl`.
 
 use crate::paths::{
-    BINARIES, DEFAULT_MODEL, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, WHISPER_MODEL,
+    BINARIES, DEFAULT_MODEL, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, VOICE_DIR, WHISPER_MODEL,
 };
 use crate::system::{OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
@@ -362,15 +362,15 @@ fn api_key_set(paths: &Paths) -> bool {
 /// Chemin du modèle `[section] model_path` de la configuration, `~` développé ;
 /// sinon le fichier par défaut dans `~/.local/share/jarvis/models/`.
 fn model_path(paths: &Paths, section: &str, default_file: &str) -> PathBuf {
+    configured_path(paths, section, "model_path", default_file)
+}
+
+/// Comme [`model_path`], pour n'importe quelle clé (`[tts] model_dir`).
+fn configured_path(paths: &Paths, section: &str, key: &str, default_file: &str) -> PathBuf {
     let configured = fs::read_to_string(&paths.config_file)
         .ok()
         .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
-        .and_then(|v| {
-            v.get(section)?
-                .get("model_path")?
-                .as_str()
-                .map(PathBuf::from)
-        });
+        .and_then(|v| v.get(section)?.get(key)?.as_str().map(PathBuf::from));
     match configured {
         Some(p) => match p.strip_prefix("~") {
             Ok(rest) => paths.home.join(rest),
@@ -606,7 +606,7 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             })
     };
     let missing: Vec<&str> = SHARED_LIBS.into_iter().filter(|l| !has_lib(l)).collect();
-    let items: [(bool, String, String); 5] = [
+    let items: [(bool, String, String); 6] = [
         (
             missing.is_empty(),
             format!("Bibliothèques sherpa-onnx dans {}", paths.lib_dir.display()),
@@ -624,6 +624,11 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             model_path(paths, "speaker", SPEAKER_MODEL).is_file(),
             "Modèle d'empreinte vocale".into(),
             "lancez `scripts/download-models.sh speaker`".into(),
+        ),
+        (
+            voice_installed(&configured_path(paths, "tts", "model_dir", VOICE_DIR)),
+            "Voix de Jarvis".into(),
+            "lancez `scripts/download-models.sh voice`".into(),
         ),
         (
             paths.data_dir.join("wakeword/jarvis.rpw").is_file(),
@@ -644,6 +649,15 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Voix utilisable : `tokens.txt` et un modèle `.onnx` dans le dossier.
+fn voice_installed(dir: &Path) -> bool {
+    dir.join("tokens.txt").is_file()
+        && fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let p = e.path();
+            p.is_file() && p.extension().is_some_and(|x| x == "onnx")
+        })
 }
 
 /// Écrit ou remplace la ligne `ANTHROPIC_API_KEY=` ; ne l'affiche jamais.
@@ -1059,6 +1073,7 @@ mod tests {
             "! Bibliothèques sherpa-onnx",
             "! Modèle Whisper absent",
             "! Modèle d'empreinte vocale absent",
+            "! Voix de Jarvis absent — optionnel (oreille du PC) : lancez `scripts/download-models.sh voice`",
             "! Mot d'éveil enregistré absent",
             "! Empreinte vocale enregistrée absent",
         ] {
@@ -1070,6 +1085,10 @@ mod tests {
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join(WHISPER_MODEL), "").unwrap();
         fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        let voice = models.join(VOICE_DIR);
+        fs::create_dir_all(&voice).unwrap();
+        fs::write(voice.join("fr_FR-upmc-medium.onnx"), "").unwrap();
+        fs::write(voice.join("tokens.txt"), "").unwrap();
         fs::create_dir_all(paths.data_dir.join("wakeword")).unwrap();
         fs::write(paths.data_dir.join("wakeword/jarvis.rpw"), "").unwrap();
         fs::create_dir_all(paths.data_dir.join("voiceprint")).unwrap();
@@ -1081,6 +1100,7 @@ mod tests {
             "✓ Bibliothèques sherpa-onnx",
             "✓ Modèle Whisper",
             "✓ Modèle d'empreinte vocale",
+            "✓ Voix de Jarvis",
             "✓ Mot d'éveil enregistré",
             "✓ Empreinte vocale enregistrée",
         ] {
@@ -1102,17 +1122,23 @@ mod tests {
         fs::create_dir_all(&paths.config_dir).unwrap();
         fs::write(
             &paths.config_file,
-            "[stt]\nmodel_path = \"~/ailleurs/whisper.bin\"\n\n[speaker]\nmodel_path = \"/inexistant/voix.onnx\"\n",
+            "[stt]\nmodel_path = \"~/ailleurs/whisper.bin\"\n\n[speaker]\nmodel_path = \"/inexistant/voix.onnx\"\n\n[tts]\nmodel_dir = \"~/ailleurs/voix\"\n",
         )
         .unwrap();
         // Le modèle par défaut existe, mais la configuration pointe ailleurs.
         let models = paths.data_dir.join("models");
         fs::create_dir_all(&models).unwrap();
         fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        // Voix configurée ailleurs : seul ce dossier compte.
+        let voice = home.path().join("ailleurs/voix");
+        fs::create_dir_all(&voice).unwrap();
+        fs::write(voice.join("autre.onnx"), "").unwrap();
+        fs::write(voice.join("tokens.txt"), "").unwrap();
         let mut out = Vec::new();
         doctor(&paths, &sys, &mut out).unwrap();
         let o = text(out);
         assert!(o.contains("✓ Modèle Whisper"), "{o}");
         assert!(o.contains("! Modèle d'empreinte vocale absent"), "{o}");
+        assert!(o.contains("✓ Voix de Jarvis"), "{o}");
     }
 }
