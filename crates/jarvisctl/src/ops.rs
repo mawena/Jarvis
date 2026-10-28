@@ -137,13 +137,18 @@ fn copy_libraries(source: &Path, paths: &Paths, out: &mut dyn Write) -> Result<(
         .map(|e| e.path())
         .collect();
     libs.sort();
-    if libs.is_empty() {
-        writeln!(
-            out,
-            "Attention : aucune bibliothèque sherpa-onnx dans {} (empreinte vocale indisponible).",
+    // jarvis-brain est lié dynamiquement à sherpa-onnx : sans cette bibliothèque, il ne
+    // démarre pas du tout. Mieux vaut échouer ici que d'activer un service cassé.
+    let has_c_api = libs.iter().any(|p| {
+        p.file_name()
+            .is_some_and(|n| n == "libsherpa-onnx-c-api.so")
+    });
+    if !has_c_api {
+        bail!(
+            "libsherpa-onnx-c-api.so introuvable dans {} : le cerveau ne pourrait pas démarrer. \
+             Recompile avec `cargo build --release` (ou relance sans --no-build).",
             release.display()
-        )?;
-        return Ok(());
+        );
     }
     fs::create_dir_all(&paths.lib_dir)?;
     for from in libs {
@@ -270,12 +275,12 @@ pub fn uninstall(
     writeln!(out, "Binaires supprimés de {}.", paths.bin_dir.display())?;
     if paths.lib_dir.exists() {
         fs::remove_dir_all(&paths.lib_dir)?;
+        writeln!(
+            out,
+            "Bibliothèques supprimées de {}.",
+            paths.lib_dir.display()
+        )?;
     }
-    writeln!(
-        out,
-        "Bibliothèques supprimées de {}.",
-        paths.lib_dir.display()
-    )?;
 
     if purge {
         let dirs = [&paths.config_dir, &paths.state_dir, &paths.data_dir];
@@ -977,6 +982,15 @@ mod tests {
         // Aucun fichier temporaire ne reste.
         assert_eq!(fs::read_dir(&paths.lib_dir).unwrap().count(), 4);
         assert!(paths.lib_dir.ends_with(".local/lib/jarvis"));
+    }
+
+    #[test]
+    fn install_refuse_sans_bibliotheque_sherpa() {
+        let (home, paths) = setup();
+        let src = fake_source(home.path());
+        fs::remove_file(src.join("target/release/libsherpa-onnx-c-api.so")).unwrap();
+        let err = copy_libraries(&src, &paths, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("libsherpa-onnx-c-api.so"), "{err}");
     }
 
     #[test]

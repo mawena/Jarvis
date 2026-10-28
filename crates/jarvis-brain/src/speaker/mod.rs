@@ -187,7 +187,11 @@ impl SpeakerGate {
             .with_context(|| format!("permissions de {}", parent.display()))?;
         let json = serde_json::to_string(print)?;
         // Écriture atomique : fichier temporaire 0600 dans le même dossier, puis `rename`.
-        let tmp = parent.join(format!(".charles.json.{}.tmp", std::process::id()));
+        // Nom unique par écriture (processus + compteur) : deux enregistrements simultanés
+        // ne peuvent pas se renommer mutuellement leur fichier temporaire.
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = parent.join(format!(".charles.json.{}.{n}.tmp", std::process::id()));
         let _ = std::fs::remove_file(&tmp);
         let written = (|| -> std::io::Result<()> {
             let mut f = std::fs::OpenOptions::new()
