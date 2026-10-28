@@ -30,6 +30,10 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Préchauffer le modèle local au démarrage du cerveau et le garder chargé (première phrase : > 20 s → 2,9 s)
 - [x] Rendre l'IA locale robuste : appel d'outil écrit en texte reconnu, outils système retirés de l'IA (≈ 82-89 % sur le jeu de phrases)
 - [ ] Questions libres en mode local : `llama3.2:3b` appelle encore un outil au hasard (« capitale du Pérou » → musique) ; prévoir une étape d'aiguillage « commande ou conversation » avant l'appel d'outils
+- [x] Raccourcis élargis (« reprendre », « continue », « mets pause »…) et politesses ignorées (« Jarvis, tu peux… s'il te plaît »)
+- [x] Lecteurs inaccessibles (Firefox snap) ignorés, touches multimédia en repli, messages d'erreur courts
+- [x] Cerveau en service systemd utilisateur (`jarvis-brain.service`) et outil de gestion `jarvisctl` (install, uninstall, start, stop, restart, status, logs, doctor, set-api-key, update) — voir `docs/installation.md`
+- [ ] Installer le service avec `jarvisctl install` sur le PC de Charles
 - [ ] Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
 
 ## Phase 2 : oreille du PC (écoute permanente)
@@ -99,7 +103,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 ## Phase 9 : mise en service
 - [ ] Rédiger le plan de la phase 9
-- [ ] Services systemd utilisateur pour le cerveau et l'oreille du PC
+- [ ] Service systemd utilisateur pour l'oreille du PC (celui du cerveau est fait en phase 1, `jarvisctl` à étendre)
 - [ ] Statut détaillé dans l'icône : oreilles connectées, tâches d'agent en cours
 - [ ] Option `inhibit_sleep_on_ac`
 - [ ] Mesure des critères de réussite (vitesse, fausses détections, doubles exécutions)
