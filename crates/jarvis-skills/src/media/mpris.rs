@@ -1,6 +1,7 @@
 //! Real MPRIS access over the D-Bus session bus.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use anyhow::Context;
@@ -47,6 +48,21 @@ async fn connect() -> anyhow::Result<Connection> {
         .context("connexion au bus de session")
 }
 
+/// Bus names already reported in the log, so a broken player (e.g. a snap
+/// Firefox answering "Access denied") does not flood it on every call.
+fn warn_once(name: &str) -> bool {
+    static WARNED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let set = WARNED.get_or_init(Default::default);
+    set.lock()
+        .map(|mut s| s.insert(name.to_string()))
+        .unwrap_or(false)
+}
+
+/// Readable status, or `None` when the player must be skipped.
+fn status_or_skip<E>(raw: Result<String, E>) -> Option<PlaybackStatus> {
+    raw.ok().map(|s| parse_status(&s))
+}
+
 fn parse_status(s: &str) -> PlaybackStatus {
     match s {
         "Playing" => PlaybackStatus::Playing,
@@ -71,11 +87,9 @@ async fn describe(conn: &Connection, bus_name: &str) -> anyhow::Result<PlayerInf
         .get_property::<String>("Identity")
         .await
         .unwrap_or_else(|_| bus_name.trim_start_matches(PREFIX).to_string());
-    let status = player
-        .get_property::<String>("PlaybackStatus")
-        .await
-        .map(|s| parse_status(&s))
-        .unwrap_or(PlaybackStatus::Stopped);
+    // Unreadable status (Access denied, timeout...) means unusable player.
+    let status = status_or_skip(player.get_property::<String>("PlaybackStatus").await)
+        .context("PlaybackStatus illisible")?;
     let metadata = player
         .get_property::<HashMap<String, OwnedVariant>>("Metadata")
         .await
@@ -121,8 +135,16 @@ impl MediaPlayers for MprisPlayers {
             // A player that vanishes or hangs is skipped, not fatal.
             match tokio::time::timeout(DBUS_TIMEOUT, describe(&conn, &name)).await {
                 Ok(Ok(info)) => out.push(info),
-                Ok(Err(e)) => tracing::warn!(player = %name, "lecteur MPRIS ignoré : {e}"),
-                Err(_) => tracing::warn!(player = %name, "lecteur MPRIS ignoré : délai dépassé"),
+                Ok(Err(e)) => {
+                    if warn_once(&name) {
+                        tracing::warn!(player = %name, "lecteur MPRIS ignoré : {e:#}");
+                    }
+                }
+                Err(_) => {
+                    if warn_once(&name) {
+                        tracing::warn!(player = %name, "lecteur MPRIS ignoré : délai dépassé");
+                    }
+                }
             }
         }
         Ok(out)
@@ -160,6 +182,21 @@ mod tests {
             player_names(&names),
             vec!["org.mpris.MediaPlayer2.vlc".to_string()]
         );
+    }
+
+    #[test]
+    fn lecteur_inaccessible_ignore() {
+        assert_eq!(status_or_skip::<()>(Err(())), None);
+        assert_eq!(
+            status_or_skip::<()>(Ok("Playing".into())),
+            Some(PlaybackStatus::Playing)
+        );
+    }
+
+    #[test]
+    fn avertit_une_seule_fois_par_nom() {
+        assert!(warn_once("org.mpris.MediaPlayer2.test_unique"));
+        assert!(!warn_once("org.mpris.MediaPlayer2.test_unique"));
     }
 
     #[tokio::test]
