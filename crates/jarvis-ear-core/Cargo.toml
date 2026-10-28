@@ -7,8 +7,8 @@ edition.workspace = true
 rustpotter.workspace = true
 earshot.workspace = true
 anyhow.workspace = true
-hound.workspace = true
 
 [dev-dependencies]
+hound.workspace = true
 tempfile.workspace = true
 directories.workspace = true
