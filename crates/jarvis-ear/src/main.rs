@@ -33,11 +33,14 @@ struct Cli {
 enum Command {
     /// Écoute le micro (commande par défaut).
     Run,
-    /// Enregistre le mot d'éveil.
+    /// Enregistre le mot d'éveil, puis l'empreinte vocale.
     Enroll {
         /// Nombre de prises de « Jarvis ».
         #[arg(long, default_value_t = 8)]
         count: usize,
+        /// Refait uniquement l'empreinte vocale (6 phrases), sans le mot d'éveil.
+        #[arg(long)]
+        voice_only: bool,
     },
 }
 
@@ -47,7 +50,7 @@ fn main() -> anyhow::Result<()> {
             .enable_all()
             .build()?
             .block_on(run())?,
-        Command::Enroll { count } => enroll::run(count)?,
+        Command::Enroll { count, voice_only } => enroll::run(count, voice_only)?,
     }
     Ok(())
 }
