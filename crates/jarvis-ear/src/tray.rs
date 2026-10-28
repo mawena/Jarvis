@@ -36,6 +36,15 @@ pub struct JarvisTray {
     pub commands: UnboundedSender<TrayCommand>,
 }
 
+/// Mode correspondant à l'index du groupe radio (0 = local, 1 = en ligne).
+fn mode_for_index(index: usize) -> Mode {
+    if index == 0 {
+        Mode::Local
+    } else {
+        Mode::Online
+    }
+}
+
 fn brain_unreachable(state: &TrayState) -> bool {
     state.brain == BrainLink::Unreachable
 }
@@ -92,6 +101,7 @@ fn hard_mute_label(state: &TrayState) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub fn menu_labels(state: &TrayState) -> Vec<String> {
     let mut labels = vec![
         summary(state),
@@ -196,11 +206,7 @@ impl ksni::Tray for JarvisTray {
             RadioGroup {
                 selected,
                 select: Box::new(|t: &mut JarvisTray, index| {
-                    t.send(TrayCommand::SetMode(if index == 0 {
-                        Mode::Local
-                    } else {
-                        Mode::Online
-                    }));
+                    t.send(TrayCommand::SetMode(mode_for_index(index)));
                 }),
                 options: vec![radio("Mode local"), radio("Mode en ligne")],
             }
@@ -343,6 +349,22 @@ mod tests {
             .expect("entrée");
         (item.activate)(&mut tray);
         assert_eq!(rx.try_recv().unwrap(), TrayCommand::Mute);
+    }
+
+    #[test]
+    fn index_radio_vers_mode() {
+        let (mut tray, mut rx) = tray_of(connected(MicState::Open, false));
+        let group = ksni::Tray::menu(&tray)
+            .into_iter()
+            .find_map(|m| match m {
+                MenuItem::RadioGroup(g) => Some(g),
+                _ => None,
+            })
+            .expect("groupe radio");
+        (group.select)(&mut tray, 1);
+        (group.select)(&mut tray, 0);
+        assert_eq!(rx.try_recv().unwrap(), TrayCommand::SetMode(Mode::Online));
+        assert_eq!(rx.try_recv().unwrap(), TrayCommand::SetMode(Mode::Local));
     }
 
     /// Vérifie l'enregistrement réel sur le bus de session (5 s).
