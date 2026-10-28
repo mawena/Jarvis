@@ -30,7 +30,7 @@ directories = "6"
 cpal = "0.18"
 rustpotter = "3.0"
 earshot = "1.2"
-whisper-rs = "0.16"
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 base64 = "0.22"
 hound = "3"

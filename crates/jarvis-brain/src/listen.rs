@@ -3,6 +3,7 @@
 use crate::brain::Brain;
 use crate::ducking::Ducker;
 use crate::fastpath::match_ear_command;
+use crate::speaker::{SpeakerGate, Verdict};
 use crate::stt::Transcriber;
 use jarvis_protocol::{ControlResponse, EarAction};
 use std::sync::Arc;
@@ -27,6 +28,7 @@ pub struct ListenService {
     brain: Arc<Brain>,
     stt: Arc<dyn Transcriber>,
     ducker: Arc<dyn Ducker>,
+    speaker: Option<Arc<SpeakerGate>>,
 }
 
 fn heard(text: &str, speech: &str, ear_action: Option<EarAction>) -> ControlResponse {
@@ -39,7 +41,18 @@ fn heard(text: &str, speech: &str, ear_action: Option<EarAction>) -> ControlResp
 
 impl ListenService {
     pub fn new(brain: Arc<Brain>, stt: Arc<dyn Transcriber>, ducker: Arc<dyn Ducker>) -> Self {
-        Self { brain, stt, ducker }
+        Self {
+            brain,
+            stt,
+            ducker,
+            speaker: None,
+        }
+    }
+
+    /// Active la vérification du locuteur avant toute transcription.
+    pub fn with_speaker(mut self, speaker: Option<Arc<SpeakerGate>>) -> Self {
+        self.speaker = speaker;
+        self
     }
 
     /// « Jarvis » entendu : baisse le son.
@@ -54,6 +67,26 @@ impl ListenService {
             return heard("", "", None);
         }
         let samples: Vec<f32> = audio.iter().map(|&s| f32::from(s) / 32768.0).collect();
+        if let Some(gate) = &self.speaker {
+            let (g, audio) = (gate.clone(), samples.clone());
+            // L'empreinte prend des dizaines de ms : hors du runtime.
+            let verdict = tokio::task::spawn_blocking(move || g.check(&audio))
+                .await
+                .unwrap_or(Verdict::NoMatch(0.0));
+            match verdict {
+                // `Match(1.0)` est la valeur sentinelle d'une phrase courte acceptée par la
+                // session : ce n'est pas un vrai score, on ne le journalise pas.
+                Verdict::Match(_) | Verdict::NotEnrolled => {}
+                Verdict::NoMatch(score) => {
+                    info!("voix non reconnue (score {score:.2})");
+                    return heard("", "", None);
+                }
+                Verdict::TooShort => {
+                    info!("voix non reconnue (phrase trop courte)");
+                    return heard("", "", None);
+                }
+            }
+        }
         let text = match self.stt.transcribe(&samples).await {
             Ok(t) => t.trim().to_string(),
             Err(e) => {
@@ -132,6 +165,71 @@ mod tests {
     }
 
     const AUDIO: &[i16] = &[1, 2, 3];
+
+    /// Voix de Charles : premier échantillon bas ; voix inconnue : premier échantillon haut.
+    struct ByFirstSample;
+
+    impl crate::speaker::SpeakerVerifier for ByFirstSample {
+        fn embed(&self, audio: &[f32]) -> anyhow::Result<Vec<f32>> {
+            Ok(if audio[0] < 0.5 {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            })
+        }
+    }
+
+    fn voice(first: i16) -> Vec<i16> {
+        let mut a = vec![0i16; 3 * 16_000];
+        a[0] = first;
+        a
+    }
+
+    fn with_gate(enrolled: bool) -> Setup {
+        let mut s = setup(FakeTranscriber::new("suivant"));
+        let path = s._dir.path().join("voiceprint/charles.json");
+        let gate = SpeakerGate::new(Arc::new(ByFirstSample), path, 0.55, 0.65);
+        if enrolled {
+            gate.enroll(&[vec![0.0; 16_000]]).unwrap();
+        }
+        s.service = s.service.with_speaker(Some(Arc::new(gate)));
+        s
+    }
+
+    #[tokio::test]
+    async fn voix_inconnue_ignoree_sans_transcription() {
+        let s = with_gate(true);
+        let r = s.service.listen(&voice(20_000), false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.stt.calls(), 0);
+        assert!(s.skill.calls().is_empty());
+        // Écoute coupée : même vérification.
+        let r = s.service.listen(&voice(20_000), true).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.stt.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn voix_reconnue_executee() {
+        let s = with_gate(true);
+        let r = s.service.listen(&voice(0), false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.stt.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn sans_empreinte_executee() {
+        let s = with_gate(false);
+        let r = s.service.listen(&voice(20_000), false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+    }
+
+    #[tokio::test]
+    async fn voix_inconnue_restaure_la_musique() {
+        let s = with_gate(true);
+        s.service.listen(&voice(20_000), false).await;
+        assert_eq!(s.ducker.events(), ["restore"]);
+    }
 
     #[tokio::test]
     async fn listen_transcrit_puis_agit() {
