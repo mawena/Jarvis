@@ -37,4 +37,3 @@ hound = "3"
 
 wiremock = "0.6"
 tempfile = "3"
-hound = "3.5"
