@@ -1,7 +1,9 @@
 pub mod brain;
 pub mod config;
+pub mod ducking;
 pub mod fastpath;
 pub mod intent;
+pub mod listen;
 pub mod llm;
 pub mod logging;
 pub mod mode_store;
