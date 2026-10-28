@@ -5,11 +5,13 @@ use crate::listen::ListenService;
 use crate::speaker::SpeakerGate;
 use anyhow::{Context, bail};
 use jarvis_protocol::{ControlRequest, ControlResponse, decode_pcm};
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
@@ -82,26 +84,80 @@ async fn bind(socket: &Path) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
+/// Taille maximale d'une ligne de requête. Pire cas permis par le serveur : un
+/// enrôlement de 20 échantillons de 30 s (16 kHz, i16), soit 19,2 Mo d'audio et
+/// 25,6 Mo en base64 ; l'oreille envoie en réalité environ 1 Mo.
+pub const MAX_REQUEST_BYTES: usize = 32 * 1024 * 1024;
+
+#[derive(Debug, PartialEq)]
+enum Line {
+    /// Ligne complète, sans le retour à la ligne.
+    Request(Vec<u8>),
+    /// Plus de `max` octets sans retour à la ligne.
+    TooLong,
+    /// Connexion fermée.
+    Eof,
+}
+
+/// Lit une ligne d'au plus `max` octets, sans jamais en mettre plus en mémoire.
+async fn read_request<R: AsyncBufRead + Unpin>(reader: &mut R, max: usize) -> io::Result<Line> {
+    let mut buf = Vec::new();
+    let limit = u64::try_from(max).unwrap_or(u64::MAX).saturating_add(1);
+    let n = reader.take(limit).read_until(b'\n', &mut buf).await?;
+    if n == 0 {
+        return Ok(Line::Eof);
+    }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+        return Ok(Line::Request(buf));
+    }
+    Ok(if buf.len() > max {
+        Line::TooLong
+    } else {
+        Line::Request(buf)
+    })
+}
+
 async fn handle_client(
     brain: Arc<Brain>,
     listen: Arc<ListenService>,
     speaker: SpeakerState,
     stream: UnixStream,
-) -> std::io::Result<()> {
+) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
-    while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => respond(&brain, &listen, &speaker, request).await,
-            Err(_) => ControlResponse::Error {
-                message: "requête invalide".into(),
+    let mut reader = BufReader::new(read);
+    loop {
+        let response = match read_request(&mut reader, MAX_REQUEST_BYTES).await? {
+            Line::Eof => return Ok(()),
+            Line::TooLong => {
+                warn!(
+                    max = MAX_REQUEST_BYTES,
+                    "requête trop grande, connexion fermée"
+                );
+                send(
+                    &mut write,
+                    &ControlResponse::Error {
+                        message: "requête trop grande".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            Line::Request(line) => match serde_json::from_slice::<ControlRequest>(&line) {
+                Ok(request) => respond(&brain, &listen, &speaker, request).await,
+                Err(_) => ControlResponse::Error {
+                    message: "requête invalide".into(),
+                },
             },
         };
-        let mut out = serde_json::to_string(&response).map_err(std::io::Error::other)?;
-        out.push('\n');
-        write.write_all(out.as_bytes()).await?;
+        send(&mut write, &response).await?;
     }
-    Ok(())
+}
+
+async fn send<W: AsyncWrite + Unpin>(write: &mut W, response: &ControlResponse) -> io::Result<()> {
+    let mut out = serde_json::to_string(response).map_err(io::Error::other)?;
+    out.push('\n');
+    write.write_all(out.as_bytes()).await
 }
 
 async fn respond(
@@ -200,5 +256,44 @@ async fn enroll_voice(speaker: &SpeakerState, samples: Vec<String>) -> ControlRe
             }
         }
         Err(_) => error("Enrôlement interrompu."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn lines(mut input: &[u8], max: usize) -> Vec<Line> {
+        let mut out = Vec::new();
+        loop {
+            match read_request(&mut input, max).await.unwrap() {
+                Line::Eof => return out,
+                l => out.push(l),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ligne_de_requete_bornee() {
+        assert_eq!(
+            lines(b"abcd\nef\n", 4).await,
+            [
+                Line::Request(b"abcd".to_vec()),
+                Line::Request(b"ef".to_vec())
+            ]
+        );
+        // Dernière ligne sans retour : gardée, comme avant.
+        assert_eq!(lines(b"ab", 4).await, [Line::Request(b"ab".to_vec())]);
+        // Une ligne trop longue s'arrête à la borne, sans tout lire.
+        let mut input: &[u8] = b"abcde\nf\n";
+        assert_eq!(read_request(&mut input, 4).await.unwrap(), Line::TooLong);
+        assert_eq!(input, b"\nf\n");
+    }
+
+    #[test]
+    fn borne_couvre_le_pire_enrolement() {
+        // 20 échantillons de 30 s, 16 kHz, i16, en base64, plus l'enveloppe JSON.
+        let audio = MAX_ENROLL_SAMPLES * MAX_ENROLL_SECONDS * RATE * 2;
+        assert!(audio.div_ceil(3) * 4 + 4096 <= MAX_REQUEST_BYTES);
     }
 }
