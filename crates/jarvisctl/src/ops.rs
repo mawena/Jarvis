@@ -359,6 +359,27 @@ fn api_key_set(paths: &Paths) -> bool {
         .unwrap_or(false)
 }
 
+/// Chemin du modèle `[section] model_path` de la configuration, `~` développé ;
+/// sinon le fichier par défaut dans `~/.local/share/jarvis/models/`.
+fn model_path(paths: &Paths, section: &str, default_file: &str) -> PathBuf {
+    let configured = fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        .and_then(|v| {
+            v.get(section)?
+                .get("model_path")?
+                .as_str()
+                .map(PathBuf::from)
+        });
+    match configured {
+        Some(p) => match p.strip_prefix("~") {
+            Ok(rest) => paths.home.join(rest),
+            Err(_) => p,
+        },
+        None => paths.data_dir.join("models").join(default_file),
+    }
+}
+
 fn local_model(paths: &Paths) -> String {
     fs::read_to_string(&paths.config_file)
         .ok()
@@ -585,7 +606,6 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             })
     };
     let missing: Vec<&str> = SHARED_LIBS.into_iter().filter(|l| !has_lib(l)).collect();
-    let models = paths.data_dir.join("models");
     let items: [(bool, String, String); 5] = [
         (
             missing.is_empty(),
@@ -596,12 +616,12 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             ),
         ),
         (
-            models.join(WHISPER_MODEL).is_file(),
+            model_path(paths, "stt", WHISPER_MODEL).is_file(),
             "Modèle Whisper".into(),
             "lancez `scripts/download-models.sh all`".into(),
         ),
         (
-            models.join(SPEAKER_MODEL).is_file(),
+            model_path(paths, "speaker", SPEAKER_MODEL).is_file(),
             "Modèle d'empreinte vocale".into(),
             "lancez `scripts/download-models.sh speaker`".into(),
         ),
@@ -1071,5 +1091,28 @@ mod tests {
             complet, 1,
             "échec Ollama inchangé, aucune dépendance à l'oreille"
         );
+    }
+
+    #[test]
+    fn doctor_suit_les_chemins_de_modeles_configures() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        fs::create_dir_all(home.path().join("ailleurs")).unwrap();
+        fs::write(home.path().join("ailleurs/whisper.bin"), "").unwrap();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.config_file,
+            "[stt]\nmodel_path = \"~/ailleurs/whisper.bin\"\n\n[speaker]\nmodel_path = \"/inexistant/voix.onnx\"\n",
+        )
+        .unwrap();
+        // Le modèle par défaut existe, mais la configuration pointe ailleurs.
+        let models = paths.data_dir.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        let mut out = Vec::new();
+        doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert!(o.contains("✓ Modèle Whisper"), "{o}");
+        assert!(o.contains("! Modèle d'empreinte vocale absent"), "{o}");
     }
 }

@@ -15,6 +15,7 @@ pub const DEFAULT_MODEL: &str = "llama3.2:3b";
 
 #[derive(Debug, Clone)]
 pub struct Paths {
+    pub home: PathBuf,
     pub bin_dir: PathBuf,
     pub lib_dir: PathBuf,
     pub cargo_bin: PathBuf,
@@ -31,6 +32,7 @@ impl Paths {
     pub fn from_home(home: &Path) -> Self {
         let config_dir = home.join(".config/jarvis");
         Self {
+            home: home.to_path_buf(),
             bin_dir: home.join(".local/bin"),
             lib_dir: home.join(".local/lib/jarvis"),
             cargo_bin: home.join(".cargo/bin"),
