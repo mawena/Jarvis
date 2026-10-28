@@ -17,7 +17,7 @@ use jarvis_ear_core::listener::Listener;
 use jarvis_ear_core::rustpotter::RustpotterDetector;
 use tokio::sync::{mpsc, watch};
 
-use crate::app::{App, SocketBrain};
+use crate::app::{App, SocketBrain, default_mute_file};
 use crate::capture::CpalCapture;
 use crate::config::EarConfig;
 use crate::tray::{BrainLink, JarvisTray, TrayCommand, TrayState};
@@ -128,16 +128,17 @@ async fn run() -> anyhow::Result<()> {
         socket: jarvis_protocol::socket_path(),
     });
     tracing::info!("oreille démarrée (mot d'éveil : {})", wakeword.display());
-    let result = App::new(
+    let mut app = App::new(
         listener,
         CpalCapture::new(config.device),
         brain,
         commands_rx,
         tray_tx,
-    )
-    .run()
-    .await
-    .context("boucle principale");
+    );
+    if let Some(path) = default_mute_file() {
+        app = app.with_mute_file(path);
+    }
+    let result = app.run().await.context("boucle principale");
     if let Some(handle) = tray_handle {
         handle.shutdown().await;
     }
