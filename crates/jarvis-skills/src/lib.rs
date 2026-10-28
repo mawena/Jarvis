@@ -1,6 +1,7 @@
 //! Skill abstraction and command execution for Jarvis.
 
 pub mod apps;
+pub mod power;
 pub mod runner;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -87,6 +88,13 @@ pub enum SkillError {
 #[async_trait::async_trait]
 pub trait Skill: Send + Sync {
     fn tools(&self) -> Vec<ToolSpec>;
+
+    /// Question posée avant un outil `Risky` (« Je mets le PC en veille ? »).
+    /// `None` : le cerveau formule une question générale.
+    fn confirmation(&self, _tool: &str, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
     async fn call(&self, tool: &str, args: serde_json::Value) -> Result<Reply, SkillError>;
 }
 pub mod media;

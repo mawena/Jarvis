@@ -51,7 +51,7 @@ impl Skill for SystemSkill {
                 self.modes
                     .set(mode)
                     .map_err(|e| SkillError::Failed(e.to_string()))?;
-                Ok(Reply::new(format!("Mode {mode} activé.")))
+                Ok(Reply::done(format!("Mode {mode} activé.")))
             }
             "status" => Ok(Reply::new(format!(
                 "Je suis en mode {}. Tout va bien.",

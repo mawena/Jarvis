@@ -73,7 +73,7 @@ impl Skill for AppsSkill {
                 .map(|o| o.success)
                 .unwrap_or(false);
             if focused {
-                return Ok(Reply::new(format!("{} est au premier plan.", app.name)));
+                return Ok(Reply::done(format!("{} est au premier plan.", app.name)));
             }
         }
         self.runner
@@ -82,7 +82,7 @@ impl Skill for AppsSkill {
                 &["launch".into(), app.path.to_string_lossy().into_owned()],
             )
             .map_err(|e| SkillError::Failed(e.to_string()))?;
-        Ok(Reply::new(format!("Je lance {}.", app.name)))
+        Ok(Reply::done(format!("Je lance {}.", app.name)))
     }
 }
 
@@ -176,6 +176,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.speech, "Spotify est au premier plan.");
+        assert_eq!(r.outcome, crate::Outcome::Done);
         assert_eq!(
             runner.calls(),
             vec![(
@@ -194,6 +195,7 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.speech, "Je lance Spotify.");
+        assert_eq!(r.outcome, crate::Outcome::Done);
         let expected = fixtures()
             .join("spotify_spotify.desktop")
             .to_string_lossy()

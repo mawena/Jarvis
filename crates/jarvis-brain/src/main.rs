@@ -34,6 +34,7 @@ async fn main() -> anyhow::Result<()> {
             config.apps.aliases.clone(),
             runner.clone(),
         )),
+        Arc::new(jarvis_skills::power::PowerSkill::new(runner.clone())),
     ];
     let local = Arc::new(OllamaBackend::new(&config.local, &config.address));
     let brain = Arc::new(
