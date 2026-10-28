@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use jarvis_ear_core::listener::{ListenEvent, Listener};
 use jarvis_ear_core::resample::{Downmixer, f32_to_i16, i16_to_f32};
+use jarvis_ear_core::rustpotter::RustpotterDetector;
 use jarvis_ear_core::{MicState, Vad, WakeDetector};
 use jarvis_protocol::{
     ControlRequest, ControlResponse, EarAction, Sound, SpeechAudio, decode_pcm, encode_pcm,
@@ -35,6 +36,11 @@ pub const REPLY_WAIT: Duration = Duration::from_secs(8);
 
 /// Délai maximal de chaque requête envoyée en quittant.
 const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Pendant que Jarvis parle, le réveil exige ce score en plus du seuil normal : la voix
+/// de synthèse qui dit « Jarvis » ressemble moins au modèle (enregistré par
+/// l'utilisateur) que l'utilisateur lui-même, qui peut donc toujours couper la parole.
+pub const PLAYBACK_WAKE_MARGIN: f32 = 0.1;
 
 /// Liaison avec le cerveau (remplaçable dans les tests).
 #[async_trait::async_trait]
@@ -91,6 +97,8 @@ pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     /// Requête `Wake` en cours : la phrase attend qu'elle soit partie.
     pending_wake: Option<JoinHandle<()>>,
     status_in_flight: bool,
+    /// Score de réveil minimal pendant la lecture.
+    playback_wake_score: f32,
     internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
 }
@@ -127,6 +135,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             last_heard: None,
             pending_wake: None,
             status_in_flight: false,
+            playback_wake_score: RustpotterDetector::DEFAULT_THRESHOLD + PLAYBACK_WAKE_MARGIN,
             internal_tx,
             internal_rx,
         }
@@ -136,6 +145,12 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
     pub fn with_player(mut self, player: Box<dyn Player>) -> Self {
         self.playing = player.playing();
         self.player = player;
+        self
+    }
+
+    /// Seuil normal du mot d'éveil : celui de la lecture s'en déduit.
+    pub fn with_wake_threshold(mut self, threshold: f32) -> Self {
+        self.playback_wake_score = threshold + PLAYBACK_WAKE_MARGIN;
         self
     }
 
@@ -274,6 +289,12 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                 let mono = downmixer.push(&data);
                 // Le tampon retourne au pool de la capture.
                 drop(data);
+                let min_score = if self.player.is_playing() {
+                    self.playback_wake_score
+                } else {
+                    0.0
+                };
+                self.listener.set_min_wake_score(min_score);
                 for event in self.listener.push(&mono) {
                     self.on_listen(event);
                 }
@@ -503,6 +524,7 @@ mod tests {
         frame: usize,
         /// Nombre maximal de déclenchements.
         left: usize,
+        score: f32,
     }
     impl WakeDetector for FakeWake {
         fn frame_len(&self) -> usize {
@@ -512,7 +534,7 @@ mod tests {
             self.frame += 1;
             if self.left > 0 && self.frame.is_multiple_of(self.every) {
                 self.left -= 1;
-                return Some(0.9);
+                return Some(self.score);
             }
             None
         }
@@ -669,6 +691,27 @@ mod tests {
         wakes: usize,
         mute_file: Option<PathBuf>,
     ) -> Harness {
+        build_harness_scored(
+            responder,
+            capture_fails,
+            speech_frames,
+            wakes,
+            mute_file,
+            0.9,
+        )
+    }
+
+    fn build_harness_scored(
+        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
+        + Send
+        + Sync
+        + 'static,
+        capture_fails: bool,
+        speech_frames: usize,
+        wakes: usize,
+        mute_file: Option<PathBuf>,
+        wake_score: f32,
+    ) -> Harness {
         let shared = Arc::new(CaptureShared::default());
         let brain = Arc::new(FakeBrain {
             requests: Mutex::new(Vec::new()),
@@ -686,6 +729,7 @@ mod tests {
                 every: 10,
                 frame: 0,
                 left: wakes,
+                score: wake_score,
             },
             FakeVad {
                 speech_frames,
@@ -1306,8 +1350,10 @@ mod tests {
     async fn attente_de_reponse_capture_sans_mot_d_eveil() {
         let h = harness_question();
         ask(&h).await;
-        // « oui » (20 trames de parole), puis le silence qui clôt la phrase.
-        let mut reply = vec![0.9; 256 * 20];
+        // Garde du début d'écoute, « oui » (20 trames de parole), puis le silence qui
+        // clôt la phrase.
+        let mut reply = vec![0.0; 256 * 20];
+        reply.extend(vec![0.9; 256 * 20]);
         reply.extend(vec![0.0; 256 * 60]);
         h.feed(reply).await;
         h.wait_for("réponse entendue", |h| {
@@ -1340,6 +1386,40 @@ mod tests {
         h.wait_for("fin de capture", |h| !h.tray.borrow().capturing)
             .await;
         assert_eq!(h.wakes(), 1);
+    }
+
+    #[tokio::test]
+    async fn reveil_faible_ignore_pendant_que_jarvis_parle() {
+        // Score au-dessus du seuil normal (0,5), sous le seuil de lecture.
+        let h = build_harness_scored(|_| status_ok(), false, 0, usize::MAX, None, 0.55);
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        // Jarvis parle : sa propre voix dit « Jarvis ».
+        h.player.playing.send_replace(true);
+        h.feed(vec![0.0; 3_200]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.wakes(), 0);
+        assert!(
+            h.played().is_empty(),
+            "lecture non coupée : {:?}",
+            h.played()
+        );
+        assert!(!h.tray.borrow().capturing);
+        // Lecture finie : le même score réveille.
+        h.player.finish();
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
+    }
+
+    #[tokio::test]
+    async fn reveil_franc_coupe_toujours_la_lecture() {
+        let h = build_harness_scored(|_| status_ok(), false, 0, 1, None, 0.9);
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.player.playing.send_replace(true);
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
+        assert_eq!(h.played(), vec![Played::Stop, wake_beep()]);
     }
 
     #[tokio::test]

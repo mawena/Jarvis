@@ -32,8 +32,9 @@ const QUEUE: usize = 8;
 /// Fermeture de la sortie après ce délai sans son.
 const IDLE_CLOSE: Duration = Duration::from_secs(30);
 /// La lecture est dite finie un peu après le dernier échantillon envoyé : le temps que
-/// le son sorte vraiment (Bluetooth compris), pour ne pas capter la fin de la phrase.
-const TAIL: Duration = Duration::from_millis(300);
+/// le son sorte vraiment (Bluetooth et PipeWire compris), pour ne pas capter la fin de
+/// la phrase.
+const TAIL: Duration = Duration::from_millis(500);
 /// Marge avant de déclarer la sortie bloquée.
 const STALL_MARGIN: Duration = Duration::from_secs(2);
 /// Période de surveillance pendant la lecture.

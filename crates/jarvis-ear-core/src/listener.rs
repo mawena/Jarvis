@@ -18,6 +18,14 @@ const NO_SPEECH: usize = RATE * 4;
 const MAX_UTTERANCE: usize = RATE * 10;
 /// Temps de parole garanti même si elle commence à la fin du délai.
 const MIN_SPEECH: usize = MAX_UTTERANCE - NO_SPEECH;
+/// Après le réveil : le bip de réveil (~120 ms) ne compte pas comme parole.
+pub const WAKE_GUARD: Duration = Duration::from_millis(200);
+/// Début de l'écoute directe : la fin de la voix de Jarvis (latence de la sortie) non plus.
+pub const LISTEN_GUARD: Duration = Duration::from_millis(300);
+
+fn samples(d: Duration) -> usize {
+    (d.as_secs_f64() * RATE as f64) as usize
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ListenEvent {
@@ -42,6 +50,8 @@ enum State {
         no_speech: usize,
         /// Longueur maximale de `post`.
         max_len: usize,
+        /// Pas de début de parole tant que `post` est plus court (l'audio est gardé).
+        guard: usize,
     },
 }
 
@@ -55,6 +65,10 @@ pub struct Listener<W: WakeDetector, V: Vad> {
     head: Vec<f32>,
     wake_buf: Vec<f32>,
     vad_buf: Vec<f32>,
+    wake_guard: usize,
+    listen_guard: usize,
+    /// Score de réveil minimal (relevé pendant que Jarvis parle).
+    min_wake_score: f32,
 }
 
 impl<W: WakeDetector, V: Vad> Listener<W, V> {
@@ -67,7 +81,23 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
             head: Vec::new(),
             wake_buf: Vec::new(),
             vad_buf: Vec::new(),
+            wake_guard: samples(WAKE_GUARD),
+            listen_guard: samples(LISTEN_GUARD),
+            min_wake_score: 0.0,
         }
+    }
+
+    /// Durées pendant lesquelles la parole est ignorée après le réveil et au début de
+    /// l'écoute directe (par défaut [`WAKE_GUARD`] et [`LISTEN_GUARD`]).
+    pub fn with_guards(mut self, wake: Duration, listen: Duration) -> Self {
+        self.wake_guard = samples(wake);
+        self.listen_guard = samples(listen);
+        self
+    }
+
+    /// Réveils de score inférieur ignorés (0 : tous acceptés).
+    pub fn set_min_wake_score(&mut self, score: f32) {
+        self.min_wake_score = score;
     }
 
     /// Consomme du mono 16 kHz (taille quelconque) et renvoie les événements produits.
@@ -87,7 +117,9 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
                 self.ring.extend(frame.iter().copied());
                 let excess = self.ring.len().saturating_sub(RING_LEN);
                 self.ring.drain(..excess);
-                if let Some(score) = self.wake.process(&frame) {
+                if let Some(score) = self.wake.process(&frame)
+                    && score >= self.min_wake_score
+                {
                     self.head = self.ring.iter().copied().collect();
                     self.ring.clear();
                     self.vad_buf.clear();
@@ -97,6 +129,7 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
                         silence: 0,
                         no_speech: NO_SPEECH,
                         max_len: MAX_UTTERANCE,
+                        guard: self.wake_guard,
                     };
                     events.push(ListenEvent::Wake { score });
                 } else {
@@ -124,10 +157,13 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
             silence,
             no_speech,
             max_len,
+            guard,
         } = &mut self.state
         else {
             return;
         };
+        // Garde : décision ignorée, mais l'audio et le délai d'abandon courent.
+        let speech = speech && post.len() >= *guard;
         if speech {
             speech_start.get_or_insert(post.len());
             *silence = 0;
@@ -157,13 +193,14 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
     /// abandon si personne ne parle avant `wait`. La phrase n'a pas de seconde de tête.
     pub fn listen_now(&mut self, wait: Duration) {
         self.reset();
-        let no_speech = (wait.as_secs_f64() * RATE as f64) as usize;
+        let no_speech = samples(wait);
         self.state = State::Capturing {
             post: Vec::new(),
             speech_start: None,
             silence: 0,
             no_speech,
             max_len: no_speech + MIN_SPEECH,
+            guard: self.listen_guard,
         };
     }
 
@@ -246,6 +283,10 @@ mod tests {
     }
 
     fn run(l: &mut Listener<FakeWake, FakeVad>, signal: &[f32]) -> Vec<ListenEvent> {
+        run_with(l, signal)
+    }
+
+    fn run_with<V: Vad>(l: &mut Listener<FakeWake, V>, signal: &[f32]) -> Vec<ListenEvent> {
         let mut ev = Vec::new();
         for chunk in signal.chunks(97) {
             ev.extend(l.push(chunk));
@@ -384,6 +425,97 @@ mod tests {
             panic!("{ev:?}")
         };
         assert_eq!(u.len(), PRE_ROLL + (250 + 50) * 256);
+    }
+
+    /// VAD réel en miniature : parole dès qu'une valeur dépasse 0,5.
+    struct LoudVad;
+    impl Vad for LoudVad {
+        fn frame_len(&self) -> usize {
+            256
+        }
+        fn is_speech(&mut self, frame: &[f32]) -> bool {
+            frame.iter().any(|v| v.abs() > 0.5)
+        }
+    }
+
+    fn tone(n: usize) -> Vec<f32> {
+        (0..n).map(|i| 0.8 * (i as f32 * 0.35).sin()).collect()
+    }
+
+    #[test]
+    fn bip_de_reveil_pas_pris_pour_de_la_parole() {
+        let (w, _) = FakeWake::new(10);
+        let mut l = Listener::new(w, LoudVad);
+        // Réveil, puis bip de 120 ms, puis silence.
+        let mut sig = vec![0.0; 1_600];
+        sig.extend(tone(1_920));
+        sig.extend(vec![0.0; NO_SPEECH - 1_920 - 256]);
+        let ev = l.push(&sig);
+        assert_eq!(ev, vec![ListenEvent::Wake { score: 0.9 }], "pas de phrase");
+        // L'abandon tombe toujours 4 s après le réveil.
+        assert_eq!(l.push(&[0.0; 256]), vec![ListenEvent::NoSpeech]);
+    }
+
+    #[test]
+    fn parole_apres_la_garde_du_reveil_capturee() {
+        let (w, _) = FakeWake::new(10);
+        let mut l = Listener::new(w, LoudVad);
+        let mut sig = vec![0.0; 1_600];
+        sig.extend(tone(1_920));
+        sig.extend(vec![0.0; 2_176]);
+        // Parole à 256 ms du réveil (trame 16).
+        sig.extend(tone(256 * 20));
+        sig.extend(vec![0.0; 256 * 60]);
+        let ev = run_with(&mut l, &sig);
+        let [ListenEvent::Wake { .. }, ListenEvent::Utterance(u)] = ev.as_slice() else {
+            panic!("{ev:?}")
+        };
+        // Le bip reste dans la phrase (il tombe dans le pré-enregistrement).
+        assert_eq!(u[1_600..1_600 + 1_920], sig[1_600..1_600 + 1_920]);
+        assert_eq!(u.len(), 1_600 + (16 + 20 + 50) * 256);
+    }
+
+    #[test]
+    fn garde_du_reveil_reglable() {
+        let (w, _) = FakeWake::new(10);
+        let mut l = Listener::new(w, LoudVad).with_guards(Duration::ZERO, Duration::ZERO);
+        let mut sig = vec![0.0; 1_600];
+        sig.extend(tone(1_920));
+        sig.extend(vec![0.0; 256 * 60]);
+        let ev = l.push(&sig);
+        assert!(matches!(
+            ev[..],
+            [ListenEvent::Wake { .. }, ListenEvent::Utterance(_)]
+        ));
+    }
+
+    #[test]
+    fn ecoute_directe_ignore_la_parole_pendant_la_garde() {
+        let (w, _) = FakeWake::new(usize::MAX);
+        let mut l = Listener::new(w, LoudVad);
+        l.listen_now(Duration::from_secs(8));
+        // Fin de la voix de Jarvis captée dans les 300 premières ms, puis silence.
+        let mut sig = tone(4_608);
+        sig.extend(vec![0.0; 256 * 62]);
+        assert!(run_with(&mut l, &sig).is_empty(), "pas de phrase");
+        // Vraie réponse ensuite.
+        let mut reply = tone(256 * 20);
+        reply.extend(vec![0.0; 256 * 60]);
+        let ev = run_with(&mut l, &reply);
+        let [ListenEvent::Utterance(u)] = ev.as_slice() else {
+            panic!("{ev:?}")
+        };
+        assert_eq!(u.len(), PRE_ROLL + (20 + 50) * 256);
+    }
+
+    #[test]
+    fn reveil_sous_le_score_minimal_ignore() {
+        let (w, _) = FakeWake::multi(vec![10, 20]);
+        let mut l = Listener::new(w, FakeVad::new(0..0));
+        l.set_min_wake_score(0.95);
+        assert!(l.push(&ramp(1_600)).is_empty());
+        l.set_min_wake_score(0.0);
+        assert_eq!(l.push(&ramp(1_600)), vec![ListenEvent::Wake { score: 0.9 }]);
     }
 
     #[test]
