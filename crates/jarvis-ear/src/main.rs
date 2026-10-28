@@ -2,6 +2,9 @@
 
 use clap::{Parser, Subcommand};
 
+#[allow(dead_code)]
+mod tray;
+
 #[derive(Parser)]
 #[command(name = "jarvis-ear", version, about = "Oreille de Jarvis")]
 struct Cli {
