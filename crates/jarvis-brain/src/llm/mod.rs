@@ -2,6 +2,7 @@
 
 pub mod claude;
 pub mod ollama;
+pub mod router;
 
 use crate::intent::Intent;
 use jarvis_skills::ToolSpec;
@@ -31,6 +32,15 @@ pub enum LlmError {
 #[async_trait::async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError>;
+}
+
+/// Consigne de la conversation libre (mode local, sans outils).
+pub fn chat_prompt(address: &str) -> String {
+    format!(
+        "Tu es Jarvis, l'assistant vocal de {address}. Réponds en français, en une ou deux \
+         phrases courtes, en le vouvoyant, sans jamais dire « mon ami ». \
+         Si tu ne sais pas, dis-le simplement. Pas de listes ni de mise en forme."
+    )
 }
 
 pub fn system_prompt(address: &str) -> String {
