@@ -710,7 +710,7 @@ mod tests {
 
     use crate::testing::ManualClock;
     use jarvis_skills::FakeRunner;
-    use jarvis_skills::power::PowerSkill;
+    use jarvis_skills::power::{POWER_DELAY, PowerSkill};
 
     struct Power {
         brain: Brain,
@@ -760,23 +760,30 @@ mod tests {
         async fn reply(&self, text: &str) -> Answer {
             self.brain.answer_follow_up(text, self.brain.now()).await
         }
+
+        /// Commandes lancées, une fois passé le délai de l'alimentation (horloge de
+        /// tokio en pause : l'attente est instantanée).
+        async fn ran(&self) -> Vec<(String, Vec<String>)> {
+            tokio::time::sleep(POWER_DELAY + Duration::from_secs(1)).await;
+            self.runner.calls()
+        }
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn action_risquee_attend_confirmation() {
         let p = power();
         p.ask().await;
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
         assert!(p.brain.has_pending());
         // Par l'IA aussi.
         let p = power_with(FakeLlm::new(Ok(tool_understanding("shutdown"))));
         let a = p.brain.answer_text("coupe tout, j'ai fini").await;
         assert_eq!(a.reply.speech, "J'éteins le PC, Monsieur ?");
         assert!(a.awaits_reply);
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn oui_execute() {
         let p = power();
         p.ask().await;
@@ -784,36 +791,36 @@ mod tests {
         let a = p.reply("Oui, vas-y.").await;
         assert_eq!(a.reply.outcome, Outcome::Done);
         assert!(!a.awaits_reply);
-        assert_eq!(p.runner.calls(), suspend_call());
+        assert_eq!(p.ran().await, suspend_call());
         assert!(!p.brain.has_pending());
         // Une seule fois : un second « oui » ne refait rien.
         let a = p.reply("oui").await;
         assert_eq!(a.reply.speech, "Il n'y a rien à confirmer.");
-        assert_eq!(p.runner.calls().len(), 1);
+        assert_eq!(p.ran().await.len(), 1);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn non_annule() {
         let p = power();
         p.ask().await;
         let a = p.reply("non").await;
         assert_eq!(a.reply, Reply::new("Entendu, j'annule."));
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
         assert!(!p.brain.has_pending());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn delai_depasse_rien() {
         let p = power();
         p.ask().await;
         p.clock.advance(REPLY_WINDOW + Duration::from_millis(1));
         let a = p.reply("oui").await;
         assert_eq!(a.reply, Reply::new("Le délai est passé, je ne fais rien."));
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
         assert!(!p.brain.has_pending());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn debut_de_reponse_dans_le_delai_accepte() {
         // Réponse arrivée après le délai, mais commencée avant : acceptée.
         let p = power();
@@ -821,10 +828,10 @@ mod tests {
         p.clock.advance(REPLY_WINDOW + Duration::from_secs(1));
         let started = p.brain.now() - Duration::from_secs(2);
         p.brain.answer_follow_up("oui", started).await;
-        assert_eq!(p.runner.calls(), suspend_call());
+        assert_eq!(p.ran().await, suspend_call());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn autre_phrase_annule_l_attente() {
         let p = power();
         p.ask().await;
@@ -832,18 +839,18 @@ mod tests {
         assert_eq!(a.reply, Reply::new("Sans réponse claire, je ne fais rien."));
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
         assert!(p.skill.calls().is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn nouvelle_commande_efface_l_attente() {
         let p = power();
         p.ask().await;
         p.brain.answer_text("suivant").await;
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
         // Une question libre (IA) aussi.
         p.ask().await;
         p.brain.answer_text("quel temps fait-il").await;
@@ -853,12 +860,12 @@ mod tests {
         p.brain.answer_text("redémarre le PC").await;
         p.reply("oui").await;
         assert_eq!(
-            p.runner.calls(),
+            p.ran().await,
             vec![("systemctl".to_string(), vec!["reboot".to_string()])]
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn annule_sans_attente() {
         let p = power();
         let a = p.brain.answer_text("annule").await;
@@ -868,10 +875,10 @@ mod tests {
         assert_eq!(a.reply, Reply::new("Entendu, j'annule."));
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
-        assert!(p.runner.calls().is_empty());
+        assert!(p.ran().await.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn repete_la_derniere_reponse() {
         let p = power();
         let a = p.brain.answer_text("répète").await;
@@ -889,10 +896,10 @@ mod tests {
         assert!(a.awaits_reply);
         p.clock.advance(Duration::from_secs(10));
         p.reply("oui").await;
-        assert_eq!(p.runner.calls(), suspend_call());
+        assert_eq!(p.ran().await, suspend_call());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn nom_d_adresse_configurable() {
         let p = power();
         let brain = p.brain.with_persona(Persona::new("Charles"));
@@ -910,7 +917,7 @@ mod tests {
         assert_eq!(a.reply.speech, "Il n'y a rien à annuler.");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn voix_non_verifiee_sans_action_risquee() {
         let p = power();
         assert!(p.brain.answer_fast("mets le PC en veille").await.is_none());

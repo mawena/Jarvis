@@ -516,7 +516,7 @@ mod tests {
 
     // --- Confirmations et bips ---
 
-    use jarvis_skills::power::PowerSkill;
+    use jarvis_skills::power::{POWER_DELAY, PowerSkill};
     use jarvis_skills::{FakeRunner, Reply, SkillError};
 
     /// Transcripteur qui renvoie les phrases données, dans l'ordre.
@@ -581,6 +581,15 @@ mod tests {
         vec![("systemctl".to_string(), vec!["suspend".to_string()])]
     }
 
+    impl Confirm {
+        /// Commandes lancées, une fois passé le délai de l'alimentation (horloge de
+        /// tokio en pause : l'attente est instantanée).
+        async fn ran(&self) -> Vec<(String, Vec<String>)> {
+            tokio::time::sleep(POWER_DELAY + Duration::from_secs(1)).await;
+            self.runner.calls()
+        }
+    }
+
     fn question() -> ControlResponse {
         heard(
             "mets le PC en veille",
@@ -589,11 +598,11 @@ mod tests {
         )
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn question_puis_oui_avec_bip_de_reussite() {
         let c = confirm(&["mets le PC en veille", "oui"]);
         assert_eq!(c.service.listen(&voice(0), false, false).await, question());
-        assert!(c.runner.calls().is_empty());
+        assert!(c.ran().await.is_empty());
         let r = c.service.listen(&voice(0), false, true).await;
         assert_eq!(
             r,
@@ -605,30 +614,30 @@ mod tests {
                 sound: Some(Sound::Success),
             }
         );
-        assert_eq!(c.runner.calls(), suspend_call());
+        assert_eq!(c.ran().await, suspend_call());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn voix_inconnue_n_execute_pas_la_confirmation() {
         let c = confirm(&["mets le PC en veille", "oui"]);
         c.service.listen(&voice(0), false, false).await;
         let r = c.service.listen(&voice(20_000), false, true).await;
         assert_eq!(r, heard("", "", None));
-        assert!(c.runner.calls().is_empty());
+        assert!(c.ran().await.is_empty());
         // L'attente est effacée : un « oui » de Charles ensuite ne fait rien.
         assert!(!c.brain.has_pending());
         let r = c.service.listen(&voice(0), false, true).await;
         assert_eq!(r, heard("oui", "Il n'y a rien à confirmer.", None));
-        assert!(c.runner.calls().is_empty());
+        assert!(c.ran().await.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn oui_court_accepte_en_session() {
         let c = confirm(&["mets le PC en veille", "oui"]);
         c.service.listen(&voice(0), false, false).await;
         // Moins d'une seconde, non vérifiable : accepté comme réponse, grâce à la session.
         let r = c.service.listen(&short_voice(), false, true).await;
-        assert_eq!(c.runner.calls(), suspend_call());
+        assert_eq!(c.ran().await, suspend_call());
         assert!(matches!(
             r,
             ControlResponse::Heard {
@@ -638,7 +647,7 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn oui_court_hors_reponse_n_execute_rien() {
         // Un « oui » court qui n'est pas la réponse attendue (après « Jarvis ») : ignoré.
         let c = confirm(&["mets le PC en veille", "oui", "oui"]);
@@ -647,10 +656,10 @@ mod tests {
         assert_eq!(r, heard("", "", None));
         assert!(!c.brain.has_pending());
         c.service.listen(&short_voice(), false, true).await;
-        assert!(c.runner.calls().is_empty());
+        assert!(c.ran().await.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn phrase_courte_ne_demande_pas_d_action_risquee() {
         let c = confirm(&["suivant", "mets le PC en veille", "oui"]);
         c.service.listen(&voice(0), false, false).await;
@@ -658,10 +667,10 @@ mod tests {
         assert_eq!(r, heard("", "", None));
         assert!(!c.brain.has_pending());
         c.service.listen(&voice(0), false, true).await;
-        assert!(c.runner.calls().is_empty());
+        assert!(c.ran().await.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn suivi_vide_ou_ecoute_coupee_n_execute_rien() {
         let c = confirm(&["mets le PC en veille", "mets le PC en veille", "oui"]);
         c.service.listen(&voice(0), false, false).await;
@@ -676,10 +685,10 @@ mod tests {
             heard("", "", None)
         );
         assert!(!c.brain.has_pending());
-        assert!(c.runner.calls().is_empty());
+        assert!(c.ran().await.is_empty());
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn repete_redemande_et_garde_l_attente() {
         let c = confirm(&["mets le PC en veille", "répète", "oui"]);
         c.service.listen(&voice(0), false, false).await;
@@ -693,7 +702,7 @@ mod tests {
             )
         );
         c.service.listen(&voice(0), false, true).await;
-        assert_eq!(c.runner.calls(), suspend_call());
+        assert_eq!(c.ran().await, suspend_call());
     }
 
     fn with_result(result: Result<Reply, SkillError>) -> (ListenService, tempfile::TempDir) {
