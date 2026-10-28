@@ -17,6 +17,8 @@ const SAMPLE_RATE: usize = 16_000;
 /// Au-delà : seuil normal. Entre 1 s et 2 s : seuil strict. En dessous : trop court.
 const NORMAL_MIN: usize = 2 * SAMPLE_RATE;
 const STRICT_MIN: usize = SAMPLE_RATE;
+/// En dessous, même la vérification stricte d'un « oui » court n'a rien à mesurer.
+const SHORT_STRICT_MIN: usize = SAMPLE_RATE * 3 / 10;
 /// Durée pendant laquelle une phrase très courte reste acceptée après une voix reconnue.
 const SESSION_WINDOW: Duration = Duration::from_secs(180);
 
@@ -25,7 +27,9 @@ pub enum Verdict {
     /// Voix reconnue (similarité cosinus).
     Match(f32),
     /// Moins d'une seconde, dans la session : voix non vérifiée. Seuls les raccourcis
-    /// sont permis (jamais l'IA), et la fenêtre n'est pas renouvelée.
+    /// sont permis (jamais l'IA), et la fenêtre n'est pas renouvelée. En réponse à une
+    /// question : annuler seulement, sauf un « oui » ou un « répète » qui passe
+    /// [`SpeakerGate::check_short_strict`].
     SessionShort,
     /// Voix inconnue : la phrase doit être ignorée.
     NoMatch(f32),
@@ -313,6 +317,39 @@ impl SpeakerGate {
             Verdict::NoMatch(score)
         }
     }
+
+    /// Vérification stricte d'une phrase courte, pour un « oui » de confirmation : même
+    /// sous 1 s, l'empreinte est calculée et comparée au seuil strict. Jamais la session :
+    /// sans empreinte (absente ou illisible), sous 0,3 s ou en cas d'erreur, c'est non.
+    /// Ne renouvelle pas la session.
+    pub fn check_short_strict(&self, audio: &[f32]) -> bool {
+        let reference = self
+            .print
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|p| p.embedding.clone());
+        let Some(reference) = reference else {
+            return false;
+        };
+        if audio.len() < SHORT_STRICT_MIN {
+            return false;
+        }
+        match self.verifier.embed(audio) {
+            Ok(e) => {
+                let score = cosine(&e, &reference);
+                info!(
+                    score = format!("{score:.2}"),
+                    "vérification stricte d'une phrase courte"
+                );
+                score >= self.strict_threshold
+            }
+            Err(e) => {
+                warn!(erreur = %e, "empreinte de la phrase courte impossible");
+                false
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -529,6 +566,43 @@ mod tests {
         assert!(matches!(g.check(&audio(1, 3.0)), Verdict::Match(_)));
         assert!(matches!(g.check(&audio(1, 1.5)), Verdict::NoMatch(_)));
         assert!(matches!(g.check(&audio(3, 1.5)), Verdict::Match(_)));
+    }
+
+    #[test]
+    fn verification_stricte_d_une_phrase_courte() {
+        let d = tempfile::tempdir().unwrap();
+        let g = enrolled(d.path());
+        // Seuil strict (0.65) : cos 0.9 passe, cos 0.6 et 0.2 non.
+        assert!(g.check_short_strict(&audio(3, 0.5)));
+        assert!(!g.check_short_strict(&audio(1, 0.5)));
+        assert!(!g.check_short_strict(&audio(2, 0.5)));
+        // Moins de 0,3 s : rien à mesurer.
+        assert!(!g.check_short_strict(&audio(0, 0.2)));
+        assert!(g.check_short_strict(&audio(0, 0.3)));
+    }
+
+    #[test]
+    fn verification_stricte_sans_session() {
+        let d = tempfile::tempdir().unwrap();
+        let g = enrolled(d.path());
+        // Session ouverte : une voix inconnue reste refusée.
+        assert!(matches!(g.check(&audio(0, 3.0)), Verdict::Match(_)));
+        assert!(!g.check_short_strict(&audio(2, 0.5)));
+        // Hors session : la voix de Charles passe quand même, et la session n'est pas
+        // ouverte pour autant.
+        *g.session.lock().unwrap() = None;
+        assert!(g.check_short_strict(&audio(3, 0.5)));
+        assert_eq!(*g.session.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn verification_stricte_sans_empreinte_refusee() {
+        let d = tempfile::tempdir().unwrap();
+        assert!(!gate(d.path(), vectors()).check_short_strict(&audio(0, 0.5)));
+        let path = d.path().join("voiceprint/charles.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "pas du json").unwrap();
+        assert!(!gate(d.path(), vectors()).check_short_strict(&audio(0, 0.5)));
     }
 
     #[test]

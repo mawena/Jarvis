@@ -87,11 +87,14 @@ impl Skill for PowerSkill {
         );
         tokio::spawn(async move {
             tokio::time::sleep(POWER_DELAY).await;
-            // Appel bref : systemctl ne fait que transmettre la demande à logind.
-            match runner.run("systemctl", &[verb.to_string()]) {
-                Ok(out) if out.success => {}
-                Ok(_) => tracing::warn!("systemctl {verb} a échoué"),
-                Err(e) => tracing::warn!("systemctl {verb} impossible : {e}"),
+            // `systemctl` attend la réponse de logind (parfois longue pour une veille) :
+            // hors des fils du runtime, pour ne jamais les bloquer.
+            let run = move || runner.run("systemctl", &[verb.to_string()]);
+            match tokio::task::spawn_blocking(run).await {
+                Ok(Ok(out)) if out.success => {}
+                Ok(Ok(_)) => tracing::warn!("systemctl {verb} a échoué"),
+                Ok(Err(e)) => tracing::warn!("systemctl {verb} impossible : {e}"),
+                Err(e) => tracing::warn!("systemctl {verb} interrompu : {e}"),
             }
         });
         Ok(Reply::done(said))
@@ -102,6 +105,8 @@ impl Skill for PowerSkill {
 mod tests {
     use super::*;
     use crate::{CommandOutput, FakeRunner, Outcome};
+    use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+    use std::sync::{Mutex, mpsc};
 
     fn skill() -> (PowerSkill, Arc<FakeRunner>) {
         let runner = Arc::new(FakeRunner::new());
@@ -174,6 +179,61 @@ mod tests {
         assert_eq!(r.outcome, Outcome::Done);
         tokio::time::sleep(POWER_DELAY + PEU).await;
         assert_eq!(runner.calls().len(), 1);
+    }
+
+    /// `systemctl` qui ne rend la main qu'une fois relâché par le test (2 s au plus).
+    struct Bloquant {
+        demarre: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        relache: Mutex<mpsc::Receiver<()>>,
+        relache_a_temps: AtomicBool,
+        fini: AtomicBool,
+    }
+
+    impl CommandRunner for Bloquant {
+        fn run(&self, _program: &str, _args: &[String]) -> std::io::Result<CommandOutput> {
+            if let Some(tx) = self.demarre.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            let a_temps = self
+                .relache
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(2))
+                .is_ok();
+            self.relache_a_temps.store(a_temps, SeqCst);
+            self.fini.store(true, SeqCst);
+            Ok(CommandOutput {
+                success: true,
+                stdout: String::new(),
+            })
+        }
+
+        fn spawn_detached(&self, _program: &str, _args: &[String]) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn systemctl_ne_bloque_pas_le_runtime() {
+        let (demarre_tx, demarre_rx) = tokio::sync::oneshot::channel();
+        let (relache_tx, relache_rx) = mpsc::channel();
+        let runner = Arc::new(Bloquant {
+            demarre: Mutex::new(Some(demarre_tx)),
+            relache: Mutex::new(relache_rx),
+            relache_a_temps: AtomicBool::new(false),
+            fini: AtomicBool::new(false),
+        });
+        let s = PowerSkill::new(runner.clone());
+        s.call("suspend", serde_json::json!({})).await.unwrap();
+        // Runtime à un seul fil : si `systemctl` y tournait, ce test ne reprendrait la
+        // main qu'après les 2 s d'attente du faux `systemctl`, trop tard pour le relâcher.
+        demarre_rx.await.unwrap();
+        relache_tx.send(()).unwrap();
+        while !runner.fini.load(SeqCst) {
+            tokio::task::yield_now().await;
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(runner.relache_a_temps.load(SeqCst));
     }
 
     #[tokio::test]
