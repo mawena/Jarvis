@@ -38,8 +38,6 @@ async fn main() -> anyhow::Result<()> {
     ));
 
     let socket = jarvis_protocol::socket_path();
-    info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
-
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
     let result = tokio::select! {
         r = serve(brain, &socket) => r,

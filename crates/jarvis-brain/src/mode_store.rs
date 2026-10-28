@@ -41,7 +41,12 @@ impl ModeStore {
             Mode::Local => "local",
             Mode::Online => "online",
         };
-        std::fs::write(&self.path, format!("{word}\n"))
+        // Écriture atomique : fichier temporaire du même dossier, puis renommage.
+        let tmp = self.path.with_extension("tmp");
+        std::fs::write(&tmp, format!("{word}\n"))?;
+        std::fs::rename(&tmp, &self.path).inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 }
 
@@ -58,6 +63,18 @@ mod tests {
             .set(Mode::Online)
             .unwrap();
         assert_eq!(ModeStore::new(path, Mode::Local).get(), Mode::Online);
+    }
+
+    #[test]
+    fn ecriture_atomique_sans_reste() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode");
+        let store = ModeStore::new(path.clone(), Mode::Local);
+        store.set(Mode::Online).unwrap();
+        store.set(Mode::Local).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "local\n");
+        let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
+        assert_eq!(names.len(), 1);
     }
 
     #[test]
