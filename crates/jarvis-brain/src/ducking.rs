@@ -12,6 +12,9 @@ const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 const DUCK_RATIO: f32 = 0.3;
 /// Délai maximal d'un appel `wpctl`.
 const WPCTL_TIMEOUT: Duration = Duration::from_secs(2);
+/// Son toujours baissé sans `restore` au bout de ce délai : on le rétablit quand même
+/// (phrase de 10 s au plus, plus le temps de Whisper).
+const WATCHDOG_DELAY: Duration = Duration::from_secs(15);
 
 #[async_trait::async_trait]
 pub trait Ducker: Send + Sync {
@@ -23,19 +26,34 @@ pub trait Ducker: Send + Sync {
 
 /// Baisse le volume de la sortie par défaut avec `wpctl`.
 pub struct WpctlDucker {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
     runner: Arc<dyn CommandRunner>,
+    state: Mutex<State>,
+}
+
+#[derive(Default)]
+struct State {
     /// Volume d'origine pendant qu'il est baissé.
-    saved: Mutex<Option<f32>>,
+    saved: Option<f32>,
+    /// Numéro de la surveillance en cours : toute autre surveillance est périmée.
+    generation: u64,
 }
 
 impl WpctlDucker {
     pub fn new(runner: Arc<dyn CommandRunner>) -> Self {
         Self {
-            runner,
-            saved: Mutex::new(None),
+            inner: Arc::new(Inner {
+                runner,
+                state: Mutex::new(State::default()),
+            }),
         }
     }
+}
 
+impl Inner {
     /// Lance `wpctl` hors du runtime (`spawn_blocking`), avec un délai maximal.
     async fn wpctl(&self, args: Vec<String>) -> Option<CommandOutput> {
         let runner = Arc::clone(&self.runner);
@@ -72,6 +90,37 @@ impl WpctlDucker {
             .nth(1)
             .and_then(|v| v.parse().ok())
     }
+
+    /// (Re)lance la surveillance : sans `restore` d'ici `WATCHDOG_DELAY`, le son revient
+    /// tout seul. Appelé verrou pris.
+    fn arm_watchdog(self: &Arc<Self>, state: &mut State) {
+        state.generation += 1;
+        let generation = state.generation;
+        let inner = Arc::clone(self);
+        tokio::spawn(async move {
+            tokio::time::sleep(WATCHDOG_DELAY).await;
+            let mut state = inner.state.lock().await;
+            // Un `restore` ou un nouveau `duck` est passé entre-temps.
+            if state.generation != generation {
+                return;
+            }
+            warn!("son toujours baissé sans fin d'écoute, rétablissement automatique");
+            inner.restore_locked(&mut state).await;
+        });
+    }
+
+    async fn restore_locked(&self, state: &mut State) {
+        let Some(volume) = state.saved else { return };
+        // L'état n'est vidé qu'après un rétablissement confirmé : sinon le prochain
+        // `restore` réessaiera, au lieu de laisser le son baissé pour de bon.
+        if self.set_volume(volume).await {
+            state.saved = None;
+            // Annule la surveillance en cours.
+            state.generation += 1;
+        } else {
+            warn!("rétablissement du son non confirmé, nouvel essai au prochain passage");
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -79,32 +128,28 @@ impl Ducker for WpctlDucker {
     async fn duck(&self) {
         // Le verrou est gardé pendant tout l'appel : deux `duck` concurrents ne peuvent
         // jamais prendre le volume déjà baissé pour le volume d'origine.
-        let mut saved = self.saved.lock().await;
-        if saved.is_some() {
+        let inner = &self.inner;
+        let mut state = inner.state.lock().await;
+        if state.saved.is_some() {
+            inner.arm_watchdog(&mut state);
             return;
         }
-        let Some(volume) = self.read_volume().await else {
+        let Some(volume) = inner.read_volume().await else {
             debug!("volume illisible, pas de baisse du son");
             return;
         };
         // Enregistré avant la baisse : même si `set-volume` échoue ou s'applique en retard,
         // le prochain `restore` remettra le volume d'origine.
-        *saved = Some(volume);
-        if !self.set_volume(volume * DUCK_RATIO).await {
+        state.saved = Some(volume);
+        inner.arm_watchdog(&mut state);
+        if !inner.set_volume(volume * DUCK_RATIO).await {
             warn!("baisse du son non confirmée");
         }
     }
 
     async fn restore(&self) {
-        let mut saved = self.saved.lock().await;
-        let Some(volume) = *saved else { return };
-        // L'état n'est vidé qu'après un rétablissement confirmé : sinon le prochain
-        // `restore` réessaiera, au lieu de laisser le son baissé pour de bon.
-        if self.set_volume(volume).await {
-            *saved = None;
-        } else {
-            warn!("rétablissement du son non confirmé, nouvel essai au prochain passage");
-        }
+        let mut state = self.inner.state.lock().await;
+        self.inner.restore_locked(&mut state).await;
     }
 }
 
@@ -174,6 +219,38 @@ mod tests {
         let (d, runner) = ducker();
         tokio::join!(d.duck(), d.duck(), d.duck());
         d.restore().await;
+        assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn sans_listen_le_son_revient_apres_15_s() {
+        let (d, runner) = ducker();
+        d.duck().await;
+        tokio::time::sleep(Duration::from_secs(14)).await;
+        assert_eq!(set_calls(&runner), ["0.18"]);
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn restauration_normale_annule_la_surveillance() {
+        let (d, runner) = ducker();
+        d.duck().await;
+        d.restore().await;
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn nouveau_duck_relance_la_surveillance() {
+        let (d, runner) = ducker();
+        d.duck().await;
+        tokio::time::sleep(Duration::from_secs(10)).await;
+        d.duck().await;
+        // 24 s après le premier duck, 14 s après le second : toujours baissé.
+        tokio::time::sleep(Duration::from_secs(14)).await;
+        assert_eq!(set_calls(&runner), ["0.18"]);
+        tokio::time::sleep(Duration::from_secs(2)).await;
         assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
     }
 
