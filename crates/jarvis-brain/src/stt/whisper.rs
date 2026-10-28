@@ -5,6 +5,7 @@ use crate::config::SttConfig;
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 /// En dessous de 100 ms (1 600 échantillons), il n'y a rien à transcrire.
@@ -19,6 +20,8 @@ const MAX_TOKENS: i32 = 128;
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     threads: i32,
+    /// Une transcription à la fois : chacune crée son propre état Whisper (mémoire, CPU).
+    lock: Arc<Semaphore>,
 }
 
 impl WhisperTranscriber {
@@ -42,8 +45,28 @@ impl WhisperTranscriber {
         Ok(Self {
             ctx: Arc::new(ctx),
             threads: cfg.threads.max(1),
+            lock: Arc::new(Semaphore::new(1)),
         })
     }
+}
+
+/// Exécute `job` hors du runtime, une seule à la fois. Le jeton part avec la tâche :
+/// même si l'appelant abandonne, la suivante attend la fin de celle-ci.
+async fn serialized<T: Send + 'static>(
+    lock: &Arc<Semaphore>,
+    job: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
+    let permit = lock
+        .clone()
+        .acquire_owned()
+        .await
+        .context("file de transcription fermée")?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        job()
+    })
+    .await
+    .context("tâche de transcription interrompue")
 }
 
 fn is_too_short(audio: &[f32]) -> bool {
@@ -76,7 +99,7 @@ impl Transcriber for WhisperTranscriber {
         let ctx = Arc::clone(&self.ctx);
         let threads = self.threads;
         let audio = audio.to_vec();
-        tokio::task::spawn_blocking(move || {
+        serialized(&self.lock, move || {
             let mut state = ctx
                 .create_state()
                 .map_err(|e| anyhow::anyhow!("état Whisper : {e:?}"))?;
@@ -106,8 +129,7 @@ impl Transcriber for WhisperTranscriber {
             }
             Ok(text.trim().to_string())
         })
-        .await
-        .context("tâche de transcription interrompue")?
+        .await?
     }
 }
 
@@ -129,6 +151,30 @@ mod tests {
         assert_eq!(audio_ctx(16_001), 51 + AUDIO_CTX_MARGIN);
         assert_eq!(audio_ctx(16_000 * 30), FULL_AUDIO_CTX);
         assert_eq!(audio_ctx(usize::MAX), FULL_AUDIO_CTX);
+    }
+
+    #[tokio::test]
+    async fn transcriptions_une_a_la_fois() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let lock = Arc::new(Semaphore::new(1));
+        let active = Arc::new(AtomicUsize::new(0));
+        let max = Arc::new(AtomicUsize::new(0));
+        let job = || {
+            let (active, max) = (active.clone(), max.clone());
+            move || {
+                let n = active.fetch_add(1, Ordering::SeqCst) + 1;
+                max.fetch_max(n, Ordering::SeqCst);
+                std::thread::sleep(std::time::Duration::from_millis(30));
+                active.fetch_sub(1, Ordering::SeqCst);
+            }
+        };
+        let (a, b, c) = tokio::join!(
+            serialized(&lock, job()),
+            serialized(&lock, job()),
+            serialized(&lock, job())
+        );
+        assert!(a.is_ok() && b.is_ok() && c.is_ok());
+        assert_eq!(max.load(Ordering::SeqCst), 1);
     }
 
     #[test]
