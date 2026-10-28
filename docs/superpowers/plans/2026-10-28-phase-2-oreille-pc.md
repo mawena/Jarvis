@@ -74,9 +74,10 @@ Démarrage : `git flow feature start oreille-pc` depuis `develop`.
   - `fn i32_to_f32(s: i32) -> f32`, `fn i16_to_f32(s: i16) -> f32`, `fn f32_to_i16(s: f32) -> i16` (saturation).
   - `struct Listener<W: WakeDetector, V: Vad>` ; `fn new(wake: W, vad: V) -> Self` ; `fn push(&mut self, mono16k: &[f32]) -> Vec<ListenEvent>`.
   - `enum ListenEvent { Wake { score: f32 }, Utterance(Vec<f32>), NoSpeech }`.
+  - L'`Utterance` commence par le son du mot « Jarvis » lui-même : le `Listener` garde en permanence la dernière seconde entendue et la place en tête de la phrase (utile pour reconnaître la voix sur les commandes courtes ; Whisper transcrit alors « Jarvis, suivant » et le raccourci retire « Jarvis »).
 - Règles : en attente, seul le détecteur tourne ; après `Wake`, accumulation avec 300 ms de pré-enregistrement à partir du début de parole ; fin après 800 ms de silence suivant de la parole → `Utterance` ; pas de parole en 4 s → `NoSpeech` ; 10 s atteintes → `Utterance` immédiate. Pendant la capture d'une phrase, le détecteur de mot d'éveil n'est pas consulté.
 
-- [ ] **Step 1 : tests** (faux détecteur déclenché à une trame donnée, faux VAD piloté par une table de trames parlées/silencieuses) : `downmix_48k_stereo_vers_16k` (1 s de 48k stéréo → 16 000 échantillons ± 1, un sinus de 440 Hz garde son amplitude à ± 10 %), `downmix_morceaux_irreguliers` (même sortie que d'un seul bloc), `conversion_saturee`, `reveil_puis_phrase` (Wake puis Utterance de la bonne durée, pré-enregistrement inclus), `reveil_sans_parole_abandon` *(RF 3)*, `phrase_coupee_a_dix_secondes` *(RF 4)*, `pas_de_reveil_pendant_la_phrase`.
+- [ ] **Step 1 : tests** (faux détecteur déclenché à une trame donnée, faux VAD piloté par une table de trames parlées/silencieuses) : `downmix_48k_stereo_vers_16k` (1 s de 48k stéréo → 16 000 échantillons ± 1, un sinus de 440 Hz garde son amplitude à ± 10 %), `downmix_morceaux_irreguliers` (même sortie que d'un seul bloc), `conversion_saturee`, `reveil_puis_phrase` (Wake puis Utterance de la bonne durée, avec la seconde précédant le réveil en tête et le pré-enregistrement inclus), `reveil_sans_parole_abandon` *(RF 3)*, `phrase_coupee_a_dix_secondes` *(RF 4)*, `pas_de_reveil_pendant_la_phrase`.
 - [ ] **Step 2 → 4 :** échec, implémentation, `cargo test -p jarvis-ear-core` vert.
 - [ ] **Step 5 : commit** `feat(ear): rééchantillonnage et machine d'états d'écoute`.
 
@@ -157,6 +158,8 @@ Démarrage : `git flow feature start oreille-pc` depuis `develop`.
   - `app` : boucle principale : trames → `Downmixer` → `Listener` ; `Wake` → `Request::Wake` (sans attendre la réponse pour ne pas bloquer l'écoute) + `capturing = true` ; `Utterance` → `Listen{audio, muted}` ; `NoSpeech` → `Listen{"", muted}` ; `Heard.ear_action` appliqué à l'état ; commandes de l'icône appliquées ; `Status` interrogé toutes les 5 s pour l'icône (mode, modèle, joignable).
   - Configuration `~/.config/jarvis/ear.toml` : `wakeword_path`, `threshold`, `device` (tout optionnel).
   - `jarvis-ear` sans argument = `run` ; `jarvis-ear enroll`.
+  - `jarvis-ear enroll` (suite de la tâche 6) : après les « Jarvis », fait lire 6 phrases courtes affichées à l'écran (3 à 4 s chacune), envoie le tout au cerveau par `ControlRequest::EnrollVoice` (tâche 9) et affiche la réponse ; aucun WAV de phrase n'est gardé sur disque.
+  - Côté cerveau : brancher le `SpeakerVerifier` (tâche 9) dans `ListenService` avant la transcription, selon les règles de la tâche 9.
   - Côté cerveau (`crates/jarvis-brain/src/main.rs`) : charger `WhisperTranscriber` au démarrage ; si le modèle manque, garder `NoTranscriber` et journaliser une fois le chemin attendu et `scripts/download-models.sh`.
 - [ ] **Step 1 : tests** (sur `app` avec faux capteur / faux client) : `cerveau_absent_icone_injoignable` *(RF 2)*, `capture_absente_etat_indisponible` *(RF 1)*, `action_mute_appliquee`, `coupure_totale_arrete_la_capture`, `reveil_envoie_wake_puis_listen`.
 - [ ] **Step 2 → 4 :** échec, implémentation, `scripts/check.sh` vert.
@@ -170,8 +173,26 @@ Démarrage : `git flow feature start oreille-pc` depuis `develop`.
 - [ ] Journée de mesure des fausses détections (objectif < 1 / jour) ; ajuster `threshold`.
 - [ ] Fin : `scripts/check.sh`, `git flow feature finish oreille-pc`.
 
+### Task 9 : empreinte vocale et vérification du locuteur (cerveau)
+
+**Files :** Create `crates/jarvis-brain/src/speaker/mod.rs`, `crates/jarvis-brain/src/speaker/sherpa.rs` ; Modify `crates/jarvis-protocol/src/lib.rs` (ajout de variantes), `crates/jarvis-brain/src/server.rs` (traitement d'`EnrollVoice`), `crates/jarvis-brain/src/config.rs`, `scripts/download-models.sh` (option `speaker`).
+
+**Interfaces :**
+- Produces (protocole) : `ControlRequest::EnrollVoice { samples: Vec<String> }` (chaque élément = PCM i16 16 kHz mono en base64, comme `Listen.audio`) → `ControlResponse::Reply { speech }` (« Empreinte vocale enregistrée (N échantillons). ») ou `Error`.
+- Produces (cerveau) :
+  - `enum Verdict { Match(f32), NoMatch(f32), TooShort, NotEnrolled }`.
+  - `trait SpeakerVerifier: Send + Sync { fn embed(&self, audio: &[f32]) -> anyhow::Result<Vec<f32>>; }` + `struct VoicePrint { embedding: Vec<f32>, samples: usize, created: String }` (JSON, `~/.local/share/jarvis/voiceprint/charles.json`, droits 0600, jamais de son).
+  - `struct SpeakerGate { verifier: Arc<dyn SpeakerVerifier>, print: RwLock<Option<VoicePrint>>, threshold: f32, strict_threshold: f32, session: Mutex<Option<Instant>> }` ; `fn enroll(&self, samples: &[Vec<f32>]) -> anyhow::Result<usize>` (moyenne des empreintes normalisées puis renormalisée, enregistrée) ; `fn check(&self, audio: &[f32]) -> Verdict`.
+  - Règles de `check` : pas d'empreinte → `NotEnrolled` (la phrase est acceptée, avertissement journalisé une fois) ; durée ≥ 2 s → seuil `threshold` ; 1 à 2 s → `strict_threshold` ; < 1 s → `TooShort`, acceptée seulement si une phrase a été reconnue comme celle de Charles dans les 3 dernières minutes (fenêtre de session) ; chaque `Match` renouvelle la fenêtre. Similarité = cosinus.
+  - `SherpaVerifier` : crate `sherpa-onnx` 2.0.1 (liaison statique, téléchargée au build), `SpeakerEmbeddingExtractor`, modèle `3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx` (release GitHub k2-fsa/sherpa-onnx `speaker-recongition-models`) dans `~/.local/share/jarvis/models/`. Seuils par défaut à calibrer (départ : 0,55 / 0,65), dans `[speaker]` de config.toml avec `enabled = true`.
+- **Étape 0 obligatoire** : un binaire de test qui lie whisper-rs **et** sherpa-onnx ensemble et appelle les deux (évite les conflits de symboles). En cas de conflit : liaison `shared` de sherpa-onnx ou processus séparé, et le noter.
+- [ ] **Step 1 : tests** (faux `SpeakerVerifier` renvoyant des vecteurs programmés) : `enrolement_moyenne_normalisee`, `empreinte_fichier_0600_sans_son`, `voix_reconnue`, `voix_inconnue_rejetee`, `phrase_courte_acceptee_dans_la_session`, `phrase_courte_rejetee_hors_session`, `seuil_strict_entre_une_et_deux_secondes`, `sans_empreinte_acceptee`, `enroll_voice_par_le_socket` ; `#[ignore] sherpa_embedding_reel` (latence affichée).
+- [ ] **Step 2 → 4 :** échec, implémentation, `scripts/check.sh` vert.
+- [ ] **Step 5 : commit** `feat(brain): empreinte vocale et vérification du locuteur`.
+- Règle d'usage (appliquée par la tâche 7 dans `ListenService`) : `NoMatch` → la phrase est ignorée sans transcription ni action, `Heard { text: "", speech: "", ear_action: None }`, journal « voix non reconnue (score x.xx) » sans le texte ; `Match`, `NotEnrolled` → traitement normal.
+
 ## Vagues d'exécution (agents en parallèle)
 
 - Vague 1 : tâche 1 (socle partagé, seule).
-- Vague 2 (parallèle, worktrees) : tâches 2, 3, 4, 5, 6 — fichiers disjoints, interfaces fixées par la tâche 1.
+- Vague 2 (parallèle, worktrees) : tâches 2, 3, 4, 5, 6 et 9 — fichiers disjoints, interfaces fixées par la tâche 1 (la tâche 9 ajoute ses propres variantes au protocole ; conflit de fusion trivial possible avec les autres).
 - Vague 3 : tâche 7, puis tâche 8 avec Charles.
