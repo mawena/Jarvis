@@ -112,13 +112,27 @@ fn parse_args(raw: Option<&Value>) -> Result<Value, LlmError> {
 /// seul ou entouré de balises ou de phrases. Renvoie le nom et les arguments bruts s'il y en a un.
 fn text_tool_call(content: &str) -> Option<(String, Value)> {
     let start = content.find('{')?;
-    let value = serde_json::Deserializer::from_str(&content[start..])
+    let Some(Ok(value)) = serde_json::Deserializer::from_str(&content[start..])
         .into_iter::<Value>()
-        .next()?
-        .ok()?;
+        .next()
+    else {
+        return malformed_tool_call(&content[start..]);
+    };
     let name = value.get("name")?.as_str()?.to_string();
     let args = value.get("parameters").or_else(|| value.get("arguments"))?;
     Some((name, args.clone()))
+}
+
+/// JSON cassé (ex. `{"name":"volume_up","parameters":{"}}`) : on ne garde que le nom, sans arguments.
+fn malformed_tool_call(text: &str) -> Option<(String, Value)> {
+    if !text.contains("\"parameters\"") && !text.contains("\"arguments\"") {
+        return None;
+    }
+    let rest = text.split("\"name\"").nth(1)?;
+    let rest = rest.trim_start().strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let name = rest.split('"').next()?;
+    Some((name.to_string(), json!({})))
 }
 
 fn parse(v: &Value, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
@@ -288,6 +302,18 @@ mod tests {
             let err = reponse_texte(texte).await.unwrap_err();
             assert!(matches!(err, LlmError::BadResponse(_)), "{texte}: {err:?}");
         }
+    }
+
+    #[tokio::test]
+    async fn appel_d_outil_en_texte_json_casse() {
+        let casse = r#"{"name":"app_launch","parameters":{"}}"#;
+        assert_eq!(
+            reponse_texte(casse).await.unwrap(),
+            Understanding::Tool(Intent::new("app_launch", json!({})))
+        );
+        let inconnu = r#"{"name":"geocode","parameters":{"}}"#;
+        let err = reponse_texte(inconnu).await.unwrap_err();
+        assert!(matches!(err, LlmError::BadResponse(_)), "{err:?}");
     }
 
     #[tokio::test]

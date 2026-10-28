@@ -34,11 +34,7 @@ impl FakeLlm {
 
 #[async_trait::async_trait]
 impl LlmBackend for FakeLlm {
-    async fn understand(
-        &self,
-        _text: &str,
-        tools: &[ToolSpec],
-    ) -> Result<Understanding, LlmError> {
+    async fn understand(&self, _text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
         *self.tools.lock().unwrap() = tools.iter().map(|t| t.name.clone()).collect();
         self.calls.fetch_add(1, Ordering::SeqCst);
         match &*self.response.lock().unwrap() {

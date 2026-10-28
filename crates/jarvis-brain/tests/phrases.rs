@@ -119,6 +119,24 @@ async fn ollama_jeu_de_phrases() {
 }
 
 #[tokio::test]
+#[ignore = "nécessite Ollama et un modèle installé"]
+async fn ollama_questions_libres() {
+    let mut cfg = LocalLlmConfig::default();
+    if let Ok(model) = std::env::var("JARVIS_TEST_MODEL") {
+        cfg.model = model;
+    }
+    let backend = OllamaBackend::new(&cfg, "Charles");
+    let tools = real_tools();
+    for q in [
+        "quelle est la capitale du Pérou",
+        "raconte-moi une blague courte",
+        "combien font 12 fois 7",
+    ] {
+        println!("LIBRE {q:?} -> {:?}", backend.understand(q, &tools).await);
+    }
+}
+
+#[tokio::test]
 #[ignore = "nécessite ANTHROPIC_API_KEY et le réseau"]
 async fn claude_jeu_de_phrases() {
     let cfg = OnlineLlmConfig::default();
