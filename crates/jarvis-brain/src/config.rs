@@ -13,6 +13,7 @@ pub struct Config {
     pub local: LocalLlmConfig,
     pub online: OnlineLlmConfig,
     pub apps: AppsConfig,
+    pub stt: SttConfig,
 }
 
 impl Default for Config {
@@ -23,6 +24,7 @@ impl Default for Config {
             local: LocalLlmConfig::default(),
             online: OnlineLlmConfig::default(),
             apps: AppsConfig::default(),
+            stt: SttConfig::default(),
         }
     }
 }
@@ -103,6 +105,28 @@ impl<'de> Deserialize<'de> for AppsConfig {
     }
 }
 
+/// Reconnaissance vocale locale (Whisper).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct SttConfig {
+    /// Modèle ggml de whisper.cpp (`~/` accepté en tête de chemin).
+    pub model_path: PathBuf,
+    pub threads: i32,
+}
+
+impl Default for SttConfig {
+    fn default() -> Self {
+        let model_path = match directories::ProjectDirs::from("", "", "jarvis") {
+            Some(dirs) => dirs.data_dir().join("models/ggml-small-q5_1.bin"),
+            None => PathBuf::from(".local/share/jarvis/models/ggml-small-q5_1.bin"),
+        };
+        Self {
+            model_path,
+            threads: 6,
+        }
+    }
+}
+
 impl Config {
     /// Fichier absent : valeurs par défaut. TOML invalide : erreur citant le chemin.
     pub fn load(path: &Path) -> anyhow::Result<Config> {
@@ -173,6 +197,24 @@ mod tests {
             c.apps.aliases.get("terminal").unwrap(),
             "org.gnome.Terminal"
         );
+    }
+
+    #[test]
+    fn stt_config_defauts() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        assert_eq!(c.stt, SttConfig::default());
+        assert_eq!(c.stt.threads, 6);
+        assert!(
+            c.stt
+                .model_path
+                .ends_with("jarvis/models/ggml-small-q5_1.bin"),
+            "{}",
+            c.stt.model_path.display()
+        );
+        let (_d, p) = write("[stt]\nthreads = 4\n");
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.stt.threads, 4);
+        assert_eq!(c.stt.model_path, SttConfig::default().model_path);
     }
 
     #[test]

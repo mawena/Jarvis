@@ -5,3 +5,4 @@
 pub trait Transcriber: Send + Sync {
     async fn transcribe(&self, audio: &[f32]) -> anyhow::Result<String>;
 }
+pub mod whisper;

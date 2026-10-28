@@ -1328,6 +1328,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "directories",
+ "hound",
  "jarvis-brain",
  "jarvis-protocol",
  "jarvis-skills",
