@@ -45,7 +45,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 2.6 Détection de fin de parole (VAD) et délai maximum de 10 s
 - [ ] 2.7 Reconnaissance vocale Whisper (`whisper-rs`), choix `base` / `small` après mesure
 - [x] 2.8 Baisse automatique de la musique après « Jarvis »
-- [ ] 2.9 Brancher la chaîne vocale sur `Brain::handle_text`
+- [x] 2.9 Brancher la chaîne vocale sur `Brain::handle_text`
 - [x] 2.10 Commandes « coupe / réactive l'écoute » et coupure totale du micro pour l'oreille du PC (déplacées ici depuis la phase 9)
 - [x] 2.11 Icône dans la zone de notification GNOME : statut (écoute, micro coupé, cerveau injoignable, mode, modèle)
 - [x] 2.12 Menu de l'icône : couper / réactiver l'écoute, coupure totale, mode local / en ligne, statut détaillé, quitter
