@@ -187,3 +187,63 @@ text = "qu'est-ce qui passe"
 tool = "media_now_playing"
 args = {}
 fast = true
+
+[[phrase]]
+text = "reprendre"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "Jarvis, tu peux reprendre s'il te plaît"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "peux-tu mettre pause merci"
+tool = "media_pause"
+args = {}
+fast = true
+
+[[phrase]]
+text = "coupe la musique"
+tool = "media_pause"
+args = {}
+fast = true
+
+[[phrase]]
+text = "passe à la suivante"
+tool = "media_next"
+args = {}
+fast = true
+
+[[phrase]]
+text = "est-ce que tu peux remettre la précédente"
+tool = "media_previous"
+args = {}
+fast = true
+
+[[phrase]]
+text = "augmente le volume stp"
+tool = "volume_up"
+args = {}
+fast = true
+
+[[phrase]]
+text = "mets moins fort"
+tool = "volume_down"
+args = {}
+fast = true
+
+[[phrase]]
+text = "c'est quoi ce morceau"
+tool = "media_now_playing"
+args = {}
+fast = true
+
+[[phrase]]
+text = "est-ce que tu peux lancer spotify"
+tool = "app_launch"
+args = { name = "spotify" }
+fast = true
