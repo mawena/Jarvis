@@ -54,7 +54,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 2.15 Mesurer le taux de fausses détections sur une journée
 
 ## Phase 3 : voix de Jarvis
-- [ ] 3.1 Rédiger le plan de la phase 3
+- [x] 3.1 Rédiger le plan de la phase 3 ([plan](docs/superpowers/plans/2026-10-28-phase-3-voix.md))
 - [ ] 3.2 Synthèse vocale Piper avec une voix française
 - [ ] 3.3 Sons de confirmation (réveil, succès, échec)
 - [ ] 3.4 Confirmation vocale des actions risquées (oui/non sur la même oreille, 8 s)
