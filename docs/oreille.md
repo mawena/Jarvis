@@ -9,14 +9,14 @@ ne sont jamais enregistrées : seules les prises de « Jarvis » de l'enrôlemen
 
 ```bash
 sudo apt install libasound2-dev libclang-dev    # pour compiler
-scripts/download-models.sh all                  # modèles Whisper (small, base) et empreinte vocale
+scripts/download-models.sh all                  # Whisper (small, base), empreinte vocale, voix de Jarvis
 jarvisctl install                               # ou `jarvisctl update` ; copie aussi les bibliothèques
 ```
 
 Les modèles vont dans `~/.local/share/jarvis/models/`. Les bibliothèques de sherpa-onnx sont
 copiées dans `~/.local/lib/jarvis/`. Le script accepte aussi une seule cible : `small` (modèle
 Whisper par défaut, rapide et fiable sur ce PC), `base` (plus léger mais moins fiable en
-français, à éviter) ou `speaker` (empreinte vocale).
+français, à éviter), `speaker` (empreinte vocale) ou `voice` (voix de Jarvis).
 
 ## Premier enrôlement
 
@@ -85,6 +85,21 @@ au bout de 15 s, à l'arrêt du cerveau, ou à son redémarrage.
 
 Pendant l'écoute coupée, les autres phrases ne sont ni exécutées ni journalisées.
 
+## Voix de Jarvis
+
+Jarvis répond à voix haute avec la voix Piper « pierre » (`vits-piper-fr_FR-upmc-medium`,
+licence CC-BY-SA 4.0), calculée sur le PC par le cerveau, puis jouée par l'oreille.
+
+```bash
+scripts/download-models.sh voice    # 80 Mo, extrait dans ~/.local/share/jarvis/models/
+jarvisctl restart
+```
+
+Sans la voix (non téléchargée, désactivée ou en panne), le cerveau démarre quand même : les
+commandes s'exécutent et la réponse arrive en texte seul ; un avertissement est journalisé.
+Au premier lancement, les données d'espeak-ng (conversion du texte en sons) sont décompressées
+dans `/tmp/piper-phonemize-espeak-ng-data/` (19 Mo).
+
 ## Fichiers créés
 
 | Fichier | Contenu |
@@ -123,6 +138,13 @@ configuration et données, modèles compris).
 # threshold = 0.55          # phrase d'au moins 2 s
 # strict_threshold = 0.65   # phrase de 1 à 2 s
 # threads = 2
+
+[tts]
+# enabled = true
+# model_dir = "~/.local/share/jarvis/models/vits-piper-fr_FR-upmc-medium"
+# speaker = 1               # 1 = « pierre », 0 = « jessica »
+# speed = 1.0               # plus grand = plus rapide
+# threads = 2
 ```
 
 Si ta voix est refusée trop souvent, baisse `threshold` ; si d'autres voix passent, monte-le.
@@ -139,6 +161,7 @@ jarvisctl doctor
 Les lignes `!` concernent l'oreille (avertissements, pas d'échec) :
 
 - **Bibliothèques sherpa-onnx absentes** : `jarvisctl install` ou `jarvisctl update`.
+- **Voix de Jarvis absente** : `scripts/download-models.sh voice`, puis `jarvisctl restart`.
 - **Modèle Whisper ou d'empreinte absent** : `scripts/download-models.sh all`. Sans Whisper, le
   cerveau répond « La reconnaissance vocale n'est pas installée. »
 - **Mot d'éveil ou empreinte absents** : `jarvis-ear enroll`.

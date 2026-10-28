@@ -6,9 +6,10 @@ use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
-use jarvis_brain::server::{SpeakerState, serve_with_state};
+use jarvis_brain::server::{SpeakerState, serve_with_voice};
 use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
 use jarvis_brain::stt::{Transcriber, whisper::WhisperTranscriber};
+use jarvis_brain::tts::{Voice, piper::PiperSynthesizer};
 use jarvis_protocol::Mode;
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaSkill, MprisPlayers};
@@ -86,6 +87,20 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(NoTranscriber)
         }
     };
+    let voice = if config.tts.enabled {
+        match PiperSynthesizer::load(&config.tts) {
+            Ok(v) => {
+                info!(voix = %config.tts.model_dir.display(), "voix de Jarvis prête");
+                Voice::new(Arc::new(v))
+            }
+            Err(e) => {
+                warn!(erreur = %e, "voix de Jarvis indisponible, réponses en texte seul");
+                Voice::none()
+            }
+        }
+    } else {
+        Voice::none()
+    };
     let ducker = Arc::new(WpctlDucker::persistent(runner, WpctlDucker::default_file()));
     ducker.recover().await;
     let listen = Arc::new(
@@ -94,7 +109,7 @@ async fn main() -> anyhow::Result<()> {
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
     let result = tokio::select! {
-        r = serve_with_state(brain, listen, speaker, &socket) => r,
+        r = serve_with_voice(brain, listen, speaker, voice, &socket) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     };
