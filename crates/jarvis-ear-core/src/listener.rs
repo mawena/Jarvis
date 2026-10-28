@@ -142,7 +142,8 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
         }
     }
 
-    fn reset(&mut self) {
+    /// Abandonne la capture en cours et vide les tampons (coupure totale, perte du micro).
+    pub fn reset(&mut self) {
         self.state = State::Idle;
         self.head.clear();
         self.vad_buf.clear();
@@ -313,5 +314,16 @@ mod tests {
         let after_wake = calls.load(Ordering::SeqCst);
         run(&mut l, &ramp(50_000));
         assert_eq!(calls.load(Ordering::SeqCst), after_wake);
+    }
+
+    #[test]
+    fn reinitialisation_abandonne_la_capture() {
+        let (w, _) = FakeWake::new(10);
+        let mut l = Listener::new(w, FakeVad::new(0..0));
+        let ev = l.push(&ramp(1_600));
+        assert_eq!(ev, vec![ListenEvent::Wake { score: 0.9 }]);
+        l.reset();
+        // Sans la réinitialisation, 4 s sans parole produiraient un `NoSpeech`.
+        assert!(run(&mut l, &ramp(70_000)).is_empty());
     }
 }

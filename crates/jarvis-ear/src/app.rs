@@ -162,12 +162,19 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             CaptureEvent::Unavailable => {
                 self.downmixer = None;
                 self.unavailable = true;
+                if self.capturing {
+                    // La musique avait été baissée au réveil : on la rétablit.
+                    self.send_listen(&[]);
+                }
+                self.listener.reset();
             }
             CaptureEvent::Samples(data) => {
                 let Some(downmixer) = self.downmixer.as_mut() else {
                     return;
                 };
                 let mono = downmixer.push(&data);
+                // Le tampon retourne au pool de la capture.
+                drop(data);
                 for event in self.listener.push(&mono) {
                     self.on_listen(event);
                 }
@@ -227,6 +234,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     // La musique avait été baissée au réveil : on la rétablit.
                     self.send_listen(&[]);
                 }
+                // Plus de capture en cours : pas de `Listen` orphelin à la réouverture.
+                self.listener.reset();
             }
             TrayCommand::Reopen if self.hard_muted => {
                 self.hard_muted = false;
@@ -312,6 +321,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::capture::Samples;
     use jarvis_protocol::Mode;
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -320,6 +330,8 @@ mod tests {
     struct FakeWake {
         every: usize,
         frame: usize,
+        /// Nombre maximal de déclenchements.
+        left: usize,
     }
     impl WakeDetector for FakeWake {
         fn frame_len(&self) -> usize {
@@ -327,7 +339,11 @@ mod tests {
         }
         fn process(&mut self, _: &[f32]) -> Option<f32> {
             self.frame += 1;
-            self.frame.is_multiple_of(self.every).then_some(0.9)
+            if self.left > 0 && self.frame.is_multiple_of(self.every) {
+                self.left -= 1;
+                return Some(0.9);
+            }
+            None
         }
     }
 
@@ -402,12 +418,33 @@ mod tests {
         })
     }
 
+    fn harness_speech(speech_frames: usize) -> Harness {
+        build_harness(|_| status_ok(), false, speech_frames, usize::MAX)
+    }
+
+    /// Un seul réveil possible : une capture « orpheline » serait visible.
+    fn harness_one_wake() -> Harness {
+        build_harness(|_| status_ok(), false, 0, 1)
+    }
+
     fn harness(
         responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
         + Send
         + Sync
         + 'static,
         capture_fails: bool,
+    ) -> Harness {
+        build_harness(responder, capture_fails, 0, usize::MAX)
+    }
+
+    fn build_harness(
+        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
+        + Send
+        + Sync
+        + 'static,
+        capture_fails: bool,
+        speech_frames: usize,
+        wakes: usize,
     ) -> Harness {
         let shared = Arc::new(CaptureShared::default());
         let brain = Arc::new(FakeBrain {
@@ -425,9 +462,10 @@ mod tests {
             FakeWake {
                 every: 10,
                 frame: 0,
+                left: wakes,
             },
             FakeVad {
-                speech_frames: 0,
+                speech_frames,
                 frame: 0,
             },
         );
@@ -471,7 +509,7 @@ mod tests {
             .await
             .unwrap();
             for chunk in samples.chunks(1_600) {
-                tx.send(CaptureEvent::Samples(chunk.to_vec()))
+                tx.send(CaptureEvent::Samples(Samples::detached(chunk.to_vec())))
                     .await
                     .unwrap();
             }
@@ -662,5 +700,76 @@ mod tests {
             .await;
         h.commands.send(TrayCommand::Quit).unwrap();
         h.task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn coupure_totale_pendant_la_capture_puis_reouverture_sans_listen_orphelin() {
+        let h = harness_one_wake();
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        // Réveil seul : la capture est en cours (aucune parole, pas encore d'abandon).
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.requests().contains(&ControlRequest::Wake))
+            .await;
+        h.commands.send(TrayCommand::HardMute).unwrap();
+        // Un `Listen` vide rétablit la musique.
+        h.wait_for("listen vide", |h| h.listens() == vec![false])
+            .await;
+        h.commands.send(TrayCommand::Reopen).unwrap();
+        h.wait_for("flux rouvert", |h| {
+            h.capture.starts.load(Ordering::SeqCst) == 2
+        })
+        .await;
+        // Plus de 4 s de silence : sans réinitialisation, l'ancienne capture enverrait un
+        // second `Listen` (abandon faute de parole).
+        h.feed(vec![0.0; 70_000]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(h.listens(), vec![false]);
+    }
+
+    #[tokio::test]
+    async fn perte_du_micro_pendant_la_capture_retablit_la_musique() {
+        let h = harness_one_wake();
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.requests().contains(&ControlRequest::Wake))
+            .await;
+        let tx = h.capture.tx.lock().unwrap().clone().unwrap();
+        tx.send(CaptureEvent::Unavailable).await.unwrap();
+        h.wait_for("listen vide", |h| h.listens() == vec![false])
+            .await;
+        h.wait_for("indisponible", |h| {
+            h.tray.borrow().mic == MicState::Unavailable
+        })
+        .await;
+        // Micro de retour : pas de second `Listen` issu de l'ancienne capture.
+        h.feed(vec![0.0; 70_000]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(h.listens(), vec![false]);
+        assert!(!h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
+    async fn listen_muet_porte_l_audio_de_la_phrase() {
+        // Parole pendant 20 trames de VAD après le réveil, puis silence.
+        let h = harness_speech(20);
+        h.commands.send(TrayCommand::Mute).unwrap();
+        h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
+            .await;
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.feed(vec![0.1; 1_600 + 30_000]).await;
+        h.wait_for("phrase envoyée", |h| !h.listens().is_empty())
+            .await;
+        let audio = h
+            .requests()
+            .into_iter()
+            .find_map(|r| match r {
+                ControlRequest::Listen { audio, muted: true } => Some(audio),
+                _ => None,
+            })
+            .expect("Listen muted");
+        assert!(!audio.is_empty());
     }
 }
