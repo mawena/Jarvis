@@ -1,9 +1,11 @@
-use super::{LlmBackend, LlmError, Understanding, system_prompt};
+use super::router::{Route, classify};
+use super::{LlmBackend, LlmError, Understanding, chat_prompt, system_prompt};
 use crate::config::LocalLlmConfig;
 use crate::intent::Intent;
 use jarvis_skills::ToolSpec;
 use serde_json::{Value, json};
 use std::time::Duration;
+use tracing::debug;
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// Le premier chargement du modèle en mémoire peut dépasser largement TIMEOUT.
@@ -44,6 +46,20 @@ impl OllamaBackend {
         check_status(resp.status())
     }
 
+    /// Conversation libre : aucun outil, consigne courte, réponse brève.
+    fn conversation_body(&self, text: &str) -> Value {
+        json!({
+            "model": self.model,
+            "stream": false,
+            "messages": [
+                {"role": "system", "content": chat_prompt(&self.address)},
+                {"role": "user", "content": text},
+            ],
+            "options": {"num_predict": 100},
+            "keep_alive": self.keep_alive,
+        })
+    }
+
     fn chat_body(&self, text: &str, tools: &[ToolSpec]) -> Value {
         let tools: Vec<Value> = tools
             .iter()
@@ -78,7 +94,12 @@ fn check_status(status: reqwest::StatusCode) -> Result<(), LlmError> {
 #[async_trait::async_trait]
 impl LlmBackend for OllamaBackend {
     async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
-        let body = self.chat_body(text, tools);
+        let route = classify(text);
+        debug!(?route, "aiguillage local");
+        let (body, tools) = match route {
+            Route::Command => (self.chat_body(text, tools), tools),
+            Route::Conversation => (self.conversation_body(text), &[][..]),
+        };
         let resp = self
             .client
             .post(format!("{}/api/chat", self.url))
@@ -92,6 +113,13 @@ impl LlmBackend for OllamaBackend {
             .json()
             .await
             .map_err(|e| LlmError::BadResponse(e.to_string()))?;
+        if route == Route::Conversation {
+            return v
+                .pointer("/message/content")
+                .and_then(Value::as_str)
+                .map(|c| Understanding::Answer(c.trim().to_string()))
+                .ok_or_else(|| LlmError::BadResponse("contenu absent".into()));
+        }
         parse(&v, tools)
     }
 }
@@ -361,6 +389,45 @@ mod tests {
         let reqs = server.received_requests().await.unwrap();
         let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
         assert_eq!(body["keep_alive"], "30m");
+    }
+
+    #[tokio::test]
+    async fn conversation_sans_outils_repond() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"message": {"role": "assistant", "content": "Lima, Monsieur."}}),
+            ))
+            .mount(&server)
+            .await;
+        let got = backend(&server.uri())
+            .understand("quelle est la capitale du Pérou", &[tool()])
+            .await
+            .unwrap();
+        assert_eq!(got, Understanding::Answer("Lima, Monsieur.".into()));
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(body.get("tools").is_none(), "{body}");
+        assert_eq!(body["keep_alive"], "30m");
+    }
+
+    #[tokio::test]
+    async fn commande_envoie_les_outils() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message": {"content": "ok"}})),
+            )
+            .mount(&server)
+            .await;
+        backend(&server.uri())
+            .understand("ouvre firefox", &[tool()])
+            .await
+            .unwrap();
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert_eq!(body["tools"][0]["function"]["name"], "app_launch");
     }
 
     #[tokio::test]
