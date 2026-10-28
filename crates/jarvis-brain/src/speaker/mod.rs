@@ -33,6 +33,51 @@ pub enum Verdict {
     NotEnrolled,
 }
 
+/// État de la vérification du locuteur au démarrage.
+#[derive(Clone)]
+pub enum SpeakerState {
+    /// Désactivée dans la configuration.
+    Disabled,
+    /// Activée, mais le modèle est introuvable ou inutilisable. `enrolled` : un fichier
+    /// d'empreinte existe (même illisible) ; toutes les phrases sont alors refusées.
+    Unavailable {
+        enrolled: bool,
+    },
+    Ready(Arc<SpeakerGate>),
+}
+
+impl SpeakerState {
+    /// Modèle indisponible. Sans fichier d'empreinte (installation neuve, jamais
+    /// enrôlée), les voix restent acceptées : sans modèle, l'enrôlement est de toute
+    /// façon impossible. Avec un fichier, on refuse tout plutôt que d'obéir à n'importe qui.
+    pub fn unavailable(path: &Path) -> Self {
+        let enrolled = voiceprint_present(path);
+        if enrolled {
+            warn!(
+                chemin = %path.display(),
+                "modèle d'empreinte vocale indisponible : toutes les phrases seront refusées"
+            );
+        } else {
+            warn!(
+                "modèle d'empreinte vocale indisponible, aucune empreinte : toutes les voix sont acceptées"
+            );
+        }
+        SpeakerState::Unavailable { enrolled }
+    }
+
+    pub fn gate(&self) -> Option<&Arc<SpeakerGate>> {
+        match self {
+            SpeakerState::Ready(g) => Some(g),
+            _ => None,
+        }
+    }
+}
+
+/// Vrai sauf si le fichier est réellement absent : toute autre erreur compte comme présent.
+fn voiceprint_present(path: &Path) -> bool {
+    !matches!(std::fs::metadata(path), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
 pub trait SpeakerVerifier: Send + Sync {
     /// Empreinte de l'audio (f32, 16 kHz mono).
     fn embed(&self, audio: &[f32]) -> anyhow::Result<Vec<f32>>;
@@ -55,6 +100,8 @@ pub struct SpeakerGate {
     session: Mutex<Option<Instant>>,
     path: PathBuf,
     warned: AtomicBool,
+    /// Fichier présent mais illisible ou invalide : tout est refusé jusqu'au réenrôlement.
+    unreadable: AtomicBool,
 }
 
 fn normalize(v: &mut [f32]) {
@@ -81,42 +128,40 @@ fn cosine(a: &[f32], b: &[f32]) -> f32 {
 }
 
 impl SpeakerGate {
-    /// Charge l'empreinte existante dans `path` (absente ou illisible : non enregistré).
+    /// Charge l'empreinte existante dans `path`. Absente : non enregistré (tout est
+    /// accepté). Présente mais illisible ou invalide : tout est refusé.
     pub fn new(
         verifier: Arc<dyn SpeakerVerifier>,
         path: PathBuf,
         threshold: f32,
         strict_threshold: f32,
     ) -> Self {
-        let print = match std::fs::read_to_string(&path) {
+        let loaded = match std::fs::read_to_string(&path) {
             Ok(t) => match serde_json::from_str::<VoicePrint>(&t) {
-                Ok(p) if is_usable(&p.embedding) => Some(p),
-                Ok(_) => {
-                    warn!(
-                        chemin = %path.display(),
-                        "empreinte vocale invalide (vide, non finie ou nulle), ignorée"
-                    );
-                    None
-                }
-                Err(e) => {
-                    warn!(chemin = %path.display(), erreur = %e, "empreinte vocale illisible, ignorée");
-                    None
-                }
+                Ok(p) if is_usable(&p.embedding) => Ok(Some(p)),
+                Ok(_) => Err("empreinte vide, non finie ou nulle".to_string()),
+                Err(e) => Err(e.to_string()),
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-            Err(e) => {
-                warn!(chemin = %path.display(), erreur = %e, "empreinte vocale illisible, ignorée");
-                None
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.to_string()),
         };
+        let unreadable = loaded.is_err();
+        if let Err(e) = &loaded {
+            warn!(
+                chemin = %path.display(),
+                erreur = %e,
+                "empreinte vocale illisible ou invalide : toutes les phrases seront refusées (réenrôlez votre voix)"
+            );
+        }
         Self {
             verifier,
-            print: RwLock::new(print),
+            print: RwLock::new(loaded.unwrap_or(None)),
             threshold,
             strict_threshold,
             session: Mutex::new(None),
             path,
             warned: AtomicBool::new(false),
+            unreadable: AtomicBool::new(unreadable),
         }
     }
 
@@ -167,7 +212,12 @@ impl SpeakerGate {
                 .unwrap_or_default(),
         };
         self.save(&print)?;
-        *self.print.write().unwrap() = Some(print);
+        {
+            // Sous le même verrou que l'empreinte : `check` voit les deux changements ensemble.
+            let mut stored = self.print.write().unwrap();
+            *stored = Some(print);
+            self.unreadable.store(false, Ordering::Relaxed);
+        }
         *self.session.lock().unwrap() = None;
         Ok(samples.len())
     }
@@ -212,13 +262,18 @@ impl SpeakerGate {
 
     pub fn check(&self, audio: &[f32]) -> Verdict {
         // Copie de l'empreinte : le verrou n'est pas tenu pendant l'inférence.
-        let reference = self
-            .print
-            .read()
-            .unwrap()
-            .as_ref()
-            .map(|p| p.embedding.clone());
+        let (reference, unreadable) = {
+            let stored = self.print.read().unwrap();
+            (
+                stored.as_ref().map(|p| p.embedding.clone()),
+                self.unreadable.load(Ordering::Relaxed),
+            )
+        };
         let Some(reference) = reference else {
+            if unreadable {
+                // Déjà signalé au chargement.
+                return Verdict::NoMatch(0.0);
+            }
             if !self.warned.swap(true, Ordering::Relaxed) {
                 warn!("aucune empreinte vocale enregistrée : toutes les voix sont acceptées");
             }
@@ -349,7 +404,7 @@ mod tests {
     }
 
     #[test]
-    fn fichier_invalide_ignore_au_chargement() {
+    fn fichier_invalide_refuse_tout() {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("voiceprint/charles.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -362,8 +417,46 @@ mod tests {
             std::fs::write(&path, contenu).unwrap();
             let g = gate(d.path(), vectors());
             assert!(!g.is_enrolled(), "{contenu}");
-            assert_eq!(g.check(&audio(2, 3.0)), Verdict::NotEnrolled);
+            assert_eq!(g.check(&audio(0, 3.0)), Verdict::NoMatch(0.0), "{contenu}");
+            assert_eq!(g.check(&audio(0, 0.5)), Verdict::NoMatch(0.0), "{contenu}");
         }
+    }
+
+    #[test]
+    fn fichier_illisible_refuse_tout() {
+        let d = tempfile::tempdir().unwrap();
+        // Un dossier à la place du fichier : lecture impossible, mais pas « absent ».
+        std::fs::create_dir_all(d.path().join("voiceprint/charles.json")).unwrap();
+        let g = gate(d.path(), vectors());
+        assert_eq!(g.check(&audio(0, 3.0)), Verdict::NoMatch(0.0));
+    }
+
+    #[test]
+    fn reenrolement_apres_fichier_invalide() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("voiceprint/charles.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "pas du json").unwrap();
+        let g = gate(d.path(), vectors());
+        g.enroll(&[audio(0, 2.0)]).unwrap();
+        assert!(matches!(g.check(&audio(3, 3.0)), Verdict::Match(_)));
+        assert!(matches!(g.check(&audio(2, 3.0)), Verdict::NoMatch(_)));
+    }
+
+    #[test]
+    fn modele_indisponible_avec_empreinte_refuse() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("voiceprint/charles.json");
+        assert!(matches!(
+            SpeakerState::unavailable(&path),
+            SpeakerState::Unavailable { enrolled: false }
+        ));
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "pas du json").unwrap();
+        assert!(matches!(
+            SpeakerState::unavailable(&path),
+            SpeakerState::Unavailable { enrolled: true }
+        ));
     }
 
     #[test]

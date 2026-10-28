@@ -200,7 +200,9 @@ async fn enroll_voice_modele_introuvable() {
     let b = brain(dir.path());
     let l = listen(&b);
     let s = socket.clone();
-    tokio::spawn(async move { serve_with_state(b, l, SpeakerState::Unavailable, &s).await });
+    tokio::spawn(async move {
+        serve_with_state(b, l, SpeakerState::Unavailable { enrolled: true }, &s).await
+    });
     for _ in 0..100 {
         if UnixStream::connect(&socket).await.is_ok() {
             break;

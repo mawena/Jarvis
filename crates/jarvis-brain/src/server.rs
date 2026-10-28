@@ -22,24 +22,7 @@ pub async fn serve(
     serve_with_speaker(brain, listen, None, socket).await
 }
 
-/// État de la vérification du locuteur côté serveur.
-#[derive(Clone)]
-pub enum SpeakerState {
-    /// Désactivée dans la configuration.
-    Disabled,
-    /// Activée, mais le modèle est introuvable ou inutilisable.
-    Unavailable,
-    Ready(Arc<SpeakerGate>),
-}
-
-impl SpeakerState {
-    pub fn gate(&self) -> Option<&Arc<SpeakerGate>> {
-        match self {
-            SpeakerState::Ready(g) => Some(g),
-            _ => None,
-        }
-    }
-}
+pub use crate::speaker::SpeakerState;
 
 /// Comme [`serve`], avec la vérification du locuteur (`EnrollVoice`).
 pub async fn serve_with_speaker(
@@ -172,7 +155,7 @@ async fn enroll_voice(speaker: &SpeakerState, samples: Vec<String>) -> ControlRe
     };
     let gate = match speaker {
         SpeakerState::Disabled => return error("L'empreinte vocale n'est pas activée."),
-        SpeakerState::Unavailable => {
+        SpeakerState::Unavailable { .. } => {
             return error(
                 "Empreinte vocale indisponible : modèle introuvable (voir scripts/download-models.sh speaker).",
             );

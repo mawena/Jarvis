@@ -64,8 +64,8 @@ async fn main() -> anyhow::Result<()> {
                 config.speaker.strict_threshold,
             ))),
             Err(e) => {
-                warn!(erreur = %e, "empreinte vocale désactivée");
-                SpeakerState::Unavailable
+                warn!(erreur = %e, "modèle d'empreinte vocale indisponible");
+                SpeakerState::unavailable(&SpeakerGate::default_path())
             }
         }
     } else {
@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     };
     let listen = Arc::new(
         ListenService::new(brain.clone(), stt, Arc::new(WpctlDucker::new(runner)))
-            .with_speaker(speaker.gate().cloned()),
+            .with_speaker_state(speaker.clone()),
     );
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
