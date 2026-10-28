@@ -1,11 +1,15 @@
 #!/usr/bin/env bash
-# Télécharge les modèles Whisper (ggml, quantifiés q5_1) dans ~/.local/share/jarvis/models/.
-# Usage : scripts/download-models.sh [small|base|all]   (défaut : small)
+# Télécharge les modèles de Jarvis dans ~/.local/share/jarvis/models/ :
+#   - Whisper (ggml, quantifiés q5_1) pour la reconnaissance vocale ;
+#   - CAM++ (ONNX, sherpa-onnx) pour l'empreinte vocale.
+# Usage : scripts/download-models.sh [small|base|speaker|all]   (défaut : small)
 # Idempotent : un fichier déjà complet (taille exacte) n'est pas retéléchargé.
 set -euo pipefail
 
 MODELS_DIR="${JARVIS_MODELS_DIR:-$HOME/.local/share/jarvis/models}"
 WHISPER_URL="https://huggingface.co/ggerganov/whisper.cpp/resolve/main"
+# « recongition » : faute de frappe d'origine dans le nom de la release sherpa-onnx.
+SPEAKER_URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models"
 
 # fetch <fichier> <taille attendue en octets> <url de base>
 fetch() {
@@ -31,16 +35,19 @@ fetch() {
 
 whisper_small() { fetch ggml-small-q5_1.bin 190085487 "$WHISPER_URL"; }
 whisper_base() { fetch ggml-base-q5_1.bin 59707625 "$WHISPER_URL"; }
+speaker() { fetch 3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx 29596978 "$SPEAKER_URL"; }
 
 case "${1:-small}" in
     small) whisper_small ;;
     base) whisper_base ;;
+    speaker) speaker ;;
     all)
         whisper_small
         whisper_base
+        speaker
         ;;
     *)
-        echo "usage : $0 [small|base|all]" >&2
+        echo "usage : $0 [small|base|speaker|all]" >&2
         exit 2
         ;;
 esac
