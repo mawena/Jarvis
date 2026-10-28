@@ -39,7 +39,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 ## Phase 2 : oreille du PC (écoute permanente)
 - [x] 2.1 Rédiger le plan de la phase 2 ([plan](docs/superpowers/plans/2026-10-28-phase-2-oreille-pc.md))
 - [x] 2.2 Installer les prérequis système : `sudo apt install libasound2-dev libclang-dev` (Charles)
-- [ ] 2.3 Socle : protocole d'écoute (`Wake`, `Listen`, `Heard`), crates `jarvis-ear-core` et `jarvis-ear` (tâche 1)
+- [x] 2.3 Socle : protocole d'écoute (`Wake`, `Listen`, `Heard`), crates `jarvis-ear-core` et `jarvis-ear` (tâche 1)
 - [ ] 2.4 Capture du micro en 16 kHz mono (`cpal`)
 - [ ] 2.5 Mot d'éveil « Jarvis » (`rustpotter`) et outil d'enregistrement des échantillons de voix
 - [ ] 2.6 Détection de fin de parole (VAD) et délai maximum de 10 s
