@@ -65,6 +65,11 @@ pub enum ControlRequest {
         audio: String,
         muted: bool,
     },
+    /// Enregistre l'empreinte vocale : chaque élément est un échantillon audio
+    /// (même format que `Listen.audio`).
+    EnrollVoice {
+        samples: Vec<String>,
+    },
 }
 
 /// Action demandée à l'oreille après une phrase entendue.
@@ -198,6 +203,16 @@ mod tests {
             muted: true,
         };
         let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn enroll_voice_aller_retour() {
+        let r = ControlRequest::EnrollVoice {
+            samples: vec![encode_pcm(&[1, 2]), encode_pcm(&[3])],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.starts_with(r#"{"type":"enroll_voice""#), "{json}");
         assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
     }
 

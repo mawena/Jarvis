@@ -8,6 +8,7 @@ pub mod llm;
 pub mod logging;
 pub mod mode_store;
 pub mod server;
+pub mod speaker;
 pub mod stt;
 pub mod system_skill;
 #[cfg(any(test, feature = "test-util"))]
