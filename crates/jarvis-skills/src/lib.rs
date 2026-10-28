@@ -1,5 +1,6 @@
 //! Skill abstraction and command execution for Jarvis.
 
+pub mod apps;
 pub mod runner;
 
 #[cfg(any(test, feature = "test-util"))]
@@ -45,6 +46,9 @@ pub enum SkillError {
     UnknownTool(String),
     #[error("arguments invalides : {0}")]
     BadArgs(String),
+    /// Cible introuvable ; le message est prêt à être dit.
+    #[error("{0}")]
+    NotFound(String),
     #[error("échec : {0}")]
     Failed(String),
 }
@@ -54,3 +58,4 @@ pub trait Skill: Send + Sync {
     fn tools(&self) -> Vec<ToolSpec>;
     async fn call(&self, tool: &str, args: serde_json::Value) -> Result<Reply, SkillError>;
 }
+pub mod media;

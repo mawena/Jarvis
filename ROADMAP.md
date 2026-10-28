@@ -19,13 +19,15 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 ## Phase 1 : compréhension et premières compétences (par le texte)
 *Plan : [phases 0 et 1](docs/superpowers/plans/2026-10-28-phases-0-1-fondations-comprehension.md), branche `feature/comprehension-texte`*
 
-- [ ] Raccourcis rapides sans IA (« suivant », « pause », « lance X »…) (tâche 4)
-- [ ] Contrôle des médias via MPRIS et volume PipeWire (tâche 5)
-- [ ] Lancement et mise au premier plan des applications et jeux (tâche 6)
-- [ ] Compréhension par IA : Ollama (local) et Claude (en ligne) (tâche 7)
-- [ ] Orchestrateur et switch de mode persistant (tâche 8)
-- [ ] Service `jarvis-brain` et outil `jarvis` (tâche 9)
-- [ ] Jeu de phrases de référence, installation d'Ollama, choix du modèle local, essai réel (tâche 10)
+- [x] Raccourcis rapides sans IA (« suivant », « pause », « lance X »…) (tâche 4)
+- [x] Contrôle des médias via MPRIS et volume PipeWire (tâche 5)
+- [x] Lancement et mise au premier plan des applications et jeux (tâche 6)
+- [x] Compréhension par IA : Ollama (local) et Claude (en ligne) (tâche 7)
+- [x] Orchestrateur et switch de mode persistant (tâche 8)
+- [x] Service `jarvis-brain` et outil `jarvis` (tâche 9)
+- [x] Jeu de phrases de référence et tests de l'IA (tâche 10)
+- [ ] Installer Ollama, comparer `qwen2.5:3b` et `llama3.2:3b`, choisir le modèle local (voir `docs/ia-locale.md`)
+- [ ] Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
 
 ## Phase 2 : oreille du PC (écoute permanente)
 - [ ] Rédiger le plan de la phase 2

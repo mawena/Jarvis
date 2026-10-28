@@ -7,8 +7,16 @@ edition.workspace = true
 name = "jarvis-brain"
 path = "src/main.rs"
 
+[features]
+test-util = ["jarvis-skills/test-util"]
+
 [dependencies]
 jarvis-protocol.workspace = true
+jarvis-skills.workspace = true
+reqwest.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
@@ -18,4 +26,7 @@ anyhow.workspace = true
 directories.workspace = true
 
 [dev-dependencies]
+jarvis-skills = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
+wiremock.workspace = true
+jarvis-brain = { path = ".", features = ["test-util"] }
