@@ -28,3 +28,4 @@ directories.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 wiremock.workspace = true
+jarvis-brain = { path = ".", features = ["test-util"] }
