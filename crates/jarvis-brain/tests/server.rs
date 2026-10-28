@@ -1,9 +1,10 @@
 use jarvis_brain::brain::Brain;
+use jarvis_brain::listen::ListenService;
 use jarvis_brain::llm::Understanding;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::server::serve;
-use jarvis_brain::testing::{FakeLlm, FakeSkill};
-use jarvis_protocol::{ControlRequest, ControlResponse, Mode};
+use jarvis_brain::testing::{FakeDucker, FakeLlm, FakeSkill, FakeTranscriber};
+use jarvis_protocol::{ControlRequest, ControlResponse, Mode, encode_pcm};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -12,18 +13,30 @@ use tokio::net::UnixStream;
 
 fn brain(dir: &Path) -> Arc<Brain> {
     let llm = || Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))));
-    Arc::new(Brain::new(
-        vec![Arc::new(FakeSkill::new(&["media_next"]))],
-        llm(),
-        llm(),
-        Arc::new(ModeStore::new(dir.join("mode"), Mode::Local)),
+    Arc::new(
+        Brain::new(
+            vec![Arc::new(FakeSkill::new(&["media_next"]))],
+            llm(),
+            llm(),
+            Arc::new(ModeStore::new(dir.join("mode"), Mode::Local)),
+        )
+        .with_local_model("qwen-test"),
+    )
+}
+
+fn listen(b: &Arc<Brain>) -> Arc<ListenService> {
+    Arc::new(ListenService::new(
+        b.clone(),
+        Arc::new(FakeTranscriber::new("suivant")),
+        Arc::new(FakeDucker::new()),
     ))
 }
 
 async fn start(dir: &Path) -> PathBuf {
     let socket = dir.join("run/brain.sock");
     let (b, s) = (brain(dir), socket.clone());
-    tokio::spawn(async move { serve(b, &s).await });
+    let l = listen(&b);
+    tokio::spawn(async move { serve(b, l, &s).await });
     for _ in 0..100 {
         if UnixStream::connect(&socket).await.is_ok() {
             return socket;
@@ -82,7 +95,7 @@ async fn status_et_set_mode() {
         ControlResponse::Status {
             mode: Mode::Online,
             version: env!("CARGO_PKG_VERSION").into(),
-            local_model: String::new()
+            local_model: "qwen-test".into()
         }
     );
 }
@@ -121,7 +134,8 @@ async fn socket_orphelin_remplace() {
 async fn cerveau_deja_lance_refuse() {
     let dir = tempfile::tempdir().unwrap();
     let socket = start(dir.path()).await;
-    let err = serve(brain(dir.path()), &socket).await.unwrap_err();
+    let b = brain(dir.path());
+    let err = serve(b.clone(), listen(&b), &socket).await.unwrap_err();
     assert_eq!(err.to_string(), "Un cerveau Jarvis tourne déjà.");
 }
 
@@ -133,4 +147,40 @@ async fn permissions_du_socket() {
     let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&socket), 0o600);
     assert_eq!(mode(socket.parent().unwrap()), 0o700);
+}
+
+#[tokio::test]
+async fn server_listen_et_status_local_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start(dir.path()).await;
+    let mut c = Client::connect(&socket).await;
+    assert!(matches!(
+        c.send(ControlRequest::Wake).await,
+        ControlResponse::Status { .. }
+    ));
+    let r = c
+        .send(ControlRequest::Listen {
+            audio: encode_pcm(&[1, 2, 3]),
+            muted: false,
+        })
+        .await;
+    assert_eq!(
+        r,
+        ControlResponse::Heard {
+            text: "suivant".into(),
+            speech: "ok".into(),
+            ear_action: None
+        }
+    );
+    let r = c
+        .send(ControlRequest::Listen {
+            audio: "!!".into(),
+            muted: false,
+        })
+        .await;
+    assert!(matches!(r, ControlResponse::Error { .. }));
+    match c.send(ControlRequest::Status).await {
+        ControlResponse::Status { local_model, .. } => assert_eq!(local_model, "qwen-test"),
+        other => panic!("{other:?}"),
+    }
 }

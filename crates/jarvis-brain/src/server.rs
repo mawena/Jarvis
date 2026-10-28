@@ -1,8 +1,9 @@
 //! Serveur du socket de contrôle : une ligne JSON par requête, une par réponse.
 
 use crate::brain::Brain;
+use crate::listen::ListenService;
 use anyhow::{Context, bail};
-use jarvis_protocol::{ControlRequest, ControlResponse};
+use jarvis_protocol::{ControlRequest, ControlResponse, decode_pcm};
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -12,14 +13,18 @@ use tokio::net::{UnixListener, UnixStream};
 use tracing::{debug, info, warn};
 
 /// Écoute sur `socket` jusqu'à une erreur d'acceptation. Chaque client a sa tâche.
-pub async fn serve(brain: Arc<Brain>, socket: &Path) -> anyhow::Result<()> {
+pub async fn serve(
+    brain: Arc<Brain>,
+    listen: Arc<ListenService>,
+    socket: &Path,
+) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
     info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
     loop {
         let (stream, _) = listener.accept().await.context("acceptation d'un client")?;
-        let brain = brain.clone();
+        let (brain, listen) = (brain.clone(), listen.clone());
         tokio::spawn(async move {
-            if let Err(e) = handle_client(brain, stream).await {
+            if let Err(e) = handle_client(brain, listen, stream).await {
                 debug!("connexion terminée : {e}");
             }
         });
@@ -53,12 +58,16 @@ async fn bind(socket: &Path) -> anyhow::Result<UnixListener> {
     Ok(listener)
 }
 
-async fn handle_client(brain: Arc<Brain>, stream: UnixStream) -> std::io::Result<()> {
+async fn handle_client(
+    brain: Arc<Brain>,
+    listen: Arc<ListenService>,
+    stream: UnixStream,
+) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => respond(&brain, request).await,
+            Ok(request) => respond(&brain, &listen, request).await,
             Err(_) => ControlResponse::Error {
                 message: "requête invalide".into(),
             },
@@ -70,14 +79,25 @@ async fn handle_client(brain: Arc<Brain>, stream: UnixStream) -> std::io::Result
     Ok(())
 }
 
-async fn respond(brain: &Brain, request: ControlRequest) -> ControlResponse {
+async fn respond(
+    brain: &Brain,
+    listen: &ListenService,
+    request: ControlRequest,
+) -> ControlResponse {
     match request {
         ControlRequest::Say { text } => ControlResponse::Reply {
             speech: brain.handle_text(&text).await.speech,
         },
         ControlRequest::Status => status(brain),
-        ControlRequest::Wake | ControlRequest::Listen { .. } => ControlResponse::Error {
-            message: "écoute pas encore implémentée".into(),
+        ControlRequest::Wake => {
+            listen.wake().await;
+            status(brain)
+        }
+        ControlRequest::Listen { audio, muted } => match decode_pcm(&audio) {
+            Ok(samples) => listen.listen(&samples, muted).await,
+            Err(_) => ControlResponse::Error {
+                message: "audio invalide".into(),
+            },
         },
         ControlRequest::SetMode { mode } => match brain.set_mode(mode) {
             Ok(()) => status(brain),

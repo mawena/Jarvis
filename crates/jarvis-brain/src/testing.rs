@@ -1,5 +1,6 @@
 //! Doublures de test partagées (`FakeLlm`, `FakeSkill`).
 
+use crate::ducking::Ducker;
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::stt::Transcriber;
@@ -150,5 +151,33 @@ impl Transcriber for FakeTranscriber {
         self.text
             .clone()
             .ok_or_else(|| anyhow::anyhow!("transcription factice en échec"))
+    }
+}
+
+/// Baisse de son factice : enregistre les appels `duck` / `restore`.
+#[derive(Default)]
+pub struct FakeDucker {
+    events: Mutex<Vec<&'static str>>,
+}
+
+impl FakeDucker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Appels dans l'ordre : `"duck"` ou `"restore"`.
+    pub fn events(&self) -> Vec<&'static str> {
+        self.events.lock().unwrap().clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl Ducker for FakeDucker {
+    async fn duck(&self) {
+        self.events.lock().unwrap().push("duck");
+    }
+
+    async fn restore(&self) {
+        self.events.lock().unwrap().push("restore");
     }
 }

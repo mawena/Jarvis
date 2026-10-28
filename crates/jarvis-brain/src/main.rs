@@ -1,6 +1,8 @@
 use anyhow::Context;
 use jarvis_brain::brain::Brain;
 use jarvis_brain::config::Config;
+use jarvis_brain::ducking::WpctlDucker;
+use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
@@ -28,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         Arc::new(AppsSkill::new(
             AppIndex::load(&AppIndex::default_dirs()),
             config.apps.aliases.clone(),
-            runner,
+            runner.clone(),
         )),
     ];
     let local = Arc::new(OllamaBackend::new(&config.local, &config.address));
@@ -41,6 +43,11 @@ async fn main() -> anyhow::Result<()> {
         )
         .with_local_model(config.local.model.clone()),
     );
+    let listen = Arc::new(ListenService::new(
+        brain.clone(),
+        Arc::new(NoTranscriber),
+        Arc::new(WpctlDucker::new(runner)),
+    ));
     if brain.mode() == Mode::Local {
         let tools = brain.tools();
         tokio::spawn(async move {
@@ -54,7 +61,7 @@ async fn main() -> anyhow::Result<()> {
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
     let result = tokio::select! {
-        r = serve(brain, &socket) => r,
+        r = serve(brain, listen, &socket) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     };
