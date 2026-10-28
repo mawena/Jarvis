@@ -184,3 +184,56 @@ async fn server_listen_et_status_local_model() {
         other => panic!("{other:?}"),
     }
 }
+
+#[tokio::test]
+async fn enroll_voice_par_le_socket() {
+    use jarvis_brain::server::serve_with_speaker;
+    use jarvis_brain::speaker::SpeakerGate;
+    use jarvis_brain::testing::FakeVerifier;
+
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run/brain.sock");
+    let b = brain(dir.path());
+    let l = listen(&b);
+    let print = dir.path().join("voiceprint/charles.json");
+    let gate = Arc::new(SpeakerGate::new(
+        Arc::new(FakeVerifier::new(vec![vec![1.0, 0.0]])),
+        print.clone(),
+        0.55,
+        0.65,
+    ));
+    let s = socket.clone();
+    tokio::spawn(async move { serve_with_speaker(b, l, Some(gate), &s).await });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut c = Client::connect(&socket).await;
+    let r = c
+        .send(ControlRequest::EnrollVoice {
+            samples: vec![encode_pcm(&[0, 1, 2]), encode_pcm(&[0, 5])],
+        })
+        .await;
+    assert_eq!(
+        r,
+        ControlResponse::Reply {
+            speech: "Empreinte vocale enregistrée (2 échantillons).".into()
+        }
+    );
+    assert!(print.is_file());
+    let r = c
+        .send(ControlRequest::EnrollVoice {
+            samples: vec!["!!".into()],
+        })
+        .await;
+    assert!(matches!(r, ControlResponse::Error { .. }));
+    // Sans vérification du locuteur : erreur claire.
+    let socket2 = start(dir.path().join("b").as_path()).await;
+    let r = Client::connect(&socket2)
+        .await
+        .send(ControlRequest::EnrollVoice { samples: vec![] })
+        .await;
+    assert!(matches!(r, ControlResponse::Error { .. }));
+}

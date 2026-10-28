@@ -6,7 +6,8 @@ use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
-use jarvis_brain::server::serve;
+use jarvis_brain::server::serve_with_speaker;
+use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
 use jarvis_protocol::Mode;
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaSkill, MprisPlayers};
@@ -58,10 +59,27 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    let speaker = if config.speaker.enabled {
+        match SherpaVerifier::load(&config.speaker) {
+            Ok(v) => Some(Arc::new(SpeakerGate::new(
+                Arc::new(v),
+                SpeakerGate::default_path(),
+                config.speaker.threshold,
+                config.speaker.strict_threshold,
+            ))),
+            Err(e) => {
+                warn!(erreur = %e, "empreinte vocale désactivée");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
     let result = tokio::select! {
-        r = serve(brain, listen, &socket) => r,
+        r = serve_with_speaker(brain, listen, speaker, &socket) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     };

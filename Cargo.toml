@@ -34,6 +34,8 @@ whisper-rs = "0.16"
 ksni = { version = "0.3", default-features = false, features = ["tokio"] }
 base64 = "0.22"
 hound = "3"
+# Liaison dynamique : la liaison statique entre en conflit de symboles avec whisper-rs (ggml).
+sherpa-onnx = { version = "2.0.1", default-features = false, features = ["shared"] }
 
 wiremock = "0.6"
 tempfile = "3"

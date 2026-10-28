@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+/// En dessous de 100 ms (1 600 échantillons), il n'y a rien à transcrire.
+const MIN_SAMPLES: usize = 1_600;
+
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     threads: i32,
@@ -28,9 +31,13 @@ impl WhisperTranscriber {
             .with_context(|| format!("chargement du modèle Whisper {}", path.display()))?;
         Ok(Self {
             ctx: Arc::new(ctx),
-            threads: cfg.threads,
+            threads: cfg.threads.max(1),
         })
     }
+}
+
+fn is_too_short(audio: &[f32]) -> bool {
+    audio.len() < MIN_SAMPLES
 }
 
 fn expand_home(p: &Path) -> PathBuf {
@@ -45,6 +52,9 @@ fn expand_home(p: &Path) -> PathBuf {
 #[async_trait::async_trait]
 impl Transcriber for WhisperTranscriber {
     async fn transcribe(&self, audio: &[f32]) -> anyhow::Result<String> {
+        if is_too_short(audio) {
+            return Ok(String::new());
+        }
         let ctx = Arc::clone(&self.ctx);
         let threads = self.threads;
         let audio = audio.to_vec();
@@ -82,6 +92,13 @@ impl Transcriber for WhisperTranscriber {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    #[test]
+    fn audio_vide_ou_trop_court_ignore() {
+        assert!(is_too_short(&[]));
+        assert!(is_too_short(&vec![0.0; MIN_SAMPLES - 1]));
+        assert!(!is_too_short(&vec![0.0; MIN_SAMPLES]));
+    }
 
     #[test]
     fn modele_absent_message_clair() {

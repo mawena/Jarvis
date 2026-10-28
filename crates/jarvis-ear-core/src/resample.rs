@@ -40,7 +40,11 @@ pub struct Downmixer {
 }
 
 impl Downmixer {
+    /// # Panics
+    /// Si la fréquence ou le nombre de canaux vaut 0 (le calcul du pas bouclerait sans fin).
     pub fn new(input_rate: u32, channels: u16) -> Self {
+        assert!(input_rate > 0, "fréquence d'entrée nulle");
+        assert!(channels > 0, "nombre de canaux nul");
         let mode = if input_rate == 3 * SAMPLE_RATE {
             Mode::Decimate3 {
                 kernel: lowpass_kernel(7_000.0 / input_rate as f32),
@@ -57,7 +61,7 @@ impl Downmixer {
             Mode::Linear { .. } => Vec::new(),
         };
         Self {
-            channels: channels.max(1) as usize,
+            channels: channels as usize,
             mode,
             buf,
             partial: Vec::new(),
@@ -75,7 +79,7 @@ impl Downmixer {
         }
         self.partial.drain(..whole);
 
-        let mut out = Vec::new();
+        let mut out = Vec::with_capacity(self.buf.len() / 3 + 1);
         match &mut self.mode {
             Mode::Decimate3 { kernel } => {
                 // Choix : FIR à fenêtre de Hamming (47 coefficients, coupure ~7 kHz à 48 kHz)
@@ -184,6 +188,41 @@ mod tests {
         let out = d.push(&vec![0.25; 44_100]);
         assert!((out.len() as i64 - 16_000).abs() <= 2);
         assert!(out.iter().all(|v| (v - 0.25).abs() < 1e-5));
+    }
+
+    #[test]
+    #[should_panic(expected = "fréquence")]
+    fn frequence_nulle_refusee() {
+        let _ = Downmixer::new(0, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "canaux")]
+    fn zero_canal_refuse() {
+        let _ = Downmixer::new(48_000, 0);
+    }
+
+    #[test]
+    fn downmix_lineaire_independant_du_decoupage() {
+        let input: Vec<f32> = (0..44_100)
+            .map(|i| (2.0 * std::f32::consts::PI * 300.0 * i as f32 / 44_100.0).sin() * 0.5)
+            .collect();
+        let whole = Downmixer::new(44_100, 1).push(&input);
+        let mut d = Downmixer::new(44_100, 1);
+        let mut chunked = Vec::new();
+        let mut rest = &input[..];
+        for size in [1usize, 7, 333, 1001, 5].iter().cycle() {
+            if rest.is_empty() {
+                break;
+            }
+            let n = (*size).min(rest.len());
+            chunked.extend(d.push(&rest[..n]));
+            rest = &rest[n..];
+        }
+        assert_eq!(whole.len(), chunked.len());
+        for (a, b) in whole.iter().zip(&chunked) {
+            assert!((a - b).abs() < 1e-4);
+        }
     }
 
     #[test]

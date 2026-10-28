@@ -2,6 +2,7 @@
 
 use crate::brain::Brain;
 use crate::listen::ListenService;
+use crate::speaker::SpeakerGate;
 use anyhow::{Context, bail};
 use jarvis_protocol::{ControlRequest, ControlResponse, decode_pcm};
 use std::io::ErrorKind;
@@ -18,13 +19,23 @@ pub async fn serve(
     listen: Arc<ListenService>,
     socket: &Path,
 ) -> anyhow::Result<()> {
+    serve_with_speaker(brain, listen, None, socket).await
+}
+
+/// Comme [`serve`], avec la vérification du locuteur (`EnrollVoice`).
+pub async fn serve_with_speaker(
+    brain: Arc<Brain>,
+    listen: Arc<ListenService>,
+    speaker: Option<Arc<SpeakerGate>>,
+    socket: &Path,
+) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
     info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
     loop {
         let (stream, _) = listener.accept().await.context("acceptation d'un client")?;
-        let (brain, listen) = (brain.clone(), listen.clone());
+        let (brain, listen, speaker) = (brain.clone(), listen.clone(), speaker.clone());
         tokio::spawn(async move {
-            if let Err(e) = handle_client(brain, listen, stream).await {
+            if let Err(e) = handle_client(brain, listen, speaker, stream).await {
                 debug!("connexion terminée : {e}");
             }
         });
@@ -61,13 +72,14 @@ async fn bind(socket: &Path) -> anyhow::Result<UnixListener> {
 async fn handle_client(
     brain: Arc<Brain>,
     listen: Arc<ListenService>,
+    speaker: Option<Arc<SpeakerGate>>,
     stream: UnixStream,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => respond(&brain, &listen, request).await,
+            Ok(request) => respond(&brain, &listen, speaker.as_ref(), request).await,
             Err(_) => ControlResponse::Error {
                 message: "requête invalide".into(),
             },
@@ -82,6 +94,7 @@ async fn handle_client(
 async fn respond(
     brain: &Brain,
     listen: &ListenService,
+    speaker: Option<&Arc<SpeakerGate>>,
     request: ControlRequest,
 ) -> ControlResponse {
     match request {
@@ -99,6 +112,7 @@ async fn respond(
                 message: "audio invalide".into(),
             },
         },
+        ControlRequest::EnrollVoice { samples } => enroll_voice(speaker, samples).await,
         ControlRequest::SetMode { mode } => match brain.set_mode(mode) {
             Ok(()) => status(brain),
             Err(e) => ControlResponse::Error {
@@ -113,5 +127,41 @@ fn status(brain: &Brain) -> ControlResponse {
         mode: brain.mode(),
         version: env!("CARGO_PKG_VERSION").into(),
         local_model: brain.local_model().into(),
+    }
+}
+
+async fn enroll_voice(speaker: Option<&Arc<SpeakerGate>>, samples: Vec<String>) -> ControlResponse {
+    let error = |message: &str| ControlResponse::Error {
+        message: message.into(),
+    };
+    let Some(gate) = speaker else {
+        return error("L'empreinte vocale n'est pas activée.");
+    };
+    let mut audio = Vec::with_capacity(samples.len());
+    for s in &samples {
+        match decode_pcm(s) {
+            Ok(pcm) => audio.push(
+                pcm.iter()
+                    .map(|&v| f32::from(v) / 32768.0)
+                    .collect::<Vec<f32>>(),
+            ),
+            Err(_) => return error("audio invalide"),
+        }
+    }
+    let gate = gate.clone();
+    match tokio::task::spawn_blocking(move || gate.enroll(&audio)).await {
+        Ok(Ok(n)) => {
+            info!(echantillons = n, "empreinte vocale enregistrée");
+            ControlResponse::Reply {
+                speech: format!("Empreinte vocale enregistrée ({n} échantillons)."),
+            }
+        }
+        Ok(Err(e)) => {
+            warn!(erreur = %e, "enrôlement vocal impossible");
+            ControlResponse::Error {
+                message: format!("Impossible d'enregistrer l'empreinte vocale : {e}."),
+            }
+        }
+        Err(_) => error("Enrôlement interrompu."),
     }
 }
