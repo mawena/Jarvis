@@ -40,15 +40,15 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 2.1 Rédiger le plan de la phase 2 ([plan](docs/superpowers/plans/2026-10-28-phase-2-oreille-pc.md))
 - [x] 2.2 Installer les prérequis système : `sudo apt install libasound2-dev libclang-dev` (Charles)
 - [x] 2.3 Socle : protocole d'écoute (`Wake`, `Listen`, `Heard`), crates `jarvis-ear-core` et `jarvis-ear` (tâche 1)
-- [ ] 2.4 Capture du micro en 16 kHz mono (`cpal`)
+- [x] 2.4 Capture du micro en 16 kHz mono (`cpal`)
 - [x] 2.5 Mot d'éveil « Jarvis » (`rustpotter`) et outil d'enregistrement des échantillons de voix
 - [x] 2.6 Détection de fin de parole (VAD) et délai maximum de 10 s
 - [ ] 2.7 Reconnaissance vocale Whisper (`whisper-rs`), choix `base` / `small` après mesure
 - [x] 2.8 Baisse automatique de la musique après « Jarvis »
 - [ ] 2.9 Brancher la chaîne vocale sur `Brain::handle_text`
-- [ ] 2.10 Commandes « coupe / réactive l'écoute » et coupure totale du micro pour l'oreille du PC (déplacées ici depuis la phase 9)
-- [ ] 2.11 Icône dans la zone de notification GNOME : statut (écoute, micro coupé, cerveau injoignable, mode, modèle)
-- [ ] 2.12 Menu de l'icône : couper / réactiver l'écoute, coupure totale, mode local / en ligne, statut détaillé, quitter
+- [x] 2.10 Commandes « coupe / réactive l'écoute » et coupure totale du micro pour l'oreille du PC (déplacées ici depuis la phase 9)
+- [x] 2.11 Icône dans la zone de notification GNOME : statut (écoute, micro coupé, cerveau injoignable, mode, modèle)
+- [x] 2.12 Menu de l'icône : couper / réactiver l'écoute, coupure totale, mode local / en ligne, statut détaillé, quitter
 - [ ] 2.13 Empreinte vocale : enregistrer la voix de Charles dans `jarvis-ear enroll` (quelques « Jarvis » + quelques phrases), ne garder que l'empreinte (aucun son)
 - [ ] 2.14 Vérification du locuteur par le cerveau : une phrase dont la voix n'est pas celle de Charles est ignorée sans rien exécuter
 - [ ] 2.15 Mesurer le taux de fausses détections sur une journée
