@@ -116,6 +116,16 @@ impl Brain {
         }
     }
 
+    /// Raccourcis seuls, sans jamais consulter l'IA. `None` : aucun raccourci reconnu.
+    pub async fn handle_fast(&self, text: &str) -> Option<Reply> {
+        let intent = match_fast(text)?;
+        info!(phrase = %text, "phrase reçue (raccourci seul)");
+        Some(match self.run_intent(intent).await {
+            Outcome::Reply(r) => r,
+            Outcome::NotFound(m) => Reply::new(m),
+        })
+    }
+
     async fn run_intent(&self, intent: Intent) -> Outcome {
         let system: Arc<dyn Skill> = self.system.clone();
         let skill = self
@@ -219,6 +229,27 @@ mod tests {
         let r = s.brain.handle_text("suivant").await;
         assert_eq!(r.speech, "ok");
         assert_eq!(s.skill.calls()[0].0, "media_next");
+        assert_eq!(s.local.calls() + s.online.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn raccourci_seul_n_appelle_jamais_l_ia() {
+        let s = setup(answer("x"), answer("y"));
+        assert_eq!(s.brain.handle_fast("suivant").await.unwrap().speech, "ok");
+        assert!(s.brain.handle_fast("quel temps fait-il").await.is_none());
+        // Cible introuvable : le message est dit, sans repli sur l'IA.
+        let skill = FakeSkill::new(&["media_next"])
+            .with_result(Err(SkillError::NotFound("Aucun lecteur.".into())));
+        let brain = Brain::new(
+            vec![Arc::new(skill)],
+            s.local.clone(),
+            s.online.clone(),
+            Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
+        );
+        assert_eq!(
+            brain.handle_fast("suivant").await.unwrap().speech,
+            "Aucun lecteur."
+        );
         assert_eq!(s.local.calls() + s.online.calls(), 0);
     }
 

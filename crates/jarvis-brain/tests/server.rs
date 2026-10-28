@@ -118,6 +118,34 @@ async fn ligne_invalide_n_interrompt_pas() {
 }
 
 #[tokio::test]
+async fn requete_trop_grande_refusee_et_connexion_fermee() {
+    use jarvis_brain::server::MAX_REQUEST_BYTES;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start(dir.path()).await;
+    let mut c = Client::connect(&socket).await;
+    let big = vec![b'a'; MAX_REQUEST_BYTES + 1];
+    c.0.get_mut().write_all(&big).await.unwrap();
+    let mut answer = String::new();
+    c.0.read_line(&mut answer).await.unwrap();
+    assert_eq!(
+        serde_json::from_str::<ControlResponse>(&answer).unwrap(),
+        ControlResponse::Error {
+            message: "requête trop grande".into()
+        }
+    );
+    answer.clear();
+    assert_eq!(c.0.read_line(&mut answer).await.unwrap(), 0);
+    // Le serveur continue d'accepter d'autres clients.
+    assert!(matches!(
+        Client::connect(&socket)
+            .await
+            .send(ControlRequest::Status)
+            .await,
+        ControlResponse::Status { .. }
+    ));
+}
+
+#[tokio::test]
 async fn socket_orphelin_remplace() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("run")).unwrap();
@@ -200,7 +228,9 @@ async fn enroll_voice_modele_introuvable() {
     let b = brain(dir.path());
     let l = listen(&b);
     let s = socket.clone();
-    tokio::spawn(async move { serve_with_state(b, l, SpeakerState::Unavailable, &s).await });
+    tokio::spawn(async move {
+        serve_with_state(b, l, SpeakerState::Unavailable { enrolled: true }, &s).await
+    });
     for _ in 0..100 {
         if UnixStream::connect(&socket).await.is_ok() {
             break;

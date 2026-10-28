@@ -2,12 +2,15 @@
 
 use crate::brain::Brain;
 use crate::ducking::Ducker;
-use crate::fastpath::match_ear_command;
-use crate::speaker::{SpeakerGate, Verdict};
+use crate::fastpath::{match_ear_command, match_fast};
+use crate::speaker::{SpeakerGate, SpeakerState, Verdict};
 use crate::stt::Transcriber;
 use jarvis_protocol::{ControlResponse, EarAction};
 use std::sync::Arc;
 use tracing::{info, warn};
+
+/// Dit quand une empreinte existe mais que le modèle de vérification manque.
+pub const VERIFICATION_UNAVAILABLE: &str = "La vérification de votre voix est indisponible.";
 
 /// La reconnaissance vocale n'est pas disponible : le message est dit tel quel.
 #[derive(Debug, thiserror::Error)]
@@ -28,7 +31,7 @@ pub struct ListenService {
     brain: Arc<Brain>,
     stt: Arc<dyn Transcriber>,
     ducker: Arc<dyn Ducker>,
-    speaker: Option<Arc<SpeakerGate>>,
+    speaker: SpeakerState,
 }
 
 fn heard(text: &str, speech: &str, ear_action: Option<EarAction>) -> ControlResponse {
@@ -45,12 +48,17 @@ impl ListenService {
             brain,
             stt,
             ducker,
-            speaker: None,
+            speaker: SpeakerState::Disabled,
         }
     }
 
     /// Active la vérification du locuteur avant toute transcription.
-    pub fn with_speaker(mut self, speaker: Option<Arc<SpeakerGate>>) -> Self {
+    pub fn with_speaker(self, speaker: Option<Arc<SpeakerGate>>) -> Self {
+        self.with_speaker_state(speaker.map_or(SpeakerState::Disabled, SpeakerState::Ready))
+    }
+
+    /// Comme [`Self::with_speaker`], en tenant compte d'un modèle indisponible.
+    pub fn with_speaker_state(mut self, speaker: SpeakerState) -> Self {
         self.speaker = speaker;
         self
     }
@@ -67,16 +75,24 @@ impl ListenService {
             return heard("", "", None);
         }
         let samples: Vec<f32> = audio.iter().map(|&s| f32::from(s) / 32768.0).collect();
-        if let Some(gate) = &self.speaker {
+        if let SpeakerState::Unavailable { enrolled: true } = self.speaker {
+            warn!("vérification du locuteur indisponible (modèle absent) : phrase refusée");
+            let speech = if muted { "" } else { VERIFICATION_UNAVAILABLE };
+            return heard("", speech, None);
+        }
+        // `Unavailable { enrolled: false }` : jamais enrôlé, tout est accepté (voir
+        // `SpeakerState::unavailable`).
+        // Phrase courte acceptée par la session, sans vraie vérification : raccourcis seuls.
+        let mut unverified = false;
+        if let SpeakerState::Ready(gate) = &self.speaker {
             let (g, audio) = (gate.clone(), samples.clone());
             // L'empreinte prend des dizaines de ms : hors du runtime.
             let verdict = tokio::task::spawn_blocking(move || g.check(&audio))
                 .await
                 .unwrap_or(Verdict::NoMatch(0.0));
             match verdict {
-                // `Match(1.0)` est la valeur sentinelle d'une phrase courte acceptée par la
-                // session : ce n'est pas un vrai score, on ne le journalise pas.
                 Verdict::Match(_) | Verdict::NotEnrolled => {}
+                Verdict::SessionShort => unverified = true,
                 Verdict::NoMatch(score) => {
                     info!("voix non reconnue (score {score:.2})");
                     return heard("", "", None);
@@ -112,10 +128,22 @@ impl ListenService {
                 _ => heard("", "", None),
             };
         }
+        if unverified && action.is_none() && match_fast(&text).is_none() {
+            // Jamais l'IA pour une voix non vérifiée : ignorée comme une voix inconnue.
+            info!("phrase courte non vérifiée, ignorée");
+            return heard("", "", None);
+        }
         info!(phrase = %text, "texte entendu");
         match action {
             Some(EarAction::Mute) => heard(&text, "Écoute coupée.", Some(EarAction::Mute)),
             Some(EarAction::Unmute) => heard(&text, "L'écoute est déjà active.", None),
+            None if unverified => {
+                let speech = match self.brain.handle_fast(&text).await {
+                    Some(r) => r.speech,
+                    None => String::new(),
+                };
+                heard(&text, &speech, None)
+            }
             None => {
                 let speech = self.brain.handle_text(&text).await.speech;
                 heard(&text, &speech, None)
@@ -137,17 +165,26 @@ mod tests {
         skill: Arc<FakeSkill>,
         ducker: Arc<FakeDucker>,
         stt: Arc<FakeTranscriber>,
+        /// IA locale et en ligne (la même doublure).
+        llm: Arc<FakeLlm>,
         _dir: tempfile::TempDir,
     }
 
-    fn brain(dir: &tempfile::TempDir, skill: Arc<FakeSkill>) -> Arc<Brain> {
-        let llm = || Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))));
+    fn llm() -> Arc<FakeLlm> {
+        Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))))
+    }
+
+    fn brain_with(dir: &tempfile::TempDir, skill: Arc<FakeSkill>, llm: Arc<FakeLlm>) -> Arc<Brain> {
         Arc::new(Brain::new(
             vec![skill],
-            llm(),
-            llm(),
+            llm.clone(),
+            llm,
             Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
         ))
+    }
+
+    fn brain(dir: &tempfile::TempDir, skill: Arc<FakeSkill>) -> Arc<Brain> {
+        brain_with(dir, skill, llm())
     }
 
     fn setup(stt: FakeTranscriber) -> Setup {
@@ -155,11 +192,17 @@ mod tests {
         let skill = Arc::new(FakeSkill::new(&["media_next"]));
         let ducker = Arc::new(FakeDucker::new());
         let stt = Arc::new(stt);
+        let llm = llm();
         Setup {
-            service: ListenService::new(brain(&dir, skill.clone()), stt.clone(), ducker.clone()),
+            service: ListenService::new(
+                brain_with(&dir, skill.clone(), llm.clone()),
+                stt.clone(),
+                ducker.clone(),
+            ),
             skill,
             ducker,
             stt,
+            llm,
             _dir: dir,
         }
     }
@@ -186,7 +229,11 @@ mod tests {
     }
 
     fn with_gate(enrolled: bool) -> Setup {
-        let mut s = setup(FakeTranscriber::new("suivant"));
+        with_gate_text(enrolled, "suivant")
+    }
+
+    fn with_gate_text(enrolled: bool, text: &str) -> Setup {
+        let mut s = setup(FakeTranscriber::new(text));
         let path = s._dir.path().join("voiceprint/charles.json");
         let gate = SpeakerGate::new(Arc::new(ByFirstSample), path, 0.55, 0.65);
         if enrolled {
@@ -217,9 +264,78 @@ mod tests {
         assert_eq!(s.stt.calls(), 1);
     }
 
+    /// Phrase de moins d'une seconde, voix inconnue : acceptée seulement par la session.
+    fn short_voice() -> Vec<i16> {
+        let mut a = vec![0i16; 8_000];
+        a[0] = 20_000;
+        a
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_suivant_executee() {
+        let s = with_gate(true);
+        s.service.listen(&voice(0), false).await;
+        assert_eq!(s.skill.calls().len(), 1);
+        let r = s.service.listen(&short_voice(), false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.skill.calls().len(), 2);
+        assert_eq!(s.llm.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_question_libre_ignoree() {
+        let s = with_gate_text(true, "quel temps fait-il");
+        s.service.listen(&voice(0), false).await;
+        assert_eq!(s.llm.calls(), 1);
+        let r = s.service.listen(&short_voice(), false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.llm.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_coupe_l_ecoute() {
+        let s = with_gate_text(true, "Jarvis, coupe l'écoute.");
+        s.service.listen(&voice(0), false).await;
+        let r = s.service.listen(&short_voice(), false).await;
+        assert_eq!(
+            r,
+            heard(
+                "Jarvis, coupe l'écoute.",
+                "Écoute coupée.",
+                Some(EarAction::Mute)
+            )
+        );
+    }
+
     #[tokio::test]
     async fn sans_empreinte_executee() {
         let s = with_gate(false);
+        let r = s.service.listen(&voice(20_000), false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+    }
+
+    #[tokio::test]
+    async fn modele_indisponible_avec_empreinte_refuse() {
+        let mut s = setup(FakeTranscriber::new("suivant"));
+        s.service = s
+            .service
+            .with_speaker_state(SpeakerState::Unavailable { enrolled: true });
+        let r = s.service.listen(&voice(0), false).await;
+        assert_eq!(r, heard("", VERIFICATION_UNAVAILABLE, None));
+        assert_eq!(s.stt.calls(), 0);
+        assert!(s.skill.calls().is_empty());
+        // Écoute coupée : refusée sans rien dire.
+        let r = s.service.listen(&voice(0), true).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.stt.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn modele_indisponible_sans_empreinte_executee() {
+        let mut s = setup(FakeTranscriber::new("suivant"));
+        s.service = s
+            .service
+            .with_speaker_state(SpeakerState::Unavailable { enrolled: false });
         let r = s.service.listen(&voice(20_000), false).await;
         assert_eq!(r, heard("suivant", "ok", None));
     }
