@@ -1,0 +1,31 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+jarvis-protocol = { path = "crates/jarvis-protocol" }
+jarvis-skills = { path = "crates/jarvis-skills" }
+jarvis-brain = { path = "crates/jarvis-brain" }
+
+tokio = { version = "1.54", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+clap = { version = "4.6", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+zbus = { version = "6.1", default-features = false, features = ["tokio", "proxy"] }
+freedesktop-desktop-entry = "0.8"
+fuzzy-matcher = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+directories = "6"
+
+wiremock = "0.6"
+tempfile = "3"
