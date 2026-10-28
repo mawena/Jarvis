@@ -52,10 +52,18 @@ fn heard(text: &str, speech: &str, ear_action: Option<EarAction>) -> ControlResp
 }
 
 /// Réponse du cerveau : bip selon l'issue, écoute de la réponse si une question est posée.
-fn answered(text: &str, answer: Answer) -> ControlResponse {
+/// `sound_only_for_success` : une réussite d'un raccourci n'est dite que par le bip
+/// (une phrase vide n'est pas synthétisée).
+fn answered(text: &str, answer: Answer, sound_only_for_success: bool) -> ControlResponse {
+    let beep_only =
+        sound_only_for_success && answer.fast_path && answer.reply.outcome == Outcome::Done;
     ControlResponse::Heard {
         text: text.into(),
-        speech: answer.reply.speech,
+        speech: if beep_only {
+            String::new()
+        } else {
+            answer.reply.speech
+        },
         ear_action: answer.awaits_reply.then_some(EarAction::AwaitReply),
         audio: None,
         sound: match answer.reply.outcome {
@@ -100,6 +108,10 @@ impl ListenService {
     pub fn with_speaker_state(mut self, speaker: SpeakerState) -> Self {
         self.speaker = speaker;
         self
+    }
+
+    fn answered(&self, text: &str, answer: Answer) -> ControlResponse {
+        answered(text, answer, self.brain.persona().sound_only_for_success)
     }
 
     /// « Jarvis » entendu : baisse le son.
@@ -191,7 +203,8 @@ impl ListenService {
             // acceptée ici : la question vient d'une voix reconnue juste avant.
             info!(phrase = %text, "réponse entendue");
             let spoken_at = arrived.checked_sub(duration(audio)).unwrap_or(arrived);
-            return answered(&text, self.brain.answer_follow_up(&text, spoken_at).await);
+            let answer = self.brain.answer_follow_up(&text, spoken_at).await;
+            return self.answered(&text, answer);
         }
         if unverified && action.is_none() && !is_shortcut(&text) {
             // Jamais l'IA pour une voix non vérifiée : ignorée comme une voix inconnue.
@@ -205,13 +218,14 @@ impl ListenService {
             // `AwaitReply` ne vient jamais d'une commande d'écoute.
             Some(EarAction::AwaitReply) | None if unverified => {
                 match self.brain.answer_fast(&text).await {
-                    Some(a) => answered(&text, a),
+                    Some(a) => self.answered(&text, a),
                     // Action risquée : jamais pour une voix non vérifiée.
                     None => heard("", "", None),
                 }
             }
             Some(EarAction::AwaitReply) | None => {
-                answered(&text, self.brain.answer_text(&text).await)
+                let answer = self.brain.answer_text(&text).await;
+                self.answered(&text, answer)
             }
         }
     }
@@ -222,6 +236,7 @@ mod tests {
     use super::*;
     use crate::llm::Understanding;
     use crate::mode_store::ModeStore;
+    use crate::persona::Persona;
     use crate::testing::{FakeDucker, FakeLlm, FakeSkill, FakeTranscriber};
     use jarvis_protocol::Mode;
 
@@ -523,17 +538,24 @@ mod tests {
 
     /// Compétence d'alimentation, empreinte de Charles enregistrée.
     fn confirm(lines: &[&str]) -> Confirm {
+        confirm_with(lines, Persona::default())
+    }
+
+    fn confirm_with(lines: &[&str], persona: Persona) -> Confirm {
         let dir = tempfile::tempdir().unwrap();
         let runner = Arc::new(FakeRunner::new());
-        let brain = Arc::new(Brain::new(
-            vec![
-                Arc::new(PowerSkill::new(runner.clone())),
-                Arc::new(FakeSkill::new(&["media_next"])),
-            ],
-            llm(),
-            llm(),
-            Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
-        ));
+        let brain = Arc::new(
+            Brain::new(
+                vec![
+                    Arc::new(PowerSkill::new(runner.clone())),
+                    Arc::new(FakeSkill::new(&["media_next"])),
+                ],
+                llm(),
+                llm(),
+                Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+            )
+            .with_persona(persona),
+        );
         let script = Script(std::sync::Mutex::new(
             lines.iter().map(|l| l.to_string()).collect(),
         ));
@@ -701,19 +723,125 @@ mod tests {
         );
     }
 
+    // --- Bip seul pour une réussite (`sound_only_for_success`) ---
+
+    /// `text` entendu ; l'IA comprend `media_next` ; option `sound_only_for_success`.
+    fn bip_seul(
+        result: Result<Reply, SkillError>,
+        text: &str,
+        sound_only: bool,
+    ) -> (ListenService, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = Arc::new(FakeSkill::new(&["media_next"]).with_result(result));
+        let llm = Arc::new(FakeLlm::new(Ok(crate::testing::tool_understanding(
+            "media_next",
+        ))));
+        let persona = Persona {
+            sound_only_for_success: sound_only,
+            ..Persona::default()
+        };
+        let brain = Arc::new(
+            Brain::new(
+                vec![skill],
+                llm.clone(),
+                llm,
+                Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+            )
+            .with_persona(persona),
+        );
+        let svc = ListenService::new(
+            brain,
+            Arc::new(FakeTranscriber::new(text)),
+            Arc::new(FakeDucker::new()),
+        );
+        (svc, dir)
+    }
+
+    fn heard_with(text: &str, speech: &str, sound: Option<Sound>) -> ControlResponse {
+        ControlResponse::Heard {
+            text: text.into(),
+            speech: speech.into(),
+            ear_action: None,
+            audio: None,
+            sound,
+        }
+    }
+
     #[tokio::test]
-    async fn reussite_donne_le_bip_de_reussite() {
-        let (svc, _dir) = with_result(Ok(Reply::done("")));
-        let r = svc.listen(AUDIO, false, false).await;
+    async fn succes_par_bip_si_option() {
+        for result in [Reply::done(""), Reply::done("Je lance Spotify.")] {
+            let (svc, _dir) = bip_seul(Ok(result), "suivant", true);
+            assert_eq!(
+                svc.listen(AUDIO, false, false).await,
+                heard_with("suivant", "", Some(Sound::Success))
+            );
+        }
+        // Par l'IA, ce n'est pas un raccourci : la phrase est dite.
+        let (svc, _dir) = bip_seul(Ok(Reply::done("")), "la suite, je te prie", true);
         assert_eq!(
-            r,
-            ControlResponse::Heard {
-                text: "suivant".into(),
-                speech: String::new(),
-                ear_action: None,
-                audio: None,
-                sound: Some(Sound::Success),
-            }
+            svc.listen(AUDIO, false, false).await,
+            heard_with("la suite, je te prie", "Bien.", Some(Sound::Success))
+        );
+    }
+
+    #[tokio::test]
+    async fn option_desactivee_phrase_dite() {
+        // Réussite sans phrase de la compétence : le cerveau dit « Bien. ».
+        let (svc, _dir) = bip_seul(Ok(Reply::done("")), "suivant", false);
+        assert_eq!(
+            svc.listen(AUDIO, false, false).await,
+            heard_with("suivant", "Bien.", Some(Sound::Success))
+        );
+        let (svc, _dir) = bip_seul(Ok(Reply::done("Je lance Spotify.")), "suivant", false);
+        assert_eq!(
+            svc.listen(AUDIO, false, false).await,
+            heard_with("suivant", "Je lance Spotify.", Some(Sound::Success))
+        );
+    }
+
+    #[tokio::test]
+    async fn echec_toujours_dit() {
+        let (svc, _dir) = bip_seul(Err(SkillError::Failed("boum".into())), "suivant", true);
+        assert_eq!(
+            svc.listen(AUDIO, false, false).await,
+            heard_with(
+                "suivant",
+                "Désolé, cela n'a pas fonctionné, Monsieur.",
+                Some(Sound::Failure)
+            )
+        );
+        let (svc, _dir) = bip_seul(
+            Ok(Reply::failed("Aucun lecteur n'est ouvert.")),
+            "suivant",
+            true,
+        );
+        assert_eq!(
+            svc.listen(AUDIO, false, false).await,
+            heard_with(
+                "suivant",
+                "Aucun lecteur n'est ouvert.",
+                Some(Sound::Failure)
+            )
+        );
+        // Une information (pas une réussite) reste dite.
+        let (svc, _dir) = bip_seul(Ok(Reply::new("C'est Hello.")), "suivant", true);
+        assert_eq!(
+            svc.listen(AUDIO, false, false).await,
+            heard_with("suivant", "C'est Hello.", None)
+        );
+    }
+
+    #[tokio::test]
+    async fn action_confirmee_toujours_dite() {
+        let persona = Persona {
+            sound_only_for_success: true,
+            ..Persona::default()
+        };
+        let c = confirm_with(&["mets le PC en veille", "oui"], persona);
+        c.service.listen(&voice(0), false, false).await;
+        assert_eq!(
+            c.service.listen(&voice(0), false, true).await,
+            heard_with("oui", "Je mets le PC en veille.", Some(Sound::Success))
         );
     }
 }

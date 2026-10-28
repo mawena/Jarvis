@@ -47,7 +47,7 @@ async fn main() -> anyhow::Result<()> {
             modes,
         )
         .with_local_model(config.local.model.clone())
-        .with_persona(Persona::new(config.address.clone())),
+        .with_persona(Persona::from(&config)),
     );
     if brain.mode() == Mode::Local {
         let tools = brain.tools();

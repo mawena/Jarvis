@@ -5,17 +5,28 @@
 //! d'adresse, et seulement à quelques phrases choisies (questions de confirmation,
 //! échecs, refus), jamais plus d'une fois par phrase.
 
+use crate::config::Config;
+
 /// Ton de Jarvis, tiré de la configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Persona {
     /// Nom par lequel Jarvis s'adresse à l'utilisateur (« Monsieur »). Vide : jamais nommé.
     pub address: String,
+    /// Une réussite d'un raccourci est confirmée par le seul bip, sans phrase.
+    pub sound_only_for_success: bool,
 }
 
 impl Default for Persona {
     fn default() -> Self {
+        Self::new("Monsieur")
+    }
+}
+
+impl From<&Config> for Persona {
+    fn from(c: &Config) -> Self {
         Self {
-            address: "Monsieur".to_string(),
+            address: c.address.clone(),
+            sound_only_for_success: c.sound_only_for_success,
         }
     }
 }
@@ -24,6 +35,7 @@ impl Persona {
     pub fn new(address: impl Into<String>) -> Self {
         Self {
             address: address.into(),
+            sound_only_for_success: false,
         }
     }
 

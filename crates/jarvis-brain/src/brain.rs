@@ -8,7 +8,7 @@ use crate::mode_store::ModeStore;
 use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
 use jarvis_protocol::Mode;
-use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
+use jarvis_skills::{Outcome, Reply, Risk, Skill, SkillError, ToolSpec};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -29,11 +29,13 @@ impl Clock for SystemClock {
 }
 
 /// Réponse du cerveau. `awaits_reply` : une question est posée, l'oreille doit
-/// écouter la réponse (oui / non) sans mot d'éveil.
+/// écouter la réponse (oui / non) sans mot d'éveil. `fast_path` : la réponse vient
+/// d'un raccourci (sans IA ni confirmation).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
     pub reply: Reply,
     pub awaits_reply: bool,
+    pub fast_path: bool,
 }
 
 impl From<Reply> for Answer {
@@ -41,6 +43,7 @@ impl From<Reply> for Answer {
         Answer {
             reply,
             awaits_reply: false,
+            fast_path: false,
         }
     }
 }
@@ -184,7 +187,12 @@ impl Brain {
         if let Some(intent) = match_fast(text) {
             debug!(route = "fast", tool = %intent.tool);
             match self.run_or_ask(intent).await {
-                Step::Answer(a) => return a,
+                Step::Answer(a) => {
+                    return Answer {
+                        fast_path: true,
+                        ..a
+                    };
+                }
                 Step::NotFound(m) => {
                     debug!(message = %m, "raccourci sans résultat, repli sur l'IA");
                 }
@@ -240,9 +248,13 @@ impl Brain {
                     return None;
                 }
                 info!(phrase = %text, "phrase reçue (raccourci seul)");
-                match self.run_or_ask(intent).await {
+                let answer = match self.run_or_ask(intent).await {
                     Step::Answer(a) => a,
                     Step::NotFound(m) => Reply::failed(m).into(),
+                };
+                Answer {
+                    fast_path: true,
+                    ..answer
                 }
             }
         };
@@ -307,6 +319,7 @@ impl Brain {
                     return Answer {
                         reply: Reply::new(p.question.clone()),
                         awaits_reply: true,
+                        fast_path: false,
                     };
                 }
                 Some(_) => *pending = None,
@@ -358,6 +371,7 @@ impl Brain {
             return Step::Answer(Answer {
                 reply: Reply::new(question),
                 awaits_reply: true,
+                fast_path: false,
             });
         }
         self.execute(skill.as_ref(), intent).await
@@ -374,6 +388,10 @@ impl Brain {
             }
         };
         let reply = match result {
+            // Réussite sans phrase de la compétence (médias, volume) : accusé bref.
+            Ok(reply) if reply.outcome == Outcome::Done && reply.speech.trim().is_empty() => {
+                Reply::done(DONE)
+            }
             Ok(reply) => reply,
             Err(SkillError::NotFound(m)) => return Step::NotFound(m),
             Err(SkillError::UnknownTool(_) | SkillError::BadArgs(_)) => {
@@ -395,6 +413,8 @@ const SKILL_TIMEOUT: Duration = Duration::from_secs(5);
 pub const REPLY_WINDOW: Duration = Duration::from_secs(8 + 4);
 // Phrases fixes, brèves et polies. Celles marquées « adressée » reçoivent le nom
 // d'adresse (`Persona::addressed`) ; les autres non, par parcimonie.
+/// Accusé d'une réussite sans phrase propre.
+const DONE: &str = "Bien.";
 /// Adressée.
 const UNKNOWN: &str = "Je crains de ne pas savoir faire cela.";
 const BAD_RESPONSE: &str = "Pardon, la réponse de l'IA est incompréhensible.";
@@ -689,8 +709,8 @@ mod tests {
     // --- Confirmations, « annule », « répète » ---
 
     use crate::testing::ManualClock;
+    use jarvis_skills::FakeRunner;
     use jarvis_skills::power::PowerSkill;
-    use jarvis_skills::{FakeRunner, Outcome};
 
     struct Power {
         brain: Brain,

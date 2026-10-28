@@ -40,7 +40,8 @@ const DEFAULT_ENV: &str =
 
 const DEFAULT_CONFIG: &str = r#"# Configuration de Jarvis (valeurs par défaut commentées).
 # mode = "local"          # "local" ou "online"
-# address = "Monsieur"
+# address = "Monsieur"     # nom par lequel Jarvis s'adresse à vous ("" : jamais nommé)
+# sound_only_for_success = false   # vrai : une commande rapide réussie n'est confirmée que par un bip
 
 # [local]
 # url = "http://127.0.0.1:11434"
