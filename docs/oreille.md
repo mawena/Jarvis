@@ -118,9 +118,24 @@ Seule ta voix compte.
 Toute autre phrase, le silence ou une autre voix : rien n'est fait. Après un « oui », Jarvis
 dit sa phrase, et la commande part 4 s plus tard, une fois la phrase dite.
 
+Un « oui » dure souvent moins d'une seconde, trop peu pour la vérification habituelle : sa voix
+est alors comparée à ton empreinte avec le seuil strict (il faut au moins 0,3 s de son). Si
+elle n'est pas reconnue, Jarvis ne fait rien et redemande une fois : « Je n'ai pas bien reconnu
+votre voix. Dites « oui, vas-y » pour confirmer, Monsieur. » ; un second échec annule. Une
+voix non reconnue peut toujours **annuler** (« non », « annule »), jamais confirmer ; toute
+autre phrase d'elle efface aussi la question (par prudence, une télévision peut donc annuler,
+jamais confirmer). Une phrase courte entendue plus de 3 minutes après ta dernière phrase
+reconnue est ignorée.
+
 **« Jarvis, annule »** (ou « laisse tomber ») efface la question en attente. **« Jarvis,
 répète »** (ou « tu peux répéter ? », « qu'est-ce que tu as dit ? ») redit la dernière réponse
-sans rien refaire ; si une question attend, elle est reposée et le délai de 8 s repart.
+sans rien refaire ; si une question attend, elle est reposée et le délai de 8 s repart, y
+compris en réponse directe à la question (« répète » sans « Jarvis »). La question n'est
+reposée qu'**une fois** par action, voix mal reconnue comprise. Seule ta voix reconnue fait
+répéter : une voix non reconnue est ignorée.
+
+Par `jarvis-cli say`, veille, redémarrage et arrêt sont refusés (« Pour cela, demandez-le-moi
+à voix haute, Monsieur. ») : la confirmation se fait à la voix.
 
 Deux réglages dans `~/.config/jarvis/config.toml` (puis `jarvisctl restart`) :
 
