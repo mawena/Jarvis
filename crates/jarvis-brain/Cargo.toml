@@ -30,4 +30,5 @@ whisper-rs.workspace = true
 jarvis-skills = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 wiremock.workspace = true
+hound.workspace = true
 jarvis-brain = { path = ".", features = ["test-util"] }

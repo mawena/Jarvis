@@ -1,0 +1,134 @@
+//! Reconnaissance vocale locale avec whisper.cpp (via `whisper-rs`).
+
+use super::Transcriber;
+use crate::config::SttConfig;
+use anyhow::Context;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+pub struct WhisperTranscriber {
+    ctx: Arc<WhisperContext>,
+    threads: i32,
+}
+
+impl WhisperTranscriber {
+    /// Charge le modèle en mémoire. Peut prendre plusieurs secondes : à appeler
+    /// une seule fois, au démarrage, puis à réutiliser pour chaque phrase.
+    pub fn load(cfg: &SttConfig) -> anyhow::Result<Self> {
+        let path = expand_home(&cfg.model_path);
+        if !path.is_file() {
+            anyhow::bail!(
+                "modèle Whisper introuvable : {} (lancez scripts/download-models.sh)",
+                path.display()
+            );
+        }
+        let ctx = WhisperContext::new_with_params(&path, WhisperContextParameters::default())
+            .map_err(|e| anyhow::anyhow!("{e:?}"))
+            .with_context(|| format!("chargement du modèle Whisper {}", path.display()))?;
+        Ok(Self {
+            ctx: Arc::new(ctx),
+            threads: cfg.threads,
+        })
+    }
+}
+
+fn expand_home(p: &Path) -> PathBuf {
+    if let Ok(rest) = p.strip_prefix("~")
+        && let Some(home) = std::env::var_os("HOME")
+    {
+        return PathBuf::from(home).join(rest);
+    }
+    p.to_path_buf()
+}
+
+#[async_trait::async_trait]
+impl Transcriber for WhisperTranscriber {
+    async fn transcribe(&self, audio: &[f32]) -> anyhow::Result<String> {
+        let ctx = Arc::clone(&self.ctx);
+        let threads = self.threads;
+        let audio = audio.to_vec();
+        tokio::task::spawn_blocking(move || {
+            let mut state = ctx
+                .create_state()
+                .map_err(|e| anyhow::anyhow!("état Whisper : {e:?}"))?;
+            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            params.set_n_threads(threads);
+            params.set_language(Some("fr"));
+            params.set_translate(false);
+            params.set_print_special(false);
+            params.set_print_progress(false);
+            params.set_print_realtime(false);
+            params.set_print_timestamps(false);
+            params.set_no_timestamps(true);
+            params.set_no_context(true);
+            params.set_single_segment(true);
+            params.set_initial_prompt("Jarvis.");
+            state
+                .full(params, &audio)
+                .map_err(|e| anyhow::anyhow!("transcription Whisper : {e:?}"))?;
+            let mut text = String::new();
+            for seg in state.as_iter() {
+                text.push_str(&seg.to_str_lossy().map_err(|e| anyhow::anyhow!("{e:?}"))?);
+            }
+            Ok(text.trim().to_string())
+        })
+        .await
+        .context("tâche de transcription interrompue")?
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn modele_absent_message_clair() {
+        let cfg = SttConfig {
+            model_path: PathBuf::from("/inexistant/ggml-absent.bin"),
+            threads: 2,
+        };
+        let err = WhisperTranscriber::load(&cfg).err().expect("doit échouer");
+        let msg = err.to_string();
+        assert!(msg.contains("/inexistant/ggml-absent.bin"), "{msg}");
+        assert!(msg.contains("scripts/download-models.sh"), "{msg}");
+    }
+
+    /// `JARVIS_TEST_WAV=/chemin/phrase.wav [JARVIS_TEST_MODEL=...] cargo test -p jarvis-brain
+    /// whisper_transcrit_un_wav -- --ignored --nocapture` (WAV 16 kHz mono).
+    #[tokio::test]
+    #[ignore = "nécessite le modèle Whisper et JARVIS_TEST_WAV"]
+    async fn whisper_transcrit_un_wav() {
+        let wav = std::env::var("JARVIS_TEST_WAV").expect("JARVIS_TEST_WAV non défini");
+        let mut cfg = SttConfig::default();
+        if let Ok(m) = std::env::var("JARVIS_TEST_MODEL") {
+            cfg.model_path = PathBuf::from(m);
+        }
+        let mut reader = hound::WavReader::open(&wav).unwrap();
+        let spec = reader.spec();
+        assert_eq!(
+            (spec.sample_rate, spec.channels),
+            (16_000, 1),
+            "WAV 16 kHz mono requis"
+        );
+        let audio: Vec<f32> = match spec.sample_format {
+            hound::SampleFormat::Int => reader
+                .samples::<i16>()
+                .map(|s| s.unwrap() as f32 / 32768.0)
+                .collect(),
+            hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
+        };
+        let t0 = std::time::Instant::now();
+        let stt = WhisperTranscriber::load(&cfg).unwrap();
+        println!("chargement : {:?}", t0.elapsed());
+        let t1 = std::time::Instant::now();
+        let text = stt.transcribe(&audio).await.unwrap();
+        println!(
+            "transcription ({:.1} s d'audio) en {:?} : « {text} »",
+            audio.len() as f32 / 16_000.0,
+            t1.elapsed()
+        );
+        assert!(!text.is_empty());
+    }
+}
