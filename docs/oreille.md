@@ -2,8 +2,8 @@
 
 `jarvis-ear` écoute le micro du PC, détecte « Jarvis », puis envoie la phrase au cerveau
 (`jarvis-brain`). Tout reste local : la reconnaissance vocale (Whisper) et la vérification de
-ta voix tournent sur la machine. Aucun son n'est enregistré, et rien ne quitte l'oreille avant
-le mot d'éveil.
+ta voix tournent sur la machine. Rien ne quitte l'oreille avant le mot d'éveil, et les phrases
+ne sont jamais enregistrées : seules les prises de « Jarvis » de l'enrôlement restent sur disque.
 
 ## Prérequis
 
@@ -15,7 +15,8 @@ jarvisctl install                               # ou `jarvisctl update` ; copie 
 
 Les modèles vont dans `~/.local/share/jarvis/models/`. Les bibliothèques de sherpa-onnx sont
 copiées dans `~/.local/lib/jarvis/`. Le script accepte aussi une seule cible : `small` (modèle
-Whisper par défaut, rapide et fiable sur ce PC), `base` (plus léger mais moins fiable en français, à éviter) ou `speaker` (empreinte vocale).
+Whisper par défaut, rapide et fiable sur ce PC), `base` (plus léger mais moins fiable en
+français, à éviter) ou `speaker` (empreinte vocale).
 
 ## Premier enrôlement
 
@@ -35,9 +36,17 @@ La commande se déroule en deux temps. Parle normalement, à ta distance habitue
 `jarvis-ear enroll --voice-only` refait seulement l'empreinte vocale (les 6 phrases), sans
 toucher au mot d'éveil. Tu peux relancer l'une ou l'autre à tout moment.
 
-Sans empreinte, toutes les voix sont acceptées (un avertissement est journalisé). Avec
-l'empreinte, seule ta voix déclenche une action : une autre voix, ou une phrase trop courte
-hors conversation, est ignorée sans être transcrite.
+Avec l'empreinte, seule ta voix déclenche une action : une autre voix est ignorée sans être
+transcrite. Une phrase de moins d'une seconde est trop courte pour reconnaître une voix : elle
+n'est acceptée que dans les 3 minutes qui suivent une phrase reconnue, et seulement pour les
+commandes rapides (« suivant », « pause », « coupe l'écoute »…), jamais pour une question à
+l'IA. Hors de ces 3 minutes, elle est ignorée.
+
+Si l'empreinte existe mais que le fichier est abîmé, ou que le modèle d'empreinte manque,
+**toutes les phrases sont refusées** (Jarvis répond « La vérification de votre voix est
+indisponible. ») : refais `jarvis-ear enroll --voice-only` ou `scripts/download-models.sh
+speaker`. Sans empreinte du tout (installation neuve), toutes les voix sont acceptées et un
+avertissement est journalisé.
 
 ## Lancer l'oreille
 
@@ -57,10 +66,17 @@ parole 4 s après « Jarvis », elle est abandonnée ; une phrase dure 10 s au p
   rouvre.
 - **Mode local / Mode en ligne** : change le mode du cerveau.
 - **Dernière phrase** : le dernier texte entendu (affichage seulement, non cliquable).
+- **Quitter l'oreille**. Si une phrase était en cours, la musique est d'abord remise à son
+  volume.
 
 La première ligne du menu résume l'état : écoute, micro coupé, cerveau injoignable, mode et
 modèle.
-- **Quitter l'oreille**.
+
+L'écoute coupée est retenue au redémarrage de l'oreille (fichier `~/.local/state/jarvis/ear-muted`).
+La coupure totale, elle, ne l'est pas : l'oreille redémarre micro ouvert.
+
+Si la musique reste baissée (oreille ou cerveau arrêté au mauvais moment), elle remonte seule
+au bout de 15 s, à l'arrêt du cerveau, ou à son redémarrage.
 
 ## Commandes vocales
 
@@ -73,10 +89,12 @@ Pendant l'écoute coupée, les autres phrases ne sont ni exécutées ni journali
 
 | Fichier | Contenu |
 | --- | --- |
-| `~/.local/share/jarvis/wakeword/samples/jarvis-NN.wav` | les prises de « Jarvis » (seuls sons conservés) |
+| `~/.local/share/jarvis/wakeword/samples/jarvis-NN.wav` | les prises de « Jarvis » (seuls sons conservés, droits 0600) |
 | `~/.local/share/jarvis/wakeword/jarvis.rpw` | le modèle du mot d'éveil |
 | `~/.local/share/jarvis/voiceprint/charles.json` | l'empreinte vocale : un vecteur de nombres, sans son (droits 0600) |
 | `~/.config/jarvis/ear.toml` | réglages de l'oreille (optionnel) |
+| `~/.local/state/jarvis/ear-muted` | présent tant que l'écoute est coupée |
+| `$XDG_RUNTIME_DIR/jarvis/ducked-volume` | volume d'origine, le temps d'une phrase |
 
 Pour refaire l'enrôlement : supprime ces fichiers, puis relance `jarvis-ear enroll`. Pour tout
 retirer : `jarvisctl uninstall --purge` (binaires, bibliothèques de `~/.local/lib/jarvis/`,
