@@ -24,7 +24,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Lancement et mise au premier plan des applications et jeux (tâche 6)
 - [x] Compréhension par IA : Ollama (local) et Claude (en ligne) (tâche 7)
 - [x] Orchestrateur et switch de mode persistant (tâche 8)
-- [ ] Service `jarvis-brain` et outil `jarvis` (tâche 9)
+- [x] Service `jarvis-brain` et outil `jarvis` (tâche 9)
 - [ ] Jeu de phrases de référence, installation d'Ollama, choix du modèle local, essai réel (tâche 10)
 
 ## Phase 2 : oreille du PC (écoute permanente)
