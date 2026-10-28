@@ -189,6 +189,14 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn ecoute_coupee_ignore_aussi_coupe_l_ecoute() {
+        let s = setup(FakeTranscriber::new("Jarvis, coupe l'écoute."));
+        let r = s.service.listen(AUDIO, true).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(s.skill.calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn ecoute_coupee_accepte_reactivation() {
         let s = setup(FakeTranscriber::new("Jarvis, réactive l'écoute."));
         let r = s.service.listen(AUDIO, true).await;

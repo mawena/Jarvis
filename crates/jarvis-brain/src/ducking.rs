@@ -1,12 +1,17 @@
 //! Baisse du volume du système pendant que Jarvis écoute.
 
+use jarvis_skills::CommandOutput;
 use jarvis_skills::CommandRunner;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 const SINK: &str = "@DEFAULT_AUDIO_SINK@";
 /// Part du volume d'origine conservée pendant l'écoute.
 const DUCK_RATIO: f32 = 0.3;
+/// Délai maximal d'un appel `wpctl`.
+const WPCTL_TIMEOUT: Duration = Duration::from_secs(2);
 
 #[async_trait::async_trait]
 pub trait Ducker: Send + Sync {
@@ -31,18 +36,37 @@ impl WpctlDucker {
         }
     }
 
-    fn set_volume(&self, volume: f32) {
-        let args = vec!["set-volume".into(), SINK.into(), format!("{volume:.2}")];
-        match self.runner.run("wpctl", &args) {
-            Ok(out) if out.success => {}
-            Ok(_) => warn!("wpctl set-volume a échoué"),
-            Err(e) => warn!(erreur = %e, "wpctl indisponible"),
+    /// Lance `wpctl` hors du runtime (`spawn_blocking`), avec un délai maximal.
+    async fn wpctl(&self, args: Vec<String>) -> Option<CommandOutput> {
+        let runner = Arc::clone(&self.runner);
+        let task = tokio::task::spawn_blocking(move || runner.run("wpctl", &args));
+        match tokio::time::timeout(WPCTL_TIMEOUT, task).await {
+            Ok(Ok(Ok(out))) => Some(out),
+            Ok(Ok(Err(e))) => {
+                warn!(erreur = %e, "wpctl indisponible");
+                None
+            }
+            Ok(Err(e)) => {
+                warn!(erreur = %e, "appel wpctl interrompu");
+                None
+            }
+            Err(_) => {
+                warn!("wpctl ne répond pas");
+                None
+            }
         }
     }
 
-    fn read_volume(&self) -> Option<f32> {
+    async fn set_volume(&self, volume: f32) {
+        let args = vec!["set-volume".into(), SINK.into(), format!("{volume:.2}")];
+        if !self.wpctl(args).await.is_some_and(|o| o.success) {
+            warn!("wpctl set-volume a échoué");
+        }
+    }
+
+    async fn read_volume(&self) -> Option<f32> {
         let args = vec!["get-volume".into(), SINK.into()];
-        let out = self.runner.run("wpctl", &args).ok().filter(|o| o.success)?;
+        let out = self.wpctl(args).await.filter(|o| o.success)?;
         // « Volume: 0.65 » ou « Volume: 0.65 [MUTED] »
         out.stdout
             .split_whitespace()
@@ -54,21 +78,24 @@ impl WpctlDucker {
 #[async_trait::async_trait]
 impl Ducker for WpctlDucker {
     async fn duck(&self) {
-        if self.saved.lock().unwrap().is_some() {
+        // Le verrou est gardé pendant tout l'appel : deux `duck` concurrents ne peuvent
+        // jamais prendre le volume déjà baissé pour le volume d'origine.
+        let mut saved = self.saved.lock().await;
+        if saved.is_some() {
             return;
         }
-        let Some(volume) = self.read_volume() else {
+        let Some(volume) = self.read_volume().await else {
             debug!("volume illisible, pas de baisse du son");
             return;
         };
-        *self.saved.lock().unwrap() = Some(volume);
-        self.set_volume(volume * DUCK_RATIO);
+        *saved = Some(volume);
+        self.set_volume(volume * DUCK_RATIO).await;
     }
 
     async fn restore(&self) {
-        let saved = self.saved.lock().unwrap().take();
-        if let Some(volume) = saved {
-            self.set_volume(volume);
+        let mut saved = self.saved.lock().await;
+        if let Some(volume) = saved.take() {
+            self.set_volume(volume).await;
         }
     }
 }
@@ -104,6 +131,14 @@ mod tests {
         let (d, runner) = ducker();
         d.duck().await;
         d.duck().await;
+        d.restore().await;
+        assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
+    }
+
+    #[tokio::test]
+    async fn duck_concurrents_gardent_le_volume_d_origine() {
+        let (d, runner) = ducker();
+        tokio::join!(d.duck(), d.duck(), d.duck());
         d.restore().await;
         assert_eq!(set_calls(&runner), ["0.18", "0.60"]);
     }
