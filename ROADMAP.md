@@ -13,7 +13,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] Rédiger le document de conception
 - [x] Rédiger la feuille de route et le plan des phases 0 et 1
 - [x] Workspace Cargo et protocole partagé (tâche 1)
-- [ ] Configuration TOML, mode persistant, journaux (tâche 2)
+- [x] Configuration TOML, mode persistant, journaux (tâche 2)
 - [x] Trait `Skill` et exécuteur de commandes (tâche 3)
 
 ## Phase 1 : compréhension et premières compétences (par le texte)
