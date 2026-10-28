@@ -4,6 +4,7 @@
 //! partent vers le cerveau local et ne sont jamais écrites sur disque.
 
 use std::io::{BufRead, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -80,7 +81,16 @@ pub fn clear_samples(dir: &Path) -> anyhow::Result<usize> {
     Ok(removed)
 }
 
-/// Écrit une prise en WAV 16 bits mono 16 kHz.
+/// Crée le dossier (et ses parents) en 0700 ; un dossier existant passe aussi en 0700.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+}
+
+/// Écrit une prise en WAV 16 bits mono 16 kHz, lisible par moi seul (0600).
 pub fn write_wav(path: &Path, samples: &[f32]) -> anyhow::Result<()> {
     let spec = hound::WavSpec {
         channels: 1,
@@ -88,7 +98,15 @@ pub fn write_wav(path: &Path, samples: &[f32]) -> anyhow::Result<()> {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::create(path, spec)?;
+    let file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    // `mode` ne vaut qu'à la création : un ancien fichier garderait ses droits.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    let mut writer = hound::WavWriter::new(std::io::BufWriter::new(file), spec)?;
     for s in samples {
         writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16)?;
     }
@@ -106,10 +124,11 @@ pub fn list_samples(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Construit `jarvis.rpw` à partir des WAV du dossier d'échantillons.
+/// Construit `jarvis.rpw` (0600) à partir des WAV du dossier d'échantillons.
 pub fn build_model(samples_dir: &Path, output: &Path) -> anyhow::Result<usize> {
     let files = list_samples(samples_dir)?;
     build_reference(&files, output)?;
+    std::fs::set_permissions(output, std::fs::Permissions::from_mode(0o600))?;
     Ok(files.len())
 }
 
@@ -246,8 +265,10 @@ pub async fn run_with(
         if count < 3 {
             return Err(anyhow!("il faut au moins 3 prises (8 recommandées)"));
         }
+        // Les prises sont des enregistrements de ma voix : dossiers en 0700.
         let samples_dir = dir.join("samples");
-        std::fs::create_dir_all(&samples_dir)?;
+        create_private_dir(dir)?;
+        create_private_dir(&samples_dir)?;
         let removed = clear_samples(&samples_dir)?;
         if removed > 0 {
             session.say(&format!("{removed} ancienne(s) prise(s) supprimée(s)."));
@@ -480,6 +501,61 @@ mod tests {
                 "jarvis.rpw"
             ]
         );
+    }
+
+    fn mode(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o777
+    }
+
+    #[tokio::test]
+    async fn prises_et_modele_lisibles_par_moi_seul() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("wakeword");
+        let (mut session, brain) = (FakeSession::default(), brain(enrolled));
+        run_with(&mut session, &brain, &dir, 3, false)
+            .await
+            .unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&dir.join("samples")), 0o700);
+        for i in 1..=3 {
+            assert_eq!(mode(&dir.join("samples").join(sample_file_name(i))), 0o600);
+        }
+        assert_eq!(mode(&dir.join("jarvis.rpw")), 0o600);
+    }
+
+    #[tokio::test]
+    async fn dossier_et_modele_existants_rendus_prives() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("wakeword");
+        let samples = dir.join("samples");
+        std::fs::create_dir_all(&samples).unwrap();
+        let rpw = dir.join("jarvis.rpw");
+        std::fs::write(&rpw, "ancien").unwrap();
+        for p in [&dir, &samples] {
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        std::fs::set_permissions(&rpw, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let (mut session, brain) = (FakeSession::default(), brain(enrolled));
+        run_with(&mut session, &brain, &dir, 3, false)
+            .await
+            .unwrap();
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(mode(&samples), 0o700);
+        assert_eq!(mode(&rpw), 0o600);
+    }
+
+    #[test]
+    fn prise_reecrite_rendue_privee() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(sample_file_name(1));
+        std::fs::write(&path, "ancien").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        write_wav(&path, &[0.0; 16]).unwrap();
+        assert_eq!(mode(&path), 0o600);
+        assert_eq!(hound::WavReader::open(&path).unwrap().len(), 16);
     }
 
     #[tokio::test]

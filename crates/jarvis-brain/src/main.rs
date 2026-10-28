@@ -1,7 +1,7 @@
 use anyhow::Context;
 use jarvis_brain::brain::Brain;
 use jarvis_brain::config::Config;
-use jarvis_brain::ducking::WpctlDucker;
+use jarvis_brain::ducking::{Ducker, WpctlDucker};
 use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
@@ -86,9 +86,10 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(NoTranscriber)
         }
     };
+    let ducker = Arc::new(WpctlDucker::persistent(runner, WpctlDucker::default_file()));
+    ducker.recover().await;
     let listen = Arc::new(
-        ListenService::new(brain.clone(), stt, Arc::new(WpctlDucker::new(runner)))
-            .with_speaker_state(speaker.clone()),
+        ListenService::new(brain.clone(), stt, ducker.clone()).with_speaker_state(speaker.clone()),
     );
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
@@ -97,6 +98,8 @@ async fn main() -> anyhow::Result<()> {
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     };
+    // Arrêt entre un réveil et la fin de l'écoute : la musique ne reste pas baissée.
+    ducker.restore().await;
     // Ne supprime pas le socket d'un autre cerveau si nous n'avons pas pu le prendre.
     if result.is_ok() {
         let _ = std::fs::remove_file(&socket);

@@ -19,6 +19,16 @@ use crate::tray::{BrainLink, TrayCommand, TrayState};
 /// Période d'interrogation du statut du cerveau.
 pub const STATUS_PERIOD: Duration = Duration::from_secs(5);
 
+/// Fichier `~/.local/state/jarvis/ear-muted` : présent tant que l'écoute est coupée.
+pub fn default_mute_file() -> Option<PathBuf> {
+    let base = directories::BaseDirs::new()?;
+    let dir = base.state_dir().unwrap_or_else(|| base.data_local_dir());
+    Some(dir.join("jarvis").join("ear-muted"))
+}
+
+/// Délai maximal de chaque requête envoyée en quittant.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
 /// Liaison avec le cerveau (remplaçable dans les tests).
 #[async_trait::async_trait]
 pub trait Brain: Send + Sync + 'static {
@@ -56,6 +66,10 @@ pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     status_period: Duration,
     downmixer: Option<Downmixer>,
     muted: bool,
+    /// Présence = écoute coupée : survit à un redémarrage de l'oreille.
+    mute_file: Option<PathBuf>,
+    /// Coupure totale volontairement non retenue : au redémarrage, le micro se rouvre
+    /// (un micro fermé pour de bon sans que l'on s'en souvienne serait pire).
     hard_muted: bool,
     unavailable: bool,
     capturing: bool,
@@ -86,6 +100,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             status_period: STATUS_PERIOD,
             downmixer: None,
             muted: false,
+            mute_file: None,
             hard_muted: false,
             unavailable: false,
             capturing: false,
@@ -95,6 +110,37 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             status_in_flight: false,
             internal_tx,
             internal_rx,
+        }
+    }
+
+    /// Retient l'écoute coupée dans `path` ; un fichier présent coupe l'écoute dès le départ.
+    pub fn with_mute_file(mut self, path: PathBuf) -> Self {
+        self.muted = path.exists();
+        self.mute_file = Some(path);
+        self
+    }
+
+    fn set_muted(&mut self, muted: bool) {
+        if self.muted == muted {
+            return;
+        }
+        self.muted = muted;
+        let Some(path) = &self.mute_file else { return };
+        let result = if muted {
+            path.parent()
+                .map_or(Ok(()), std::fs::create_dir_all)
+                .and_then(|()| std::fs::write(path, ""))
+        } else {
+            std::fs::remove_file(path).or_else(|e| {
+                if e.kind() == std::io::ErrorKind::NotFound {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            })
+        };
+        if let Err(e) = result {
+            tracing::warn!("état de l'écoute non retenu ({}) : {e}", path.display());
         }
     }
 
@@ -147,7 +193,32 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             self.publish();
         }
         self.capture.stop();
+        self.restore_on_quit().await;
         Ok(())
+    }
+
+    /// Quitter pendant une capture : la musique avait été baissée au réveil. On attend le
+    /// `Wake`, puis on envoie un `Listen` vide et on attend la réponse (une tâche
+    /// détachée mourrait avec le runtime).
+    async fn restore_on_quit(&mut self) {
+        if !self.capturing {
+            return;
+        }
+        self.capturing = false;
+        if let Some(wake) = self.pending_wake.take()
+            && tokio::time::timeout(QUIT_TIMEOUT, wake).await.is_err()
+        {
+            tracing::warn!("réveil toujours en cours en quittant");
+        }
+        let listen = ControlRequest::Listen {
+            audio: String::new(),
+            muted: self.muted,
+        };
+        match tokio::time::timeout(QUIT_TIMEOUT, self.brain.request(listen)).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(e)) => tracing::warn!("musique non rétablie en quittant : {e}"),
+            Err(_) => tracing::warn!("le cerveau ne répond pas en quittant"),
+        }
     }
 
     fn on_capture(&mut self, event: CaptureEvent) {
@@ -224,8 +295,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
 
     fn on_command(&mut self, command: TrayCommand, cap_tx: &mpsc::Sender<CaptureEvent>) {
         match command {
-            TrayCommand::Mute if !self.hard_muted => self.muted = true,
-            TrayCommand::Unmute if !self.hard_muted => self.muted = false,
+            TrayCommand::Mute if !self.hard_muted => self.set_muted(true),
+            TrayCommand::Unmute if !self.hard_muted => self.set_muted(false),
             TrayCommand::HardMute if !self.hard_muted => {
                 self.capture.stop();
                 self.hard_muted = true;
@@ -302,8 +373,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                         tracing::info!("entendu : {text}");
                     }
                     match ear_action {
-                        Some(EarAction::Mute) => self.muted = true,
-                        Some(EarAction::Unmute) => self.muted = false,
+                        Some(EarAction::Mute) => self.set_muted(true),
+                        Some(EarAction::Unmute) => self.set_muted(false),
                         None => {}
                     }
                 }
@@ -419,12 +490,12 @@ mod tests {
     }
 
     fn harness_speech(speech_frames: usize) -> Harness {
-        build_harness(|_| status_ok(), false, speech_frames, usize::MAX)
+        build_harness(|_| status_ok(), false, speech_frames, usize::MAX, None)
     }
 
     /// Un seul réveil possible : une capture « orpheline » serait visible.
     fn harness_one_wake() -> Harness {
-        build_harness(|_| status_ok(), false, 0, 1)
+        build_harness(|_| status_ok(), false, 0, 1, None)
     }
 
     fn harness(
@@ -434,7 +505,7 @@ mod tests {
         + 'static,
         capture_fails: bool,
     ) -> Harness {
-        build_harness(responder, capture_fails, 0, usize::MAX)
+        build_harness(responder, capture_fails, 0, usize::MAX, None)
     }
 
     fn build_harness(
@@ -445,6 +516,7 @@ mod tests {
         capture_fails: bool,
         speech_frames: usize,
         wakes: usize,
+        mute_file: Option<PathBuf>,
     ) -> Harness {
         let shared = Arc::new(CaptureShared::default());
         let brain = Arc::new(FakeBrain {
@@ -473,7 +545,10 @@ mod tests {
             shared: shared.clone(),
             fail: capture_fails,
         };
-        let app = App::new(listener, capture, brain.clone(), commands_rx, tray_tx);
+        let mut app = App::new(listener, capture, brain.clone(), commands_rx, tray_tx);
+        if let Some(path) = mute_file {
+            app = app.with_mute_file(path);
+        }
         Harness {
             capture: shared,
             brain,
@@ -748,6 +823,127 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(h.listens(), vec![false]);
         assert!(!h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
+    async fn quitter_pendant_la_capture_retablit_la_musique() {
+        let h = harness_one_wake();
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        // Réveil seul : la capture est en cours.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("capture en cours", |h| h.tray.borrow().capturing)
+            .await;
+        h.commands.send(TrayCommand::Quit).unwrap();
+        let brain = h.brain.clone();
+        h.task.await.unwrap().unwrap();
+        // Le `Listen` vide est parti avant la fin de `run`, pas dans une tâche détachée.
+        let sent: Vec<ControlRequest> = brain
+            .requests
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .filter(|r| !matches!(r, ControlRequest::Status))
+            .collect();
+        assert_eq!(sent.len(), 2, "{sent:?}");
+        assert_eq!(sent[0], ControlRequest::Wake);
+        assert!(matches!(
+            &sent[1],
+            ControlRequest::Listen { muted: false, audio } if audio.is_empty()
+        ));
+    }
+
+    #[tokio::test]
+    async fn quitter_hors_capture_n_envoie_pas_de_listen() {
+        let h = harness_one_wake();
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.commands.send(TrayCommand::Quit).unwrap();
+        let brain = h.brain.clone();
+        h.task.await.unwrap().unwrap();
+        let requests = brain.requests.lock().unwrap().clone();
+        assert!(
+            !requests
+                .iter()
+                .any(|r| matches!(r, ControlRequest::Listen { .. })),
+            "{requests:?}"
+        );
+    }
+
+    fn harness_mute_file(path: &std::path::Path) -> Harness {
+        build_harness(
+            |_| status_ok(),
+            false,
+            0,
+            usize::MAX,
+            Some(path.to_path_buf()),
+        )
+    }
+
+    #[tokio::test]
+    async fn ecoute_coupee_retrouvee_au_redemarrage() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("jarvis/ear-muted");
+        let h = harness_mute_file(&path);
+        h.wait_for("ouverte", |h| h.tray.borrow().mic == MicState::Open)
+            .await;
+        h.commands.send(TrayCommand::Mute).unwrap();
+        h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
+            .await;
+        assert!(path.exists());
+        h.commands.send(TrayCommand::Quit).unwrap();
+        h.task.await.unwrap().unwrap();
+
+        // Redémarrage : toujours coupée.
+        let h = harness_mute_file(&path);
+        h.wait_for("coupée au démarrage", |h| {
+            h.tray.borrow().mic == MicState::Muted
+        })
+        .await;
+        h.commands.send(TrayCommand::Unmute).unwrap();
+        h.wait_for("rouverte", |h| h.tray.borrow().mic == MicState::Open)
+            .await;
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn coupure_par_la_voix_aussi_retenue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ear-muted");
+        let h = build_harness(
+            |r| match r {
+                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
+                    text: "coupe l'écoute".into(),
+                    speech: "D'accord.".into(),
+                    ear_action: Some(EarAction::Mute),
+                }),
+                _ => status_ok(),
+            },
+            false,
+            0,
+            usize::MAX,
+            Some(path.clone()),
+        );
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
+            .await;
+        assert!(path.exists());
+    }
+
+    #[tokio::test]
+    async fn coupure_totale_non_retenue() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ear-muted");
+        let h = harness_mute_file(&path);
+        h.commands.send(TrayCommand::HardMute).unwrap();
+        h.wait_for("coupure totale", |h| {
+            h.tray.borrow().mic == MicState::HardMuted
+        })
+        .await;
+        assert!(!path.exists());
     }
 
     #[tokio::test]
