@@ -15,8 +15,82 @@ fn strip_accent(c: char) -> char {
     }
 }
 
+/// Formules de politesse retirées en tête de phrase (mots normalisés).
+const PREFIXES: &[&[&str]] = &[
+    &["jarvis"],
+    &["s", "il", "te", "plait"],
+    &["s", "il", "vous", "plait"],
+    &["stp"],
+    &["svp"],
+    &["merci"],
+    &["est", "ce", "que", "tu", "peux"],
+    &["est", "ce", "que", "vous", "pouvez"],
+    &["tu", "peux"],
+    &["vous", "pouvez"],
+    &["peux", "tu"],
+    &["pouvez", "vous"],
+    &["pourrais", "tu"],
+    &["pourriez", "vous"],
+    &["vas", "y"],
+    &["allez", "y"],
+    &["allez"],
+];
+
+/// Formules de politesse retirées en fin de phrase.
+const SUFFIXES: &[&[&str]] = &[
+    &["jarvis"],
+    &["s", "il", "te", "plait"],
+    &["s", "il", "vous", "plait"],
+    &["stp"],
+    &["svp"],
+    &["merci"],
+    &["vas", "y"],
+    &["allez", "y"],
+];
+
+/// Infinitif ou vouvoiement en tête de phrase vers l'impératif tutoyé
+/// (« mettre pause » → « mets pause »).
+fn imperatif(verbe: &str) -> &str {
+    match verbe {
+        "mettre" => "mets",
+        "remettre" => "remets",
+        "lancer" => "lance",
+        "relancer" => "relance",
+        "ouvrir" => "ouvre",
+        "demarrer" => "demarre",
+        "arreter" => "arrete",
+        "stopper" => "stoppe",
+        "couper" => "coupe",
+        "monter" => "monte",
+        "baisser" => "baisse",
+        "augmenter" => "augmente",
+        "diminuer" => "diminue",
+        "passer" => "passe",
+        "zapper" => "zappe",
+        "reprendre" | "reprenez" => "reprends",
+        "continuer" | "continuez" => "continue",
+        "jouer" => "joue",
+        other => other,
+    }
+}
+
+fn strip_politesse(mut words: Vec<&str>) -> Vec<&str> {
+    loop {
+        let before = words.len();
+        if let Some(p) = PREFIXES.iter().find(|p| words.starts_with(p)) {
+            words.drain(..p.len());
+        }
+        if let Some(s) = SUFFIXES.iter().find(|s| words.ends_with(s)) {
+            words.truncate(words.len() - s.len());
+        }
+        if words.len() == before {
+            return words;
+        }
+    }
+}
+
 /// Minuscules, accents retirés, ponctuation en espaces, espaces fusionnés,
-/// mot de tête `jarvis` retiré.
+/// politesses retirées (début et fin), verbe initial ramené à l'impératif.
 pub fn normalize(text: &str) -> String {
     let cleaned: String = text
         .to_lowercase()
@@ -24,30 +98,81 @@ pub fn normalize(text: &str) -> String {
         .map(strip_accent)
         .map(|c| if c.is_alphanumeric() { c } else { ' ' })
         .collect();
-    let mut words: Vec<&str> = cleaned.split_whitespace().collect();
-    if words.first() == Some(&"jarvis") {
-        words.remove(0);
+    let mut words = strip_politesse(cleaned.split_whitespace().collect());
+    if let Some(first) = words.first_mut() {
+        *first = imperatif(first);
     }
     words.join(" ")
+}
+
+/// « chanson suivante », « morceau précédent »… : nom de média + adjectif.
+fn piste(phrase: &str) -> Option<Intent> {
+    let (nom, adj) = phrase.split_once(' ')?;
+    if !matches!(
+        nom,
+        "chanson" | "musique" | "piste" | "morceau" | "titre" | "video"
+    ) {
+        return None;
+    }
+    match adj {
+        "suivant" | "suivante" => Some(Intent::new("media_next", json!({}))),
+        "precedent" | "precedente" => Some(Intent::new("media_previous", json!({}))),
+        _ => None,
+    }
 }
 
 fn exact(phrase: &str) -> Option<Intent> {
     let simple = |tool: &str| Some(Intent::new(tool, json!({})));
     let mode = |m: &str| Some(Intent::new("set_mode", json!({ "mode": m })));
     match phrase {
-        "suivant" | "suivante" | "chanson suivante" | "musique suivante" | "next" => {
-            simple("media_next")
-        }
-        "precedent" | "precedente" | "chanson precedente" | "musique precedente" => {
-            simple("media_previous")
-        }
-        "pause" | "stop" | "mets en pause" => simple("media_pause"),
-        "reprends" | "reprend" | "lecture" | "play" | "relance la musique" => simple("media_play"),
-        "plus fort" | "monte le son" | "monte le volume" => simple("volume_up"),
-        "moins fort" | "baisse le son" | "baisse le volume" => simple("volume_down"),
-        "qu est ce qui passe" | "c est quoi cette chanson" => simple("media_now_playing"),
+        // media_play
+        "reprends" | "reprend" | "continue" | "relance" | "relance la musique"
+        | "remets la musique" | "remets en route" | "lecture" | "play" | "joue"
+        | "lance la lecture" | "lance la musique" | "mets la musique" => simple("media_play"),
+        // media_pause
+        "pause"
+        | "mets pause"
+        | "mets en pause"
+        | "met en pause"
+        | "stop"
+        | "stoppe"
+        | "arrete"
+        | "arrete la musique"
+        | "coupe la musique"
+        | "mets la musique en pause" => simple("media_pause"),
+        // media_next
+        "suivant"
+        | "suivante"
+        | "la suivante"
+        | "passe"
+        | "passe a la suivante"
+        | "passe au suivant"
+        | "next"
+        | "skip"
+        | "zappe" => simple("media_next"),
+        // media_previous
+        "precedent"
+        | "precedente"
+        | "la precedente"
+        | "reviens en arriere"
+        | "retour"
+        | "remets la precedente" => simple("media_previous"),
+        // volume_up
+        "plus fort" | "mets plus fort" | "plus de son" | "monte le son" | "monte le volume"
+        | "augmente le son" | "augmente le volume" => simple("volume_up"),
+        // volume_down
+        "moins fort" | "mets moins fort" | "moins de son" | "baisse le son"
+        | "baisse le volume" | "diminue le son" | "diminue le volume" => simple("volume_down"),
+        // media_now_playing
+        "qu est ce qui passe"
+        | "c est quoi cette chanson"
+        | "c est quoi ce morceau"
+        | "quelle est cette chanson"
+        | "qu est ce qu on ecoute" => simple("media_now_playing"),
+        // set_mode
         "passe en mode local" | "mode local" => mode("local"),
         "passe en mode en ligne" | "mode en ligne" | "passe en ligne" => mode("online"),
+        // status
         "qu est ce que tu fais" | "statut" => simple("status"),
         _ => None,
     }
@@ -84,7 +209,9 @@ fn launch(phrase: &str) -> Option<Intent> {
 /// Reconnaît une phrase courante sans passer par l'IA.
 pub fn match_fast(text: &str) -> Option<Intent> {
     let phrase = normalize(text);
-    exact(&phrase).or_else(|| launch(&phrase))
+    exact(&phrase)
+        .or_else(|| piste(&phrase))
+        .or_else(|| launch(&phrase))
 }
 
 #[cfg(test)]
@@ -141,6 +268,182 @@ mod tests {
         }
     }
 
+    fn verifie(tool: &str, phrases: &[&str]) {
+        for phrase in phrases {
+            assert_eq!(
+                match_fast(phrase),
+                intent(tool, json!({})),
+                "phrase: {phrase}"
+            );
+        }
+    }
+
+    #[test]
+    fn variantes_media_play() {
+        verifie(
+            "media_play",
+            &[
+                "reprendre",
+                "reprends",
+                "reprenez",
+                "reprend",
+                "continue",
+                "continuer",
+                "continuez",
+                "relance",
+                "relancer",
+                "relance la musique",
+                "remets la musique",
+                "lecture",
+                "play",
+                "joue",
+                "lance la lecture",
+                "remets en route",
+            ],
+        );
+    }
+
+    #[test]
+    fn variantes_media_pause() {
+        verifie(
+            "media_pause",
+            &[
+                "pause",
+                "mets pause",
+                "mets en pause",
+                "met en pause",
+                "mettre en pause",
+                "stop",
+                "stoppe",
+                "arrête",
+                "arrêter",
+                "arrête la musique",
+                "coupe la musique",
+                "mets la musique en pause",
+            ],
+        );
+    }
+
+    #[test]
+    fn variantes_media_next() {
+        verifie(
+            "media_next",
+            &[
+                "suivant",
+                "suivante",
+                "chanson suivante",
+                "musique suivante",
+                "piste suivante",
+                "morceau suivant",
+                "titre suivant",
+                "vidéo suivante",
+                "passe",
+                "passe à la suivante",
+                "passe au suivant",
+                "la suivante",
+                "next",
+                "skip",
+                "zappe",
+            ],
+        );
+    }
+
+    #[test]
+    fn variantes_media_previous() {
+        verifie(
+            "media_previous",
+            &[
+                "précédent",
+                "précédente",
+                "chanson précédente",
+                "musique précédente",
+                "piste précédente",
+                "morceau précédent",
+                "titre précédent",
+                "vidéo précédente",
+                "reviens en arrière",
+                "retour",
+                "la précédente",
+                "remets la précédente",
+            ],
+        );
+    }
+
+    #[test]
+    fn variantes_volume() {
+        verifie(
+            "volume_up",
+            &[
+                "plus fort",
+                "monte le son",
+                "monte le volume",
+                "monter le volume",
+                "augmente le son",
+                "augmente le volume",
+                "mets plus fort",
+                "plus de son",
+            ],
+        );
+        verifie(
+            "volume_down",
+            &[
+                "moins fort",
+                "baisse le son",
+                "baisse le volume",
+                "baisser le son",
+                "diminue le son",
+                "diminue le volume",
+                "moins de son",
+                "mets moins fort",
+            ],
+        );
+    }
+
+    #[test]
+    fn variantes_now_playing() {
+        verifie(
+            "media_now_playing",
+            &[
+                "qu'est-ce qui passe",
+                "c'est quoi cette chanson",
+                "c'est quoi ce morceau",
+                "quelle est cette chanson",
+                "qu'est-ce qu'on écoute",
+            ],
+        );
+    }
+
+    #[test]
+    fn politesse_retiree() {
+        assert_eq!(
+            match_fast("Jarvis, tu peux reprendre s'il te plaît"),
+            intent("media_play", json!({}))
+        );
+        assert_eq!(
+            match_fast("peux-tu mettre pause merci"),
+            intent("media_pause", json!({}))
+        );
+        assert_eq!(
+            match_fast("est-ce que tu peux lancer spotify"),
+            intent("app_launch", json!({"name": "spotify"}))
+        );
+        assert_eq!(
+            match_fast("tu peux ouvrir firefox s'il te plaît"),
+            intent("app_launch", json!({"name": "firefox"}))
+        );
+        assert_eq!(
+            match_fast("merci jarvis vas-y passe à la suivante stp"),
+            intent("media_next", json!({}))
+        );
+    }
+
+    #[test]
+    fn micro_n_est_pas_pause() {
+        for phrase in ["coupe le micro", "coupe l'écoute", "arrête d'écouter"] {
+            assert_eq!(match_fast(phrase), None, "phrase: {phrase}");
+        }
+    }
+
     #[test]
     fn normalise_et_tolere_le_bruit() {
         for phrase in ["Jarvis, Précédent !", "  jarvis   precedent", "PRÉCÉDENT."] {
@@ -161,7 +464,7 @@ mod tests {
         );
         assert_eq!(
             match_fast("ouvre spotify s'il te plait"),
-            intent("app_launch", json!({"name": "spotify s il te plait"}))
+            intent("app_launch", json!({"name": "spotify"}))
         );
         assert_eq!(
             match_fast("démarre Firefox"),
