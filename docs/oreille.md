@@ -1,0 +1,130 @@
+# L'oreille du PC
+
+`jarvis-ear` écoute le micro du PC, détecte « Jarvis », puis envoie la phrase au cerveau
+(`jarvis-brain`). Tout reste local : la reconnaissance vocale (Whisper) et la vérification de
+ta voix tournent sur la machine. Aucun son n'est enregistré, et rien ne quitte l'oreille avant
+le mot d'éveil.
+
+## Prérequis
+
+```bash
+sudo apt install libasound2-dev libclang-dev    # pour compiler
+scripts/download-models.sh all                  # modèles Whisper (small, base) et empreinte vocale
+jarvisctl install                               # ou `jarvisctl update` ; copie aussi les bibliothèques
+```
+
+Les modèles vont dans `~/.local/share/jarvis/models/`. Les bibliothèques de sherpa-onnx sont
+copiées dans `~/.local/lib/jarvis/`. Le script accepte aussi une seule cible : `small` (modèle
+Whisper par défaut, le plus précis), `base` (plus rapide) ou `speaker` (empreinte vocale).
+
+## Premier enrôlement
+
+```bash
+jarvis-ear enroll
+```
+
+La commande se déroule en deux temps. Parle normalement, à ta distance habituelle du micro.
+
+1. **Mot d'éveil** : tu dis « Jarvis » plusieurs fois, après chaque appui sur Entrée (8 prises
+   par défaut, `--count N` pour en changer). Le modèle du mot d'éveil est construit à partir
+   de ces prises.
+2. **Empreinte vocale** : tu lis 6 phrases courtes affichées à l'écran (environ 3,5 s chacune).
+   Elles restent en mémoire, ne sont jamais écrites sur disque, et partent au cerveau avec les
+   prises « Jarvis » pour calculer ton empreinte. Le service `jarvis-brain` doit tourner.
+
+`jarvis-ear enroll --voice-only` refait seulement l'empreinte vocale (les 6 phrases), sans
+toucher au mot d'éveil. Tu peux relancer l'une ou l'autre à tout moment.
+
+Sans empreinte, toutes les voix sont acceptées (un avertissement est journalisé). Avec
+l'empreinte, seule ta voix déclenche une action : une autre voix, ou une phrase trop courte
+hors conversation, est ignorée sans être transcrite.
+
+## Lancer l'oreille
+
+```bash
+jarvis-ear
+```
+
+Une icône « Jarvis » apparaît dans la zone de notification. Dis « Jarvis », attends que la
+musique baisse, puis donne ta commande. La phrase se termine après 800 ms de silence. Sans
+parole 4 s après « Jarvis », elle est abandonnée ; une phrase dure 10 s au plus.
+
+## Icône et menu
+
+- **Couper l'écoute / Réactiver l'écoute** : le micro reste ouvert et le mot d'éveil reste
+  détecté, mais seule la phrase « réactive l'écoute » est retenue (et seulement avec ta voix).
+- **Coupure totale du micro / Rouvrir le micro** : le flux du micro est fermé. Seul ce menu le
+  rouvre.
+- **Mode local / Mode en ligne** : change le mode du cerveau.
+- **Dernière phrase** : le dernier texte entendu (affichage seulement, non cliquable).
+
+La première ligne du menu résume l'état : écoute, micro coupé, cerveau injoignable, mode et
+modèle.
+- **Quitter l'oreille**.
+
+## Commandes vocales
+
+- « Jarvis, coupe l'écoute » (ou « coupe le micro », « arrête d'écouter »).
+- « Jarvis, réactive l'écoute » (ou « réactive le micro »).
+
+Pendant l'écoute coupée, les autres phrases ne sont ni exécutées ni journalisées.
+
+## Fichiers créés
+
+| Fichier | Contenu |
+| --- | --- |
+| `~/.local/share/jarvis/wakeword/samples/jarvis-NN.wav` | les prises de « Jarvis » (seuls sons conservés) |
+| `~/.local/share/jarvis/wakeword/jarvis.rpw` | le modèle du mot d'éveil |
+| `~/.local/share/jarvis/voiceprint/charles.json` | l'empreinte vocale : un vecteur de nombres, sans son (droits 0600) |
+| `~/.config/jarvis/ear.toml` | réglages de l'oreille (optionnel) |
+
+Pour refaire l'enrôlement : supprime ces fichiers, puis relance `jarvis-ear enroll`. Pour tout
+retirer : `jarvisctl uninstall --purge` (binaires, bibliothèques de `~/.local/lib/jarvis/`,
+configuration et données, modèles compris).
+
+## Réglages
+
+`~/.config/jarvis/ear.toml` (tout est optionnel) :
+
+```toml
+# wakeword_path = "~/.local/share/jarvis/wakeword/jarvis.rpw"
+# threshold = 0.5          # seuil de détection du mot d'éveil (plus haut = moins de fausses détections)
+# device = "nom du micro"  # micro par défaut sinon
+```
+
+`~/.config/jarvis/config.toml`, côté cerveau (puis `jarvisctl restart`) :
+
+```toml
+[stt]
+# model_path = "~/.local/share/jarvis/models/ggml-small-q5_1.bin"   # ggml-base-q5_1.bin : plus rapide
+# threads = 6
+
+[speaker]
+# enabled = true
+# model_path = "~/.local/share/jarvis/models/3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx"
+# threshold = 0.55          # phrase d'au moins 2 s
+# strict_threshold = 0.65   # phrase de 1 à 2 s
+# threads = 2
+```
+
+Si ta voix est refusée trop souvent, baisse `threshold` ; si d'autres voix passent, monte-le.
+Le score de chaque refus est dans les journaux (`jarvisctl logs`), sans le texte.
+
+## Dépannage
+
+Commence par :
+
+```bash
+jarvisctl doctor
+```
+
+Les lignes `!` concernent l'oreille (avertissements, pas d'échec) :
+
+- **Bibliothèques sherpa-onnx absentes** : `jarvisctl install` ou `jarvisctl update`.
+- **Modèle Whisper ou d'empreinte absent** : `scripts/download-models.sh all`. Sans Whisper, le
+  cerveau répond « La reconnaissance vocale n'est pas installée. »
+- **Mot d'éveil ou empreinte absents** : `jarvis-ear enroll`.
+- **« Empreinte vocale indisponible : modèle introuvable »** : télécharge le modèle avec
+  `scripts/download-models.sh speaker`, puis `jarvisctl restart`.
+- **Jarvis ne réagit pas** : `jarvisctl logs -f` ; vérifie que le micro n'est pas en écoute
+  coupée ou en coupure totale (icône), et que `jarvisctl status` montre le service actif.

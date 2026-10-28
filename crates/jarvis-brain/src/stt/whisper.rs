@@ -19,6 +19,8 @@ impl WhisperTranscriber {
     /// Charge le modèle en mémoire. Peut prendre plusieurs secondes : à appeler
     /// une seule fois, au démarrage, puis à réutiliser pour chaque phrase.
     pub fn load(cfg: &SttConfig) -> anyhow::Result<Self> {
+        // Les journaux de whisper.cpp et de ggml passent par `tracing` (sans effet si répété).
+        whisper_rs::install_logging_hooks();
         let path = expand_home(&cfg.model_path);
         if !path.is_file() {
             anyhow::bail!(
