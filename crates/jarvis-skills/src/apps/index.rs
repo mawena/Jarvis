@@ -86,17 +86,38 @@ impl AppIndex {
             return Some(e);
         }
         let matcher = SkimMatcherV2::default();
-        self.entries
-            .iter()
-            .filter_map(|e| {
-                let by_name = matcher.fuzzy_match(&e.name.to_lowercase(), &cleaned);
-                let by_id = matcher.fuzzy_match(&e.id.to_lowercase(), &cleaned);
-                by_name.max(by_id).map(|s| (s, e))
-            })
-            .filter(|(s, _)| *s >= MIN_SCORE)
-            .max_by_key(|(s, _)| *s)
-            .map(|(_, e)| e)
+        // Names first; ids only when no name reaches the threshold.
+        best_fuzzy(&self.entries, &matcher, &cleaned, |e| &e.name)
+            .or_else(|| best_fuzzy(&self.entries, &matcher, &cleaned, |e| &e.id))
     }
+}
+
+/// Best fuzzy match on one field: highest score, then shortest field, then index order.
+fn best_fuzzy<'a>(
+    entries: &'a [AppEntry],
+    matcher: &SkimMatcherV2,
+    query: &str,
+    field: impl Fn(&AppEntry) -> &str,
+) -> Option<&'a AppEntry> {
+    let mut best: Option<(i64, usize, &AppEntry)> = None;
+    for e in entries {
+        let text = field(e).to_lowercase();
+        let Some(score) = matcher.fuzzy_match(&text, query) else {
+            continue;
+        };
+        if score < MIN_SCORE {
+            continue;
+        }
+        let len = text.chars().count();
+        let better = match best {
+            None => true,
+            Some((bs, bl, _)) => score > bs || (score == bs && len < bl),
+        };
+        if better {
+            best = Some((score, len, e));
+        }
+    }
+    best.map(|(_, _, e)| e)
 }
 
 /// Remove ignored filler phrases (whole words only) from a normalized query.
@@ -139,4 +160,27 @@ fn parse_entry(path: &Path) -> Option<AppEntry> {
             .filter(|v| !v.is_empty())
             .map(|v| v.to_string()),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn flou() -> AppIndex {
+        AppIndex::load(&[
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/applications_flou")
+        ])
+    }
+
+    #[test]
+    fn nom_prioritaire_sur_id() {
+        let idx = flou();
+        let e = idx.find("chrome", &HashMap::new()).unwrap();
+        assert_eq!(e.id, "google-chrome");
+    }
+
+    #[test]
+    fn seuil_flou_epingle() {
+        assert!(flou().find("xyzzy", &HashMap::new()).is_none());
+    }
 }
