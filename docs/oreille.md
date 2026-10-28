@@ -15,7 +15,7 @@ jarvisctl install                               # ou `jarvisctl update` ; copie 
 
 Les modèles vont dans `~/.local/share/jarvis/models/`. Les bibliothèques de sherpa-onnx sont
 copiées dans `~/.local/lib/jarvis/`. Le script accepte aussi une seule cible : `small` (modèle
-Whisper par défaut, le plus précis), `base` (plus rapide) ou `speaker` (empreinte vocale).
+Whisper par défaut, rapide et fiable sur ce PC), `base` (plus léger mais moins fiable en français, à éviter) ou `speaker` (empreinte vocale).
 
 ## Premier enrôlement
 
@@ -96,7 +96,7 @@ configuration et données, modèles compris).
 
 ```toml
 [stt]
-# model_path = "~/.local/share/jarvis/models/ggml-small-q5_1.bin"   # ggml-base-q5_1.bin : plus rapide
+# model_path = "~/.local/share/jarvis/models/ggml-small-q5_1.bin"   # ggml-base-q5_1.bin : déconseillé (répétitions)
 # threads = 6
 
 [speaker]

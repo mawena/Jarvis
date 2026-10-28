@@ -9,6 +9,12 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 /// En dessous de 100 ms (1 600 échantillons), il n'y a rien à transcrire.
 const MIN_SAMPLES: usize = 1_600;
+/// Fenêtre complète de l'encodeur : 1 500 trames = 30 s (50 trames par seconde).
+const FULL_AUDIO_CTX: i32 = 1_500;
+/// Marge ajoutée à la fenêtre réduite, pour ne pas couper la fin de la phrase.
+const AUDIO_CTX_MARGIN: i32 = 128;
+/// Garde-fou contre les boucles de répétition (une commande tient en bien moins).
+const MAX_TOKENS: i32 = 128;
 
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
@@ -28,7 +34,9 @@ impl WhisperTranscriber {
                 path.display()
             );
         }
-        let ctx = WhisperContext::new_with_params(&path, WhisperContextParameters::default())
+        let mut params = WhisperContextParameters::default();
+        params.flash_attn(true);
+        let ctx = WhisperContext::new_with_params(&path, params)
             .map_err(|e| anyhow::anyhow!("{e:?}"))
             .with_context(|| format!("chargement du modèle Whisper {}", path.display()))?;
         Ok(Self {
@@ -40,6 +48,14 @@ impl WhisperTranscriber {
 
 fn is_too_short(audio: &[f32]) -> bool {
     audio.len() < MIN_SAMPLES
+}
+
+/// Whisper encode toujours 30 s d'audio ; pour une phrase courte, on réduit la
+/// fenêtre à sa longueur réelle (plus une marge). Mesuré sur le PC de Charles
+/// avec `small` : 0,9 à 2 s au lieu de 6 à 9 s (exemple `bench_stt`).
+fn audio_ctx(samples: usize) -> i32 {
+    let frames = i32::try_from(samples.div_ceil(320)).unwrap_or(FULL_AUDIO_CTX); // 16 000 / 50
+    frames.saturating_add(AUDIO_CTX_MARGIN).min(FULL_AUDIO_CTX)
 }
 
 fn expand_home(p: &Path) -> PathBuf {
@@ -76,6 +92,11 @@ impl Transcriber for WhisperTranscriber {
             params.set_no_context(true);
             params.set_single_segment(true);
             params.set_initial_prompt("Jarvis.");
+            params.set_audio_ctx(audio_ctx(audio.len()));
+            // Pas de nouvel essai à température plus haute : avec la fenêtre réduite,
+            // ces essais faisaient monter certaines phrases à 7-12 s.
+            params.set_temperature_inc(0.0);
+            params.set_max_tokens(MAX_TOKENS);
             state
                 .full(params, &audio)
                 .map_err(|e| anyhow::anyhow!("transcription Whisper : {e:?}"))?;
@@ -100,6 +121,14 @@ mod tests {
         assert!(is_too_short(&[]));
         assert!(is_too_short(&vec![0.0; MIN_SAMPLES - 1]));
         assert!(!is_too_short(&vec![0.0; MIN_SAMPLES]));
+    }
+
+    #[test]
+    fn fenetre_ajustee_a_la_longueur() {
+        assert_eq!(audio_ctx(16_000), 50 + AUDIO_CTX_MARGIN);
+        assert_eq!(audio_ctx(16_001), 51 + AUDIO_CTX_MARGIN);
+        assert_eq!(audio_ctx(16_000 * 30), FULL_AUDIO_CTX);
+        assert_eq!(audio_ctx(usize::MAX), FULL_AUDIO_CTX);
     }
 
     #[test]
