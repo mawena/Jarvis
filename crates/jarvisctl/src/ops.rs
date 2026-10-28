@@ -24,6 +24,8 @@ PartOf=graphical-session.target
 Type=simple
 ExecStart=%h/.local/bin/jarvis-brain
 EnvironmentFile=-%h/.config/jarvis/env
+# Données temporaires (espeak-ng de la voix) dans le dossier privé de la session, pas /tmp.
+Environment=TMPDIR=%t
 Restart=on-failure
 RestartSec=3
 
@@ -792,6 +794,7 @@ mod tests {
         assert!(u.starts_with("[Unit]\nDescription=Jarvis — cerveau de l'assistant vocal\n"));
         assert!(u.contains("ExecStart=%h/.local/bin/jarvis-brain\n"));
         assert!(u.contains("EnvironmentFile=-%h/.config/jarvis/env\n"));
+        assert!(u.contains("Environment=TMPDIR=%t\n"));
         assert!(u.contains("Restart=on-failure\nRestartSec=3\n"));
         assert!(u.ends_with("[Install]\nWantedBy=graphical-session.target\n"));
     }

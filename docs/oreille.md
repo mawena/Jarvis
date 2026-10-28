@@ -98,7 +98,9 @@ jarvisctl restart
 Sans la voix (non téléchargée, désactivée ou en panne), le cerveau démarre quand même : les
 commandes s'exécutent et la réponse arrive en texte seul ; un avertissement est journalisé.
 Au premier lancement, les données d'espeak-ng (conversion du texte en sons) sont décompressées
-dans `/tmp/piper-phonemize-espeak-ng-data/` (19 Mo).
+dans le dossier privé de la session : `/run/user/<uid>/piper-phonemize-espeak-ng-data/` (19 Mo,
+en mémoire, recréé à chaque ouverture de session). Le service du cerveau fixe pour cela
+`TMPDIR=%t` ; lancé à la main, il utilise `$TMPDIR` (par défaut `/tmp`).
 
 ## Fichiers créés
 
