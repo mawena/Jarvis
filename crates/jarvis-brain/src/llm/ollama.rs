@@ -92,11 +92,36 @@ impl LlmBackend for OllamaBackend {
             .json()
             .await
             .map_err(|e| LlmError::BadResponse(e.to_string()))?;
-        parse(&v)
+        parse(&v, tools)
     }
 }
 
-fn parse(v: &Value) -> Result<Understanding, LlmError> {
+fn parse_args(raw: Option<&Value>) -> Result<Value, LlmError> {
+    match raw {
+        None | Some(Value::Null) => Ok(json!({})),
+        Some(obj @ Value::Object(_)) => Ok(obj.clone()),
+        Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
+            Ok(obj @ Value::Object(_)) => Ok(obj),
+            _ => Err(LlmError::BadResponse("arguments illisibles".into())),
+        },
+        Some(_) => Err(LlmError::BadResponse("arguments invalides".into())),
+    }
+}
+
+/// Les petits modèles écrivent parfois l'appel d'outil en texte (`{"name": ..., "parameters": ...}`),
+/// seul ou entouré de balises ou de phrases. Renvoie le nom et les arguments bruts s'il y en a un.
+fn text_tool_call(content: &str) -> Option<(String, Value)> {
+    let start = content.find('{')?;
+    let value = serde_json::Deserializer::from_str(&content[start..])
+        .into_iter::<Value>()
+        .next()?
+        .ok()?;
+    let name = value.get("name")?.as_str()?.to_string();
+    let args = value.get("parameters").or_else(|| value.get("arguments"))?;
+    Some((name, args.clone()))
+}
+
+fn parse(v: &Value, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
     let message = v
         .get("message")
         .ok_or_else(|| LlmError::BadResponse("champ message absent".into()))?;
@@ -105,21 +130,24 @@ fn parse(v: &Value) -> Result<Understanding, LlmError> {
             .get("name")
             .and_then(Value::as_str)
             .ok_or_else(|| LlmError::BadResponse("nom d'outil absent".into()))?;
-        let args = match call.get("arguments") {
-            None | Some(Value::Null) => json!({}),
-            Some(obj @ Value::Object(_)) => obj.clone(),
-            Some(Value::String(s)) => match serde_json::from_str::<Value>(s) {
-                Ok(obj @ Value::Object(_)) => obj,
-                _ => return Err(LlmError::BadResponse("arguments illisibles".into())),
-            },
-            Some(_) => return Err(LlmError::BadResponse("arguments invalides".into())),
-        };
+        let args = parse_args(call.get("arguments"))?;
         return Ok(Understanding::Tool(Intent::new(name, args)));
     }
     let content = message
         .get("content")
         .and_then(Value::as_str)
         .ok_or_else(|| LlmError::BadResponse("contenu absent".into()))?;
+    if let Some((name, raw)) = text_tool_call(content) {
+        if !tools.iter().any(|t| t.name == name) {
+            return Err(LlmError::BadResponse(format!(
+                "appel d'un outil inexistant écrit en texte : {name}"
+            )));
+        }
+        return Ok(Understanding::Tool(Intent::new(
+            name,
+            parse_args(Some(&raw))?,
+        )));
+    }
     Ok(Understanding::Answer(content.to_string()))
 }
 
@@ -224,6 +252,50 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got, Understanding::Answer("Il est midi.".into()));
+    }
+
+    async fn reponse_texte(content: &str) -> Result<Understanding, LlmError> {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message": {"content": content}})),
+            )
+            .mount(&server)
+            .await;
+        backend(&server.uri()).understand("x", &[tool()]).await
+    }
+
+    #[tokio::test]
+    async fn appel_d_outil_ecrit_en_texte_connu() {
+        let attendu = Understanding::Tool(Intent::new("app_launch", json!({"name": "firefox"})));
+        for texte in [
+            r#"{"name":"app_launch","parameters":{"name":"firefox"}}"#,
+            r#"{"name":"app_launch","arguments":{"name":"firefox"}}"#,
+            "```json\n{\"name\":\"app_launch\",\"parameters\":{\"name\":\"firefox\"}}\n```",
+            r#"<Tuple>{"name":"app_launch","parameters":{"name":"firefox"}}</Tuple>"#,
+            r#"Voici la commande : {"name": "app_launch", "parameters": {"name": "firefox"}}"#,
+        ] {
+            assert_eq!(reponse_texte(texte).await.unwrap(), attendu, "{texte}");
+        }
+    }
+
+    #[tokio::test]
+    async fn appel_d_outil_ecrit_en_texte_inconnu() {
+        for texte in [
+            r#"{"name":"geocode","parameters":{"query":"Pérou"}}"#,
+            "```\n{\"name\":\"geocode\",\"arguments\":{}}\n```",
+        ] {
+            let err = reponse_texte(texte).await.unwrap_err();
+            assert!(matches!(err, LlmError::BadResponse(_)), "{texte}: {err:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn json_ordinaire_reste_une_reponse() {
+        let got = reponse_texte(r#"Le Pérou a pour capitale Lima {"ok": true}."#)
+            .await
+            .unwrap();
+        assert!(matches!(got, Understanding::Answer(_)));
     }
 
     #[tokio::test]
