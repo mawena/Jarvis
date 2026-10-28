@@ -22,9 +22,11 @@ const SESSION_WINDOW: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Verdict {
-    /// Voix reconnue (similarité cosinus). Une phrase très courte acceptée grâce à la
-    /// session renvoie `Match(1.0)` sans renouveler la fenêtre.
+    /// Voix reconnue (similarité cosinus).
     Match(f32),
+    /// Moins d'une seconde, dans la session : voix non vérifiée. Seuls les raccourcis
+    /// sont permis (jamais l'IA), et la fenêtre n'est pas renouvelée.
+    SessionShort,
     /// Voix inconnue : la phrase doit être ignorée.
     NoMatch(f32),
     /// Moins d'une seconde, hors session : refusée.
@@ -286,7 +288,7 @@ impl SpeakerGate {
                 .unwrap()
                 .is_some_and(|t| t.elapsed() <= SESSION_WINDOW);
             return if in_session {
-                Verdict::Match(1.0)
+                Verdict::SessionShort
             } else {
                 Verdict::TooShort
             };
@@ -496,7 +498,17 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
         assert!(matches!(g.check(&audio(0, 3.0)), Verdict::Match(_)));
-        assert!(matches!(g.check(&audio(2, 0.5)), Verdict::Match(_)));
+        assert_eq!(g.check(&audio(2, 0.5)), Verdict::SessionShort);
+    }
+
+    #[test]
+    fn phrase_courte_ne_renouvelle_pas_la_session() {
+        let d = tempfile::tempdir().unwrap();
+        let g = enrolled(d.path());
+        let start = Instant::now() - SESSION_WINDOW + Duration::from_secs(5);
+        *g.session.lock().unwrap() = Some(start);
+        assert_eq!(g.check(&audio(0, 0.5)), Verdict::SessionShort);
+        assert_eq!(*g.session.lock().unwrap(), Some(start));
     }
 
     #[test]

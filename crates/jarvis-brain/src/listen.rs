@@ -2,7 +2,7 @@
 
 use crate::brain::Brain;
 use crate::ducking::Ducker;
-use crate::fastpath::match_ear_command;
+use crate::fastpath::{match_ear_command, match_fast};
 use crate::speaker::{SpeakerGate, SpeakerState, Verdict};
 use crate::stt::Transcriber;
 use jarvis_protocol::{ControlResponse, EarAction};
@@ -82,6 +82,8 @@ impl ListenService {
         }
         // `Unavailable { enrolled: false }` : jamais enrôlé, tout est accepté (voir
         // `SpeakerState::unavailable`).
+        // Phrase courte acceptée par la session, sans vraie vérification : raccourcis seuls.
+        let mut unverified = false;
         if let SpeakerState::Ready(gate) = &self.speaker {
             let (g, audio) = (gate.clone(), samples.clone());
             // L'empreinte prend des dizaines de ms : hors du runtime.
@@ -89,9 +91,8 @@ impl ListenService {
                 .await
                 .unwrap_or(Verdict::NoMatch(0.0));
             match verdict {
-                // `Match(1.0)` est la valeur sentinelle d'une phrase courte acceptée par la
-                // session : ce n'est pas un vrai score, on ne le journalise pas.
                 Verdict::Match(_) | Verdict::NotEnrolled => {}
+                Verdict::SessionShort => unverified = true,
                 Verdict::NoMatch(score) => {
                     info!("voix non reconnue (score {score:.2})");
                     return heard("", "", None);
@@ -127,10 +128,22 @@ impl ListenService {
                 _ => heard("", "", None),
             };
         }
+        if unverified && action.is_none() && match_fast(&text).is_none() {
+            // Jamais l'IA pour une voix non vérifiée : ignorée comme une voix inconnue.
+            info!("phrase courte non vérifiée, ignorée");
+            return heard("", "", None);
+        }
         info!(phrase = %text, "texte entendu");
         match action {
             Some(EarAction::Mute) => heard(&text, "Écoute coupée.", Some(EarAction::Mute)),
             Some(EarAction::Unmute) => heard(&text, "L'écoute est déjà active.", None),
+            None if unverified => {
+                let speech = match self.brain.handle_fast(&text).await {
+                    Some(r) => r.speech,
+                    None => String::new(),
+                };
+                heard(&text, &speech, None)
+            }
             None => {
                 let speech = self.brain.handle_text(&text).await.speech;
                 heard(&text, &speech, None)
@@ -152,17 +165,26 @@ mod tests {
         skill: Arc<FakeSkill>,
         ducker: Arc<FakeDucker>,
         stt: Arc<FakeTranscriber>,
+        /// IA locale et en ligne (la même doublure).
+        llm: Arc<FakeLlm>,
         _dir: tempfile::TempDir,
     }
 
-    fn brain(dir: &tempfile::TempDir, skill: Arc<FakeSkill>) -> Arc<Brain> {
-        let llm = || Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))));
+    fn llm() -> Arc<FakeLlm> {
+        Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))))
+    }
+
+    fn brain_with(dir: &tempfile::TempDir, skill: Arc<FakeSkill>, llm: Arc<FakeLlm>) -> Arc<Brain> {
         Arc::new(Brain::new(
             vec![skill],
-            llm(),
-            llm(),
+            llm.clone(),
+            llm,
             Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
         ))
+    }
+
+    fn brain(dir: &tempfile::TempDir, skill: Arc<FakeSkill>) -> Arc<Brain> {
+        brain_with(dir, skill, llm())
     }
 
     fn setup(stt: FakeTranscriber) -> Setup {
@@ -170,11 +192,17 @@ mod tests {
         let skill = Arc::new(FakeSkill::new(&["media_next"]));
         let ducker = Arc::new(FakeDucker::new());
         let stt = Arc::new(stt);
+        let llm = llm();
         Setup {
-            service: ListenService::new(brain(&dir, skill.clone()), stt.clone(), ducker.clone()),
+            service: ListenService::new(
+                brain_with(&dir, skill.clone(), llm.clone()),
+                stt.clone(),
+                ducker.clone(),
+            ),
             skill,
             ducker,
             stt,
+            llm,
             _dir: dir,
         }
     }
@@ -201,7 +229,11 @@ mod tests {
     }
 
     fn with_gate(enrolled: bool) -> Setup {
-        let mut s = setup(FakeTranscriber::new("suivant"));
+        with_gate_text(enrolled, "suivant")
+    }
+
+    fn with_gate_text(enrolled: bool, text: &str) -> Setup {
+        let mut s = setup(FakeTranscriber::new(text));
         let path = s._dir.path().join("voiceprint/charles.json");
         let gate = SpeakerGate::new(Arc::new(ByFirstSample), path, 0.55, 0.65);
         if enrolled {
@@ -230,6 +262,49 @@ mod tests {
         let r = s.service.listen(&voice(0), false).await;
         assert_eq!(r, heard("suivant", "ok", None));
         assert_eq!(s.stt.calls(), 1);
+    }
+
+    /// Phrase de moins d'une seconde, voix inconnue : acceptée seulement par la session.
+    fn short_voice() -> Vec<i16> {
+        let mut a = vec![0i16; 8_000];
+        a[0] = 20_000;
+        a
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_suivant_executee() {
+        let s = with_gate(true);
+        s.service.listen(&voice(0), false).await;
+        assert_eq!(s.skill.calls().len(), 1);
+        let r = s.service.listen(&short_voice(), false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.skill.calls().len(), 2);
+        assert_eq!(s.llm.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_question_libre_ignoree() {
+        let s = with_gate_text(true, "quel temps fait-il");
+        s.service.listen(&voice(0), false).await;
+        assert_eq!(s.llm.calls(), 1);
+        let r = s.service.listen(&short_voice(), false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.llm.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_coupe_l_ecoute() {
+        let s = with_gate_text(true, "Jarvis, coupe l'écoute.");
+        s.service.listen(&voice(0), false).await;
+        let r = s.service.listen(&short_voice(), false).await;
+        assert_eq!(
+            r,
+            heard(
+                "Jarvis, coupe l'écoute.",
+                "Écoute coupée.",
+                Some(EarAction::Mute)
+            )
+        );
     }
 
     #[tokio::test]
