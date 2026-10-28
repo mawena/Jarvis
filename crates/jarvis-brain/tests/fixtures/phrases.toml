@@ -141,21 +141,21 @@ args = {}
 fast = false
 
 [[phrase]]
-text = "passe sur l'IA en ligne s'il te plaît"
-tool = "set_mode"
-args = { mode = "online" }
-fast = false
-
-[[phrase]]
-text = "repasse en local"
-tool = "set_mode"
-args = { mode = "local" }
-fast = false
-
-[[phrase]]
-text = "fais-moi un point sur ton état"
-tool = "status"
+text = "mets un peu plus de son s'il te plaît"
+tool = "volume_up"
 args = {}
+fast = false
+
+[[phrase]]
+text = "mets la musique en pause un instant"
+tool = "media_pause"
+args = {}
+fast = false
+
+[[phrase]]
+text = "j'aimerais bien avoir la calculatrice"
+tool = "app_launch"
+args = { name = "calculatrice" }
 fast = false
 
 [[phrase]]

@@ -14,6 +14,8 @@ use tracing::{debug, info, warn};
 
 pub struct Brain {
     skills: Vec<Arc<dyn Skill>>,
+    /// Compétence système : appelable par les raccourcis, jamais proposée à l'IA.
+    system: Arc<SystemSkill>,
     local: Arc<dyn LlmBackend>,
     online: Arc<dyn LlmBackend>,
     modes: Arc<ModeStore>,
@@ -29,14 +31,14 @@ enum Outcome {
 
 impl Brain {
     pub fn new(
-        mut skills: Vec<Arc<dyn Skill>>,
+        skills: Vec<Arc<dyn Skill>>,
         local: Arc<dyn LlmBackend>,
         online: Arc<dyn LlmBackend>,
         modes: Arc<ModeStore>,
     ) -> Brain {
-        skills.push(Arc::new(SystemSkill::new(modes.clone())));
         Brain {
             skills,
+            system: Arc::new(SystemSkill::new(modes.clone())),
             local,
             online,
             modes,
@@ -50,7 +52,8 @@ impl Brain {
         self
     }
 
-    /// Tous les outils que l'IA peut appeler.
+    /// Les outils proposés à l'IA : ceux des compétences, sans les outils système
+    /// (`set_mode`, `status`), que les raccourcis couvrent.
     pub fn tools(&self) -> Vec<ToolSpec> {
         self.skills.iter().flat_map(|s| s.tools()).collect()
     }
@@ -102,9 +105,11 @@ impl Brain {
     }
 
     async fn run_intent(&self, intent: Intent) -> Outcome {
+        let system: Arc<dyn Skill> = self.system.clone();
         let skill = self
             .skills
             .iter()
+            .chain(std::iter::once(&system))
             .find(|s| s.tools().iter().any(|t| t.name == intent.tool));
         let Some(skill) = skill else {
             return Outcome::Reply(Reply::new(UNKNOWN));
@@ -319,6 +324,21 @@ mod tests {
             r.speech,
             "Ça n'a pas marché : la commande a pris trop de temps."
         );
+    }
+
+    #[test]
+    fn outils_de_l_ia_sans_outils_systeme() {
+        let s = setup(answer("x"), answer("y"));
+        let names: Vec<String> = s.brain.tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, vec!["media_next".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn les_outils_envoyes_a_l_ia_excluent_le_systeme() {
+        let s = setup(answer("x"), answer("y"));
+        s.brain.handle_text("quel temps fait-il").await;
+        let sent = s.local.last_tools();
+        assert_eq!(sent, vec!["media_next".to_string()]);
     }
 
     #[tokio::test]
