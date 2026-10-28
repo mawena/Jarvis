@@ -185,6 +185,42 @@ async fn server_listen_et_status_local_model() {
     }
 }
 
+/// Une seconde d'audio (i16 16 kHz) dont le premier échantillon désigne l'empreinte factice.
+fn second(id: i16) -> Vec<i16> {
+    let mut a = vec![0i16; 16_000];
+    a[0] = id;
+    a
+}
+
+#[tokio::test]
+async fn enroll_voice_modele_introuvable() {
+    use jarvis_brain::server::{SpeakerState, serve_with_state};
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run/brain.sock");
+    let b = brain(dir.path());
+    let l = listen(&b);
+    let s = socket.clone();
+    tokio::spawn(async move { serve_with_state(b, l, SpeakerState::Unavailable, &s).await });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let r = Client::connect(&socket)
+        .await
+        .send(ControlRequest::EnrollVoice {
+            samples: vec![encode_pcm(&second(0))],
+        })
+        .await;
+    assert_eq!(
+        r,
+        ControlResponse::Error {
+            message: "Empreinte vocale indisponible : modèle introuvable (voir scripts/download-models.sh speaker).".into()
+        }
+    );
+}
+
 #[tokio::test]
 async fn enroll_voice_par_le_socket() {
     use jarvis_brain::server::serve_with_speaker;
@@ -213,7 +249,12 @@ async fn enroll_voice_par_le_socket() {
     let mut c = Client::connect(&socket).await;
     let r = c
         .send(ControlRequest::EnrollVoice {
-            samples: vec![encode_pcm(&[0, 1, 2]), encode_pcm(&[0, 5])],
+            // Un échantillon de moins d'1 s est ignoré.
+            samples: vec![
+                encode_pcm(&second(0)),
+                encode_pcm(&second(0)),
+                encode_pcm(&[0, 5]),
+            ],
         })
         .await;
     assert_eq!(
@@ -223,6 +264,19 @@ async fn enroll_voice_par_le_socket() {
         }
     );
     assert!(print.is_file());
+    // Aucun échantillon valide : erreur ; trop d'échantillons : erreur.
+    let r = c
+        .send(ControlRequest::EnrollVoice {
+            samples: vec![encode_pcm(&[0, 5])],
+        })
+        .await;
+    assert!(matches!(r, ControlResponse::Error { .. }), "{r:?}");
+    let r = c
+        .send(ControlRequest::EnrollVoice {
+            samples: vec![encode_pcm(&second(0)); 21],
+        })
+        .await;
+    assert!(matches!(r, ControlResponse::Error { .. }), "{r:?}");
     let r = c
         .send(ControlRequest::EnrollVoice {
             samples: vec!["!!".into()],

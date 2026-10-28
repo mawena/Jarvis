@@ -6,7 +6,7 @@ pub mod sherpa;
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use std::io::Write;
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -64,6 +64,11 @@ fn normalize(v: &mut [f32]) {
     }
 }
 
+/// Vecteur exploitable : non vide, fini, de norme non nulle.
+fn is_usable(v: &[f32]) -> bool {
+    !v.is_empty() && v.iter().all(|x| x.is_finite()) && v.iter().any(|&x| x != 0.0)
+}
+
 fn cosine(a: &[f32], b: &[f32]) -> f32 {
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let na = a.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -85,13 +90,24 @@ impl SpeakerGate {
     ) -> Self {
         let print = match std::fs::read_to_string(&path) {
             Ok(t) => match serde_json::from_str::<VoicePrint>(&t) {
-                Ok(p) => Some(p),
+                Ok(p) if is_usable(&p.embedding) => Some(p),
+                Ok(_) => {
+                    warn!(
+                        chemin = %path.display(),
+                        "empreinte vocale invalide (vide, non finie ou nulle), ignorée"
+                    );
+                    None
+                }
                 Err(e) => {
-                    warn!(erreur = %e, "empreinte vocale illisible, ignorée");
+                    warn!(chemin = %path.display(), erreur = %e, "empreinte vocale illisible, ignorée");
                     None
                 }
             },
-            Err(_) => None,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => {
+                warn!(chemin = %path.display(), erreur = %e, "empreinte vocale illisible, ignorée");
+                None
+            }
         };
         Self {
             verifier,
@@ -126,6 +142,7 @@ impl SpeakerGate {
         let mut mean: Vec<f32> = Vec::new();
         for audio in samples {
             let mut e = self.verifier.embed(audio)?;
+            anyhow::ensure!(is_usable(&e), "empreinte invalide (valeurs non finies ou nulle)");
             normalize(&mut e);
             if mean.is_empty() {
                 mean = vec![0.0; e.len()];
@@ -134,6 +151,10 @@ impl SpeakerGate {
             mean.iter_mut().zip(&e).for_each(|(m, x)| *m += x);
         }
         normalize(&mut mean);
+        anyhow::ensure!(
+            is_usable(&mean),
+            "empreinte invalide (valeurs non finies ou norme nulle)"
+        );
         let print = VoicePrint {
             embedding: mean,
             samples: samples.len(),
@@ -149,30 +170,48 @@ impl SpeakerGate {
     }
 
     fn save(&self, print: &VoicePrint) -> anyhow::Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("création de {}", parent.display()))?;
-        }
+        anyhow::ensure!(
+            is_usable(&print.embedding),
+            "empreinte invalide, non enregistrée"
+        );
+        let parent = self
+            .path
+            .parent()
+            .context("chemin d'empreinte sans dossier")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("création de {}", parent.display()))?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .with_context(|| format!("permissions de {}", parent.display()))?;
         let json = serde_json::to_string(print)?;
-        let mut f = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(&self.path)
-            .with_context(|| format!("écriture de {}", self.path.display()))?;
-        // `mode` ne s'applique qu'à la création : on force aussi pour un fichier existant.
-        std::fs::set_permissions(
-            &self.path,
-            std::os::unix::fs::PermissionsExt::from_mode(0o600),
-        )?;
-        f.write_all(json.as_bytes())?;
+        // Écriture atomique : fichier temporaire 0600 dans le même dossier, puis `rename`.
+        let tmp = parent.join(format!(".charles.json.{}.tmp", std::process::id()));
+        let _ = std::fs::remove_file(&tmp);
+        let written = (|| -> std::io::Result<()> {
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
+            f.write_all(json.as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.path)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("écriture de {}", self.path.display()));
+        }
         Ok(())
     }
 
     pub fn check(&self, audio: &[f32]) -> Verdict {
-        let guard = self.print.read().unwrap();
-        let Some(print) = guard.as_ref() else {
+        // Copie de l'empreinte : le verrou n'est pas tenu pendant l'inférence.
+        let reference = self
+            .print
+            .read()
+            .unwrap()
+            .as_ref()
+            .map(|p| p.embedding.clone());
+        let Some(reference) = reference else {
             if !self.warned.swap(true, Ordering::Relaxed) {
                 warn!("aucune empreinte vocale enregistrée : toutes les voix sont acceptées");
             }
@@ -196,7 +235,7 @@ impl SpeakerGate {
             self.strict_threshold
         };
         let score = match self.verifier.embed(audio) {
-            Ok(e) => cosine(&e, &print.embedding),
+            Ok(e) => cosine(&e, &reference),
             Err(e) => {
                 warn!(erreur = %e, "empreinte de la phrase impossible");
                 return Verdict::NoMatch(0.0);
@@ -216,7 +255,6 @@ impl SpeakerGate {
 mod tests {
     use super::*;
     use crate::testing::FakeVerifier;
-    use std::os::unix::fs::PermissionsExt;
 
     /// Audio factice dont le premier échantillon désigne l'empreinte de `FakeVerifier`.
     fn audio(id: usize, secs: f32) -> Vec<f32> {
@@ -277,6 +315,62 @@ mod tests {
         // Rechargée au redémarrage.
         let again = gate(d.path(), vectors());
         assert!(again.is_enrolled());
+    }
+
+    #[test]
+    fn empreinte_non_finie_ou_nulle_refusee() {
+        let d = tempfile::tempdir().unwrap();
+        let g = gate(
+            d.path(),
+            vec![vec![f32::NAN, 1.0], vec![0.0, 0.0], vec![f32::INFINITY, 0.0]],
+        );
+        for id in 0..3 {
+            assert!(g.enroll(&[audio(id, 2.0)]).is_err(), "id {id}");
+        }
+        assert!(!g.is_enrolled());
+        assert!(!g.path().exists());
+        let bad = VoicePrint {
+            embedding: vec![f32::NAN],
+            samples: 1,
+            created: String::new(),
+        };
+        assert!(g.save(&bad).is_err());
+    }
+
+    #[test]
+    fn fichier_invalide_ignore_au_chargement() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("voiceprint/charles.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        for contenu in [
+            "pas du json",
+            r#"{"embedding":[null,1.0],"samples":1,"created":"0"}"#,
+            r#"{"embedding":[],"samples":1,"created":"0"}"#,
+            r#"{"embedding":[0.0,0.0],"samples":1,"created":"0"}"#,
+        ] {
+            std::fs::write(&path, contenu).unwrap();
+            let g = gate(d.path(), vectors());
+            assert!(!g.is_enrolled(), "{contenu}");
+            assert_eq!(g.check(&audio(2, 3.0)), Verdict::NotEnrolled);
+        }
+    }
+
+    #[test]
+    fn ecriture_atomique_dossier_0700() {
+        let d = tempfile::tempdir().unwrap();
+        let g = enrolled(d.path());
+        let dir = g.path().parent().unwrap();
+        let mode = std::fs::metadata(dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Aucun fichier temporaire ne reste, et un réenrôlement remplace le fichier.
+        g.enroll(&[audio(3, 2.0)]).unwrap();
+        let names: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(names, ["charles.json"]);
+        let mode = std::fs::metadata(g.path()).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

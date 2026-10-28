@@ -22,11 +22,41 @@ pub async fn serve(
     serve_with_speaker(brain, listen, None, socket).await
 }
 
+/// État de la vérification du locuteur côté serveur.
+#[derive(Clone)]
+pub enum SpeakerState {
+    /// Désactivée dans la configuration.
+    Disabled,
+    /// Activée, mais le modèle est introuvable ou inutilisable.
+    Unavailable,
+    Ready(Arc<SpeakerGate>),
+}
+
+impl SpeakerState {
+    pub fn gate(&self) -> Option<&Arc<SpeakerGate>> {
+        match self {
+            SpeakerState::Ready(g) => Some(g),
+            _ => None,
+        }
+    }
+}
+
 /// Comme [`serve`], avec la vérification du locuteur (`EnrollVoice`).
 pub async fn serve_with_speaker(
     brain: Arc<Brain>,
     listen: Arc<ListenService>,
     speaker: Option<Arc<SpeakerGate>>,
+    socket: &Path,
+) -> anyhow::Result<()> {
+    let state = speaker.map_or(SpeakerState::Disabled, SpeakerState::Ready);
+    serve_with_state(brain, listen, state, socket).await
+}
+
+/// Comme [`serve_with_speaker`], en distinguant « désactivée » de « modèle introuvable ».
+pub async fn serve_with_state(
+    brain: Arc<Brain>,
+    listen: Arc<ListenService>,
+    speaker: SpeakerState,
     socket: &Path,
 ) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
@@ -72,14 +102,14 @@ async fn bind(socket: &Path) -> anyhow::Result<UnixListener> {
 async fn handle_client(
     brain: Arc<Brain>,
     listen: Arc<ListenService>,
-    speaker: Option<Arc<SpeakerGate>>,
+    speaker: SpeakerState,
     stream: UnixStream,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {
         let response = match serde_json::from_str::<ControlRequest>(&line) {
-            Ok(request) => respond(&brain, &listen, speaker.as_ref(), request).await,
+            Ok(request) => respond(&brain, &listen, &speaker, request).await,
             Err(_) => ControlResponse::Error {
                 message: "requête invalide".into(),
             },
@@ -94,7 +124,7 @@ async fn handle_client(
 async fn respond(
     brain: &Brain,
     listen: &ListenService,
-    speaker: Option<&Arc<SpeakerGate>>,
+    speaker: &SpeakerState,
     request: ControlRequest,
 ) -> ControlResponse {
     match request {
@@ -130,25 +160,49 @@ fn status(brain: &Brain) -> ControlResponse {
     }
 }
 
-async fn enroll_voice(speaker: Option<&Arc<SpeakerGate>>, samples: Vec<String>) -> ControlResponse {
+/// Bornes d'un enrôlement : au plus 20 échantillons de 30 s ; moins d'1 s, ignoré.
+const MAX_ENROLL_SAMPLES: usize = 20;
+const MAX_ENROLL_SECONDS: usize = 30;
+const MIN_ENROLL_SECONDS: usize = 1;
+const RATE: usize = 16_000;
+
+async fn enroll_voice(speaker: &SpeakerState, samples: Vec<String>) -> ControlResponse {
     let error = |message: &str| ControlResponse::Error {
         message: message.into(),
     };
-    let Some(gate) = speaker else {
-        return error("L'empreinte vocale n'est pas activée.");
+    let gate = match speaker {
+        SpeakerState::Disabled => return error("L'empreinte vocale n'est pas activée."),
+        SpeakerState::Unavailable => {
+            return error(
+                "Empreinte vocale indisponible : modèle introuvable (voir scripts/download-models.sh speaker).",
+            );
+        }
+        SpeakerState::Ready(g) => g.clone(),
     };
+    if samples.len() > MAX_ENROLL_SAMPLES {
+        return error("Trop d'échantillons (20 au plus).");
+    }
     let mut audio = Vec::with_capacity(samples.len());
     for s in &samples {
         match decode_pcm(s) {
-            Ok(pcm) => audio.push(
-                pcm.iter()
-                    .map(|&v| f32::from(v) / 32768.0)
-                    .collect::<Vec<f32>>(),
-            ),
+            Ok(pcm) => {
+                // Trop court : ignoré. Trop long : tronqué à 30 s.
+                if pcm.len() < MIN_ENROLL_SECONDS * RATE {
+                    continue;
+                }
+                audio.push(
+                    pcm.iter()
+                        .take(MAX_ENROLL_SECONDS * RATE)
+                        .map(|&v| f32::from(v) / 32768.0)
+                        .collect::<Vec<f32>>(),
+                );
+            }
             Err(_) => return error("audio invalide"),
         }
     }
-    let gate = gate.clone();
+    if audio.is_empty() {
+        return error("Aucun échantillon exploitable (1 s au moins chacun).");
+    }
     match tokio::task::spawn_blocking(move || gate.enroll(&audio)).await {
         Ok(Ok(n)) => {
             info!(echantillons = n, "empreinte vocale enregistrée");
