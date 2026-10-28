@@ -73,7 +73,7 @@ impl Skill for AppsSkill {
                 .map(|o| o.success)
                 .unwrap_or(false);
             if focused {
-                return Ok(Reply::done(format!("{} est au premier plan.", app.name)));
+                return Ok(Reply::done(format!("Voici {}.", app.name)));
             }
         }
         self.runner
@@ -175,7 +175,7 @@ mod tests {
             .call("app_launch", serde_json::json!({"name": "spotify"}))
             .await
             .unwrap();
-        assert_eq!(r.speech, "Spotify est au premier plan.");
+        assert_eq!(r.speech, "Voici Spotify.");
         assert_eq!(r.outcome, crate::Outcome::Done);
         assert_eq!(
             runner.calls(),

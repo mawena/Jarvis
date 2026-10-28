@@ -6,6 +6,7 @@ use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
+use jarvis_brain::persona::Persona;
 use jarvis_brain::server::{SpeakerState, serve_with_voice};
 use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
 use jarvis_brain::stt::{Transcriber, whisper::WhisperTranscriber};
@@ -45,7 +46,8 @@ async fn main() -> anyhow::Result<()> {
             Arc::new(ClaudeBackend::from_env(&config.online, &config.address)),
             modes,
         )
-        .with_local_model(config.local.model.clone()),
+        .with_local_model(config.local.model.clone())
+        .with_persona(Persona::new(config.address.clone())),
     );
     if brain.mode() == Mode::Local {
         let tools = brain.tools();

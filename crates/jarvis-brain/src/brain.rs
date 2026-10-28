@@ -5,6 +5,7 @@ use crate::fastpath::{BrainCommand, match_brain_command, match_confirmation, mat
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::mode_store::ModeStore;
+use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
 use jarvis_protocol::Mode;
 use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
@@ -65,6 +66,8 @@ pub struct Brain {
     pending: Mutex<Option<Pending>>,
     /// Dernière phrase dite (non vide), pour « répète ».
     last_speech: Mutex<Option<String>>,
+    /// Ton des phrases fixes (nom d'adresse).
+    persona: Persona,
 }
 
 /// Résultat d'une intention.
@@ -92,7 +95,18 @@ impl Brain {
             clock: Arc::new(SystemClock),
             pending: Mutex::new(None),
             last_speech: Mutex::new(None),
+            persona: Persona::default(),
         }
+    }
+
+    /// Ton de Jarvis (nom d'adresse des phrases fixes).
+    pub fn with_persona(mut self, persona: Persona) -> Brain {
+        self.persona = persona;
+        self
+    }
+
+    pub fn persona(&self) -> &Persona {
+        &self.persona
     }
 
     /// Remplace l'horloge (tests du délai de confirmation).
@@ -255,7 +269,7 @@ impl Brain {
                         Step::Answer(a) => a.reply,
                         Step::NotFound(m) => Reply::failed(m),
                     },
-                    None => Reply::failed(UNKNOWN),
+                    None => Reply::failed(self.persona.addressed(UNKNOWN)),
                 }
             }
             (Some(p), Some(false)) => {
@@ -277,7 +291,7 @@ impl Brain {
             info!("action en attente annulée");
             Reply::new(CANCELLED).into()
         } else {
-            Reply::new(NOTHING_TO_CANCEL).into()
+            Reply::new(self.persona.addressed(NOTHING_TO_CANCEL)).into()
         }
     }
 
@@ -328,12 +342,13 @@ impl Brain {
     /// Exécute l'intention, ou la met en attente d'un « oui » si l'outil est risqué.
     async fn run_or_ask(&self, intent: Intent) -> Step {
         let Some((skill, spec)) = self.find(&intent.tool) else {
-            return Step::Answer(Reply::failed(UNKNOWN).into());
+            return Step::Answer(Reply::failed(self.persona.addressed(UNKNOWN)).into());
         };
         if spec.risk == Risk::Risky {
             let question = skill
                 .confirmation(&intent.tool, &intent.args)
                 .unwrap_or_else(|| format!("{} Je lance ?", spec.description.trim()));
+            let question = self.persona.addressed(&question);
             info!(tool = %intent.tool, "action risquée : confirmation demandée");
             *self.pending.lock().unwrap() = Some(Pending {
                 intent,
@@ -349,6 +364,7 @@ impl Brain {
     }
 
     async fn execute(&self, skill: &dyn Skill, intent: Intent) -> Step {
+        let tool = intent.tool.clone();
         let call = skill.call(&intent.tool, intent.args);
         let result = match tokio::time::timeout(self.skill_timeout, call).await {
             Ok(r) => r,
@@ -360,9 +376,13 @@ impl Brain {
         let reply = match result {
             Ok(reply) => reply,
             Err(SkillError::NotFound(m)) => return Step::NotFound(m),
-            Err(SkillError::UnknownTool(_) | SkillError::BadArgs(_)) => Reply::failed(UNKNOWN),
+            Err(SkillError::UnknownTool(_) | SkillError::BadArgs(_)) => {
+                Reply::failed(self.persona.addressed(UNKNOWN))
+            }
             Err(SkillError::Failed(detail)) => {
-                Reply::failed(format!("Ça n'a pas marché : {detail}."))
+                // Le détail est technique : journalisé, pas dit.
+                warn!(tool = %tool, detail = %detail, "échec de la compétence");
+                Reply::failed(self.persona.addressed(FAILED))
             }
         };
         Step::Answer(reply.into())
@@ -373,32 +393,36 @@ const SKILL_TIMEOUT: Duration = Duration::from_secs(5);
 /// Délai pour commencer à répondre à une question : les 8 s de l'oreille après la
 /// question, plus le temps de la synthétiser et de la dire.
 pub const REPLY_WINDOW: Duration = Duration::from_secs(8 + 4);
-const UNKNOWN: &str = "Je ne sais pas faire ça.";
-const BAD_RESPONSE: &str = "Je n'ai pas compris la réponse de l'IA.";
-const TOO_SLOW: &str = "Ça n'a pas marché : la commande a pris trop de temps.";
-const CONFIRM_ONLINE: &str = "Dites « passe en mode en ligne » pour confirmer.";
-const CANCELLED: &str = "D'accord, j'annule.";
+// Phrases fixes, brèves et polies. Celles marquées « adressée » reçoivent le nom
+// d'adresse (`Persona::addressed`) ; les autres non, par parcimonie.
+/// Adressée.
+const UNKNOWN: &str = "Je crains de ne pas savoir faire cela.";
+const BAD_RESPONSE: &str = "Pardon, la réponse de l'IA est incompréhensible.";
+const TOO_SLOW: &str = "Désolé, la commande a pris trop de temps.";
+/// Adressée.
+const FAILED: &str = "Désolé, cela n'a pas fonctionné.";
+const CONFIRM_ONLINE: &str = "Pour cela, dites « passe en mode en ligne ».";
+const CANCELLED: &str = "Entendu, j'annule.";
+/// Adressée.
 const NOTHING_TO_CANCEL: &str = "Il n'y a rien à annuler.";
 const NOTHING_TO_CONFIRM: &str = "Il n'y a rien à confirmer.";
 const NOTHING_SAID: &str = "Je n'ai encore rien dit.";
-const TOO_LATE: &str = "Trop tard : je ne fais rien.";
-const NOT_DONE: &str = "Bien, je ne fais rien.";
+const TOO_LATE: &str = "Le délai est passé, je ne fais rien.";
+const NOT_DONE: &str = "Sans réponse claire, je ne fais rien.";
+
+const LOCAL_UNREACHABLE: &str = "L'IA locale ne répond pas. Ollama est-il lancé ?";
+const ONLINE_UNREACHABLE: &str =
+    "L'IA en ligne est injoignable. Dites « passe en mode local » pour vous en passer.";
+const LOCAL_REJECTED: &str = "L'IA locale refuse la demande. Le modèle est-il installé ?";
 
 fn llm_error_phrase(e: &LlmError, mode: Mode) -> String {
     match (e, mode) {
-        (LlmError::Unreachable(_), Mode::Local) => {
-            "L'IA locale ne répond pas. Ollama est-il lancé ?".into()
-        }
-        (LlmError::Unreachable(_), Mode::Online) => {
-            "Je n'arrive pas à joindre l'IA en ligne. Dites « passe en mode local » pour continuer sans elle."
-                .into()
-        }
-        (LlmError::Rejected(_), Mode::Local) => {
-            "L'IA locale a refusé la demande (modèle installé ?).".into()
-        }
-        (LlmError::Rejected(_), Mode::Online) => "La clé de l'IA en ligne est refusée.".into(),
+        (LlmError::Unreachable(_), Mode::Local) => LOCAL_UNREACHABLE.into(),
+        (LlmError::Unreachable(_), Mode::Online) => ONLINE_UNREACHABLE.into(),
+        (LlmError::Rejected(_), Mode::Local) => LOCAL_REJECTED.into(),
+        (LlmError::Rejected(_), Mode::Online) => "L'IA en ligne refuse la clé.".into(),
         (LlmError::MissingApiKey(var), _) => {
-            format!("La clé de l'IA en ligne est absente : définissez {var}.")
+            format!("Il manque la clé de l'IA en ligne, à définir dans {var}.")
         }
         (LlmError::BadResponse(_), _) => BAD_RESPONSE.into(),
     }
@@ -495,7 +519,7 @@ mod tests {
     async fn switch_vocal_persiste() {
         let s = setup(answer("x"), answer("y"));
         let r = s.brain.handle_text("passe en mode en ligne").await;
-        assert_eq!(r.speech, "Mode en ligne activé.");
+        assert_eq!(r.speech, "Je passe en mode en ligne.");
         assert_eq!(
             ModeStore::new(s.path.clone(), Mode::Local).get(),
             Mode::Online
@@ -509,7 +533,7 @@ mod tests {
             answer("y"),
         );
         let r = s.brain.handle_text("lance une fusée").await;
-        assert_eq!(r.speech, "Je ne sais pas faire ça.");
+        assert_eq!(r.speech, "Je crains de ne pas savoir faire cela, Monsieur.");
     }
 
     #[tokio::test]
@@ -533,11 +557,11 @@ mod tests {
         let r = s.brain.handle_text("quel temps fait-il").await;
         assert_eq!(
             r.speech,
-            "L'IA locale a refusé la demande (modèle installé ?)."
+            "L'IA locale refuse la demande. Le modèle est-il installé ?"
         );
         s.brain.set_mode(Mode::Online).unwrap();
         let r = s.brain.handle_text("quel temps fait-il").await;
-        assert_eq!(r.speech, "La clé de l'IA en ligne est refusée.");
+        assert_eq!(r.speech, "L'IA en ligne refuse la clé.");
     }
 
     fn not_found_skill() -> Arc<FakeSkill> {
@@ -584,10 +608,7 @@ mod tests {
         let (brain, _dir) = brain_with(skill, Arc::new(answer("x")));
         let brain = brain.with_skill_timeout(Duration::from_millis(30));
         let r = brain.handle_text("suivant").await;
-        assert_eq!(
-            r.speech,
-            "Ça n'a pas marché : la commande a pris trop de temps."
-        );
+        assert_eq!(r.speech, "Désolé, la commande a pris trop de temps.");
     }
 
     #[test]
@@ -613,7 +634,7 @@ mod tests {
         ));
         let s = setup(FakeLlm::new(Ok(set_online)), answer("y"));
         let r = s.brain.handle_text("passe sur l'IA en ligne").await;
-        assert_eq!(r.speech, "Dites « passe en mode en ligne » pour confirmer.");
+        assert_eq!(r.speech, "Pour cela, dites « passe en mode en ligne ».");
         assert_eq!(s.brain.mode(), Mode::Local);
     }
 
@@ -627,7 +648,7 @@ mod tests {
         let r = s.brain.handle_text("quel temps fait-il").await;
         assert_eq!(
             r.speech,
-            "Je n'arrive pas à joindre l'IA en ligne. Dites « passe en mode local » pour continuer sans elle."
+            "L'IA en ligne est injoignable. Dites « passe en mode local » pour vous en passer."
         );
         assert_eq!(s.brain.mode(), Mode::Online);
         assert_eq!(s.local.calls(), 0);
@@ -642,12 +663,12 @@ mod tests {
         let r = s.brain.handle_text("bonjour").await;
         assert_eq!(
             r.speech,
-            "La clé de l'IA en ligne est absente : définissez ANTHROPIC_API_KEY."
+            "Il manque la clé de l'IA en ligne, à définir dans ANTHROPIC_API_KEY."
         );
 
         let s = setup(answer("  "), answer("y"));
         let r = s.brain.handle_text("bonjour").await;
-        assert_eq!(r.speech, "Je n'ai pas compris la réponse de l'IA.");
+        assert_eq!(r.speech, "Pardon, la réponse de l'IA est incompréhensible.");
 
         let dir = tempfile::tempdir().unwrap();
         let skill = Arc::new(
@@ -661,7 +682,7 @@ mod tests {
         );
         assert_eq!(
             brain.handle_text("suivant").await.speech,
-            "Ça n'a pas marché : boum."
+            "Désolé, cela n'a pas fonctionné, Monsieur."
         );
     }
 
@@ -712,7 +733,7 @@ mod tests {
     impl Power {
         async fn ask(&self) {
             let a = self.brain.answer_text("mets le PC en veille").await;
-            assert_eq!(a.reply.speech, "Je mets le PC en veille ?");
+            assert_eq!(a.reply.speech, "Je mets le PC en veille, Monsieur ?");
             assert!(a.awaits_reply);
         }
 
@@ -730,7 +751,7 @@ mod tests {
         // Par l'IA aussi.
         let p = power_with(FakeLlm::new(Ok(tool_understanding("shutdown"))));
         let a = p.brain.answer_text("coupe tout, j'ai fini").await;
-        assert_eq!(a.reply.speech, "J'éteins le PC ?");
+        assert_eq!(a.reply.speech, "J'éteins le PC, Monsieur ?");
         assert!(a.awaits_reply);
         assert!(p.runner.calls().is_empty());
     }
@@ -756,7 +777,7 @@ mod tests {
         let p = power();
         p.ask().await;
         let a = p.reply("non").await;
-        assert_eq!(a.reply, Reply::new("D'accord, j'annule."));
+        assert_eq!(a.reply, Reply::new("Entendu, j'annule."));
         assert!(p.runner.calls().is_empty());
         assert!(!p.brain.has_pending());
     }
@@ -767,7 +788,7 @@ mod tests {
         p.ask().await;
         p.clock.advance(REPLY_WINDOW + Duration::from_millis(1));
         let a = p.reply("oui").await;
-        assert_eq!(a.reply, Reply::new("Trop tard : je ne fais rien."));
+        assert_eq!(a.reply, Reply::new("Le délai est passé, je ne fais rien."));
         assert!(p.runner.calls().is_empty());
         assert!(!p.brain.has_pending());
     }
@@ -788,7 +809,7 @@ mod tests {
         let p = power();
         p.ask().await;
         let a = p.reply("mets pause").await;
-        assert_eq!(a.reply, Reply::new("Bien, je ne fais rien."));
+        assert_eq!(a.reply, Reply::new("Sans réponse claire, je ne fais rien."));
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
         assert!(p.runner.calls().is_empty());
@@ -821,10 +842,10 @@ mod tests {
     async fn annule_sans_attente() {
         let p = power();
         let a = p.brain.answer_text("annule").await;
-        assert_eq!(a.reply, Reply::new("Il n'y a rien à annuler."));
+        assert_eq!(a.reply, Reply::new("Il n'y a rien à annuler, Monsieur."));
         p.ask().await;
         let a = p.brain.answer_text("Jarvis, annule.").await;
-        assert_eq!(a.reply, Reply::new("D'accord, j'annule."));
+        assert_eq!(a.reply, Reply::new("Entendu, j'annule."));
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
         assert!(p.runner.calls().is_empty());
@@ -844,11 +865,29 @@ mod tests {
         p.ask().await;
         p.clock.advance(Duration::from_secs(10));
         let a = p.brain.answer_text("répète").await;
-        assert_eq!(a.reply.speech, "Je mets le PC en veille ?");
+        assert_eq!(a.reply.speech, "Je mets le PC en veille, Monsieur ?");
         assert!(a.awaits_reply);
         p.clock.advance(Duration::from_secs(10));
         p.reply("oui").await;
         assert_eq!(p.runner.calls(), suspend_call());
+    }
+
+    #[tokio::test]
+    async fn nom_d_adresse_configurable() {
+        let p = power();
+        let brain = p.brain.with_persona(Persona::new("Charles"));
+        let a = brain.answer_text("annule").await;
+        assert_eq!(a.reply.speech, "Il n'y a rien à annuler, Charles.");
+        let a = brain.answer_text("mets le PC en veille").await;
+        assert_eq!(a.reply.speech, "Je mets le PC en veille, Charles ?");
+        // Avec parcimonie : pas dans toutes les phrases.
+        let a = brain.answer_follow_up("non", brain.now()).await;
+        assert_eq!(a.reply.speech, "Entendu, j'annule.");
+        // Nom vide : jamais nommé.
+        let p = power();
+        let brain = p.brain.with_persona(Persona::new(""));
+        let a = brain.answer_text("annule").await;
+        assert_eq!(a.reply.speech, "Il n'y a rien à annuler.");
     }
 
     #[tokio::test]
@@ -872,7 +911,7 @@ mod tests {
         );
         assert_eq!(
             got(s.brain.handle_text("lance une fusée").await),
-            failed("Je ne sais pas faire ça.")
+            failed("Je crains de ne pas savoir faire cela, Monsieur.")
         );
         let s = setup(
             FakeLlm::new(Err(LlmError::Unreachable("x".into()))),

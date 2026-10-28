@@ -14,6 +14,11 @@ use tracing::{info, warn};
 /// Dit quand une empreinte existe mais que le modèle de vérification manque.
 pub const VERIFICATION_UNAVAILABLE: &str = "La vérification de votre voix est indisponible.";
 
+const NOT_UNDERSTOOD: &str = "Pardon, je n'ai pas compris.";
+const MUTED: &str = "Bien, je n'écoute plus.";
+const UNMUTED: &str = "Je vous écoute.";
+const ALREADY_LISTENING: &str = "Je vous écoute déjà.";
+
 /// La reconnaissance vocale n'est pas disponible : le message est dit tel quel.
 #[derive(Debug, thiserror::Error)]
 #[error("La reconnaissance vocale n'est pas installée.")]
@@ -161,7 +166,7 @@ impl ListenService {
                 warn!(erreur = %e, "transcription impossible");
                 let speech = match e.downcast_ref::<SttUnavailable>() {
                     Some(u) => u.to_string(),
-                    None => "Je n'ai pas compris.".into(),
+                    None => NOT_UNDERSTOOD.into(),
                 };
                 return heard("", &speech, None);
             }
@@ -175,7 +180,7 @@ impl ListenService {
             return match action {
                 Some(EarAction::Unmute) => {
                     info!(phrase = %text, "écoute réactivée");
-                    heard(&text, "Écoute réactivée.", Some(EarAction::Unmute))
+                    heard(&text, UNMUTED, Some(EarAction::Unmute))
                 }
                 _ => heard("", "", None),
             };
@@ -195,8 +200,8 @@ impl ListenService {
         }
         info!(phrase = %text, "texte entendu");
         match action {
-            Some(EarAction::Mute) => heard(&text, "Écoute coupée.", Some(EarAction::Mute)),
-            Some(EarAction::Unmute) => heard(&text, "L'écoute est déjà active.", None),
+            Some(EarAction::Mute) => heard(&text, MUTED, Some(EarAction::Mute)),
+            Some(EarAction::Unmute) => heard(&text, ALREADY_LISTENING, None),
             // `AwaitReply` ne vient jamais d'une commande d'écoute.
             Some(EarAction::AwaitReply) | None if unverified => {
                 match self.brain.answer_fast(&text).await {
@@ -359,11 +364,7 @@ mod tests {
         let r = s.service.listen(&short_voice(), false, false).await;
         assert_eq!(
             r,
-            heard(
-                "Jarvis, coupe l'écoute.",
-                "Écoute coupée.",
-                Some(EarAction::Mute)
-            )
+            heard("Jarvis, coupe l'écoute.", MUTED, Some(EarAction::Mute))
         );
     }
 
@@ -435,7 +436,7 @@ mod tests {
         let s = setup(FakeTranscriber::failing());
         assert_eq!(
             s.service.listen(AUDIO, false, false).await,
-            heard("", "Je n'ai pas compris.", None)
+            heard("", NOT_UNDERSTOOD, None)
         );
         let dir = tempfile::tempdir().unwrap();
         let svc = ListenService::new(
@@ -481,7 +482,7 @@ mod tests {
             r,
             heard(
                 "Jarvis, réactive l'écoute.",
-                "Écoute réactivée.",
+                UNMUTED,
                 Some(EarAction::Unmute)
             )
         );
@@ -493,11 +494,7 @@ mod tests {
         let r = s.service.listen(AUDIO, false, false).await;
         assert_eq!(
             r,
-            heard(
-                "Jarvis, coupe l'écoute.",
-                "Écoute coupée.",
-                Some(EarAction::Mute)
-            )
+            heard("Jarvis, coupe l'écoute.", MUTED, Some(EarAction::Mute))
         );
         assert!(s.skill.calls().is_empty());
     }
@@ -565,7 +562,7 @@ mod tests {
     fn question() -> ControlResponse {
         heard(
             "mets le PC en veille",
-            "Je mets le PC en veille ?",
+            "Je mets le PC en veille, Monsieur ?",
             Some(EarAction::AwaitReply),
         )
     }
@@ -669,7 +666,7 @@ mod tests {
             r,
             heard(
                 "répète",
-                "Je mets le PC en veille ?",
+                "Je mets le PC en veille, Monsieur ?",
                 Some(EarAction::AwaitReply)
             )
         );
@@ -696,7 +693,7 @@ mod tests {
             r,
             ControlResponse::Heard {
                 text: "suivant".into(),
-                speech: "Ça n'a pas marché : boum.".into(),
+                speech: "Désolé, cela n'a pas fonctionné, Monsieur.".into(),
                 ear_action: None,
                 audio: None,
                 sound: Some(Sound::Failure),
