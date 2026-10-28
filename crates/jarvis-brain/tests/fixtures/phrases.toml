@@ -1,0 +1,189 @@
+# Jeu de phrases de référence.
+# fast = true : doit être reconnue par match_fast (outil et arguments exacts).
+# fast = false : formulation libre, réservée à l'IA (seul l'outil est vérifié).
+
+[[phrase]]
+text = "suivant"
+tool = "media_next"
+args = {}
+fast = true
+
+[[phrase]]
+text = "Jarvis, chanson précédente"
+tool = "media_previous"
+args = {}
+fast = true
+
+[[phrase]]
+text = "mets en pause"
+tool = "media_pause"
+args = {}
+fast = true
+
+[[phrase]]
+text = "reprends"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "plus fort"
+tool = "volume_up"
+args = {}
+fast = true
+
+[[phrase]]
+text = "baisse le son"
+tool = "volume_down"
+args = {}
+fast = true
+
+[[phrase]]
+text = "c'est quoi cette chanson"
+tool = "media_now_playing"
+args = {}
+fast = true
+
+[[phrase]]
+text = "passe en mode local"
+tool = "set_mode"
+args = { mode = "local" }
+fast = true
+
+[[phrase]]
+text = "mode en ligne"
+tool = "set_mode"
+args = { mode = "online" }
+fast = true
+
+[[phrase]]
+text = "qu'est-ce que tu fais"
+tool = "status"
+args = {}
+fast = true
+
+[[phrase]]
+text = "lance VS Code"
+tool = "app_launch"
+args = { name = "vs code" }
+fast = true
+
+[[phrase]]
+text = "ouvre Firefox"
+tool = "app_launch"
+args = { name = "firefox" }
+fast = true
+
+[[phrase]]
+text = "démarre Spotify"
+tool = "app_launch"
+args = { name = "spotify" }
+fast = true
+
+[[phrase]]
+text = "musique suivante"
+tool = "media_next"
+args = {}
+fast = true
+
+[[phrase]]
+text = "monte le volume"
+tool = "volume_up"
+args = {}
+fast = true
+
+[[phrase]]
+text = "mets un peu plus de son"
+tool = "volume_up"
+args = {}
+fast = false
+
+[[phrase]]
+text = "ouvre-moi le navigateur"
+tool = "app_launch"
+args = { name = "navigateur" }
+fast = false
+
+[[phrase]]
+text = "je veux écouter autre chose"
+tool = "media_next"
+args = {}
+fast = false
+
+[[phrase]]
+text = "tu peux baisser un peu le volume"
+tool = "volume_down"
+args = {}
+fast = false
+
+[[phrase]]
+text = "remets la chanson d'avant"
+tool = "media_previous"
+args = {}
+fast = false
+
+[[phrase]]
+text = "stoppe la musique deux secondes"
+tool = "media_pause"
+args = {}
+fast = false
+
+[[phrase]]
+text = "c'est quel morceau là"
+tool = "media_now_playing"
+args = {}
+fast = false
+
+[[phrase]]
+text = "je n'entends rien, augmente le son"
+tool = "volume_up"
+args = {}
+fast = false
+
+[[phrase]]
+text = "passe sur l'IA en ligne s'il te plaît"
+tool = "set_mode"
+args = { mode = "online" }
+fast = false
+
+[[phrase]]
+text = "repasse en local"
+tool = "set_mode"
+args = { mode = "local" }
+fast = false
+
+[[phrase]]
+text = "fais-moi un point sur ton état"
+tool = "status"
+args = {}
+fast = false
+
+[[phrase]]
+text = "lance-moi le terminal"
+tool = "app_launch"
+args = { name = "terminal" }
+fast = false
+
+[[phrase]]
+text = "chanson précédente"
+tool = "media_previous"
+args = {}
+fast = true
+
+[[phrase]]
+text = "relance la musique"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "moins fort"
+tool = "volume_down"
+args = {}
+fast = true
+
+[[phrase]]
+text = "qu'est-ce qui passe"
+tool = "media_now_playing"
+args = {}
+fast = true
