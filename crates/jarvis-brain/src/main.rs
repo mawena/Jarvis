@@ -7,8 +7,9 @@ use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
+use jarvis_brain::net::{self, NetworkPaths, Services};
 use jarvis_brain::persona::Persona;
-use jarvis_brain::server::{SpeakerState, serve_with_board};
+use jarvis_brain::server::{SpeakerState, serve_with_hub};
 use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
 use jarvis_brain::stt::{Transcriber, whisper::WhisperTranscriber};
 use jarvis_brain::summarizer::{ModeSummarizer, Rewarmer, WarmUp, separate_summary_model};
@@ -32,6 +33,8 @@ async fn main() -> anyhow::Result<()> {
     init_logging();
     let config = Config::load(&Config::default_path())?;
     let modes = Arc::new(ModeStore::new(ModeStore::default_path(), config.mode));
+    // Mode changé (CLI, icône ou voix) : état diffusé aux oreilles en réseau.
+    let mode_changes = modes.subscribe();
 
     let runner = Arc::new(SystemRunner);
     // Lecteurs MPRIS partagés : la vidéo met la musique en pause.
@@ -217,15 +220,46 @@ async fn main() -> anyhow::Result<()> {
     let listen = Arc::new(
         ListenService::new(brain.clone(), stt, ducker.clone()).with_speaker_state(speaker.clone()),
     );
+    // Oreilles en réseau : sans identité TLS, registre ou port, le cerveau tourne
+    // quand même (socket Unix seulement).
+    let voice_tag = if config.tts.enabled {
+        format!(
+            "{}|{}|{}",
+            config.tts.model_dir.display(),
+            config.tts.speaker,
+            config.tts.speed
+        )
+    } else {
+        String::new()
+    };
+    let network = net::start(
+        &config.network,
+        &NetworkPaths::default(),
+        Services {
+            brain: brain.clone(),
+            listen: listen.clone(),
+            voice: voice.clone(),
+            board: board.clone(),
+            modes: Some(mode_changes),
+            voice_tag,
+        },
+        true,
+    )
+    .await;
+    let hub = network.as_ref().map(|n| n.hub.clone());
+
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
     let result = tokio::select! {
-        r = serve_with_board(brain, listen, speaker, voice, board, &socket) => r,
+        r = serve_with_hub(brain, listen, speaker, voice, board, hub, &socket) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     };
     // Arrêt entre un réveil et la fin de l'écoute : la musique ne reste pas baissée.
     ducker.restore().await;
+    if let Some(network) = network {
+        network.shutdown().await;
+    }
     // Ne supprime pas le socket d'un autre cerveau si nous n'avons pas pu le prendre.
     if result.is_ok() {
         let _ = std::fs::remove_file(&socket);
