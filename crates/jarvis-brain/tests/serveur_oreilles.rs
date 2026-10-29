@@ -60,16 +60,22 @@ fn limits() -> Limits {
 }
 
 async fn rig() -> Rig {
+    rig_with(Duration::ZERO, net::hub::PROCESS_TIMEOUT).await
+}
+
+/// `skill_delay` : durée de la compétence « suivant » ; `process_timeout` : traitement
+/// d'une phrase au plus.
+async fn rig_with(skill_delay: Duration, process_timeout: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let identity = BrainIdentity::load_or_create(&dir.path().join("tls")).unwrap();
     let mut registry = EarRegistry::load(&dir.path().join("ears.toml")).unwrap();
     let (salon, token) = registry.add("Salon", "linux", false).unwrap();
 
-    let skill = Arc::new(FakeSkill::new(&["media_next"]).with_shortcut(
-        "suivant",
-        "media_next",
-        serde_json::json!({}),
-    ));
+    let skill = Arc::new(
+        FakeSkill::new(&["media_next"])
+            .with_shortcut("suivant", "media_next", serde_json::json!({}))
+            .with_delay(skill_delay),
+    );
     let llm = || Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))));
     let modes = Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local));
     let changes = modes.subscribe();
@@ -107,6 +113,7 @@ async fn rig() -> Rig {
         hosts: vec!["192.168.1.20".parse().unwrap()],
         window: Duration::from_millis(50),
         pairing_ttl: Duration::from_secs(120),
+        process_timeout,
     };
     let hub = Hub::spawn(settings, registry, services, None);
     let tls = identity.server_config().unwrap();
@@ -797,6 +804,37 @@ async fn reponse_envoyee_a_l_oreille_gagnante() {
     assert_eq!(rig.skill.calls().len(), 1);
     assert_eq!(rig.ducker.events().first(), Some(&"duck"));
     assert!(rig.ducker.events().contains(&"restore"));
+}
+
+#[tokio::test]
+async fn traitement_trop_long_arrete_pour_de_bon() {
+    // Compétence de 1,5 s, traitement permis : 200 ms.
+    let rig = rig_with(Duration::from_millis(1_500), Duration::from_millis(200)).await;
+    let mut ws = salon(&rig).await;
+    send(&mut ws, &wake(1, 0.9)).await;
+    assert_eq!(next(&mut ws).await, BrainMessage::Elected { utterance: 1 });
+    audio(&mut ws, 1, 1_600).await;
+    send(&mut ws, &end(1)).await;
+    let BrainMessage::Response {
+        utterance: Some(1),
+        response: ControlResponse::Error { message },
+    } = next(&mut ws).await
+    else {
+        panic!("erreur attendue")
+    };
+    assert_eq!(message, "Traitement trop long.");
+    eventually("compétence lancée", || rig.skill.calls().len() == 1).await;
+    // Son rétabli, et la phrase suivante passe tout de suite.
+    assert_eq!(rig.ducker.events().last(), Some(&"restore"));
+    send(&mut ws, &wake(2, 0.9)).await;
+    assert_eq!(next(&mut ws).await, BrainMessage::Elected { utterance: 2 });
+    // Le traitement abandonné ne finit jamais derrière : ni compétence, ni réponse.
+    tokio::time::sleep(Duration::from_millis(1_800)).await;
+    assert_eq!(rig.skill.finished(), 0);
+    assert_eq!(
+        next_within(&mut ws, Duration::from_millis(100)).await,
+        Next::Silent
+    );
 }
 
 #[tokio::test]

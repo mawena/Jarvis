@@ -152,6 +152,14 @@ impl ListenService {
         self.ducker.restore().await;
     }
 
+    /// Phrase abandonnée en plein traitement (trop longue, interrompue) : son rétabli,
+    /// et plus aucune action n'attend de confirmation (comme après toute phrase qui ne
+    /// repose pas de question).
+    pub async fn abandoned(&self) {
+        self.brain.clear_pending();
+        self.ducker.restore().await;
+    }
+
     /// Phrase captée (i16 16 kHz mono) par l'oreille `ear`. Rétablit toujours le son
     /// d'abord. `follow_up` : réponse à une question du cerveau (`EarAction::AwaitReply`).
     pub async fn listen(
@@ -687,6 +695,21 @@ mod tests {
             }
         );
         assert_eq!(c.ran().await, suspend_call());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phrase_abandonnee_oublie_la_question() {
+        let c = confirm(&["mets le PC en veille", "oui"]);
+        assert_eq!(
+            c.service.listen(&ear(), &voice(0), false, false).await,
+            question()
+        );
+        assert!(c.brain.has_pending());
+        // La phrase suivante est abandonnée (trop longue) : la question avec elle.
+        c.service.abandoned().await;
+        assert!(!c.brain.has_pending());
+        c.service.listen(&ear(), &voice(0), false, true).await;
+        assert!(c.ran().await.is_empty());
     }
 
     #[tokio::test(start_paused = true)]

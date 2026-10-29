@@ -60,6 +60,9 @@ pub struct HubSettings {
     pub window: Duration,
     /// Durée d'ouverture d'une fenêtre d'appairage.
     pub pairing_ttl: Duration,
+    /// Traitement d'une phrase au plus ([`PROCESS_TIMEOUT`]) : passé ce délai, il est
+    /// arrêté.
+    pub process_timeout: Duration,
 }
 
 /// Ce que le hub appelle pour traiter une phrase.
@@ -1037,22 +1040,30 @@ impl State {
         let (listen, voice) = (self.services.listen.clone(), self.services.voice.clone());
         let (ear, follow_up, muted) = (ear.clone(), capture.follow_up, end.muted);
         let me = self.me.clone();
+        let limit = self.settings.process_timeout;
         tokio::spawn(async move {
-            let job_ear = ear.clone();
-            let job = tokio::spawn(async move {
-                let response = listen.listen(&job_ear, &audio, muted, follow_up).await;
+            let (job_ear, job_listen) = (ear.clone(), listen.clone());
+            let mut job = tokio::spawn(async move {
+                let response = job_listen.listen(&job_ear, &audio, muted, follow_up).await;
                 voice.speak(response).await
             });
-            let response = match tokio::time::timeout(PROCESS_TIMEOUT, job).await {
+            let response = match tokio::time::timeout(limit, &mut job).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(e)) => {
                     warn!(erreur = %e, "traitement d'une phrase interrompu");
+                    listen.abandoned().await;
                     ControlResponse::Error {
                         message: "Traitement interrompu.".into(),
                     }
                 }
                 Err(_) => {
                     warn!("traitement d'une phrase trop long : abandonné");
+                    // Arrêté pour de bon (la compétence en cours est lâchée), et attendu :
+                    // plus rien de cette phrase ne touche l'action en attente ni le son
+                    // une fois la suivante lancée.
+                    job.abort();
+                    let _ = job.await;
+                    listen.abandoned().await;
                     ControlResponse::Error {
                         message: "Traitement trop long.".into(),
                     }

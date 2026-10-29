@@ -500,6 +500,7 @@ pub async fn start(
         hosts: lan_hosts(addr.ip()),
         window,
         pairing_ttl: PAIRING_TTL,
+        process_timeout: hub::PROCESS_TIMEOUT,
     };
     let offline_text = services.brain.persona().addressed("Le PC est endormi.");
     let offline_id = hub::offline_phrase_id(&offline_text, &services.voice_tag);
