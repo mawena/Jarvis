@@ -85,7 +85,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 4.7 Arbitre : une seule oreille gagne par phrase (fenêtre de 300 ms) — confirmation et session vocale propres à chaque oreille
 - [x] 4.8 Réponse vocale jouée sur l'oreille gagnante
 - [x] 4.9 Reconnexion automatique et message « le PC est endormi » (sans file d'attente de son, en moins de 2 s)
-- [ ] 4.10 Tests de bout en bout (tâche 8) et retrait de l'ancien chemin d'écoute, `doctor`, documentation (tâche 9)
+- [x] 4.10 Tests de bout en bout (tâche 8) et retrait de l'ancien chemin d'écoute, `doctor`, documentation (tâche 9)
 - [ ] 4.11 Relecture de la phase 4 et corrections
 - [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles)
 
