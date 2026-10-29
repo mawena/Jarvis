@@ -89,6 +89,11 @@ impl Running {
         self.stopper.clone()
     }
 
+    /// Suivi en direct, lisible après `wait` lancé ailleurs.
+    pub fn progress_watch(&self) -> watch::Receiver<Progress> {
+        self.progress.clone()
+    }
+
     /// Attend la fin du processus (et de tout son groupe).
     pub async fn wait(self) -> RunOutcome {
         let Running {
