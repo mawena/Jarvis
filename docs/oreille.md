@@ -237,6 +237,8 @@ configuration et données, modèles compris).
 [stt]
 # model_path = "~/.local/share/jarvis/models/ggml-small-q5_1.bin"   # ggml-base-q5_1.bin : déconseillé (répétitions)
 # threads = 6
+# vocabulary = ["GiGit", "Celluloid"]   # mots difficiles, écrits comme ils doivent sortir (40 au plus)
+# min_audio_ctx = 512       # fenêtre minimale de Whisper : plus grand = plus sûr mais plus lent
 
 [speaker]
 # enabled = true
@@ -255,6 +257,32 @@ configuration et données, modèles compris).
 
 Si ta voix est refusée trop souvent, baisse `threshold` ; si d'autres voix passent, monte-le.
 Le score de chaque refus est dans les journaux (`jarvisctl logs`), sans le texte.
+
+### Mots mal compris
+
+Whisper connaît mal les noms propres rares : « lance GiGit » peut sortir « lance youtube ».
+
+- Ajoute les noms qu'il rate à `vocabulary` (orthographe exacte, liste courte : chaque mot
+  ralentit un peu chaque phrase, et au-delà de 40 seuls les premiers sont gardés), puis
+  `jarvisctl restart`. Ne pas y mettre toutes les applications : une longue liste fait pire.
+- Un nom d'application presque juste (« vigit », « gigitte ») retrouve quand même GiGit : à une
+  lettre près pour les noms de 4 à 6 lettres, à deux lettres près au-delà.
+- `min_audio_ctx` : la fenêtre de Whisper. 512 (≈ 10 s, ≈ 1,9 s de calcul) est un compromis ;
+  en dessous, les phrases courtes sont plus vite transcrites mais nettement moins bien
+  (« lance Spotify » → « Lance potifé ») ; 1 500 (30 s) est le plus sûr mais prend ≈ 7 s.
+- Pour vérifier sans micro : `say_wav` fait dire une phrase à la voix de Jarvis dans un
+  fichier, `bench_stt` la transcrit (`PROMPT=…` pour essayer un vocabulaire,
+  `AUDIO_CTX=512` pour une fenêtre) :
+
+  ```bash
+  cargo run --release -p jarvis-brain --example say_wav -- /tmp/phrase.wav "lance GiGit"
+  PROMPT="Jarvis. GiGit." AUDIO_CTX=512 FLASH=1 NO_FALLBACK=1 \
+    cargo run --release -p jarvis-brain --example bench_stt -- \
+    ~/.local/share/jarvis/models/ggml-small-q5_1.bin 6 /tmp/phrase.wav
+  ```
+
+  La voix de synthèse est moins bien reconnue que la tienne : c'est une comparaison, pas une
+  mesure.
 
 ## Dépannage
 

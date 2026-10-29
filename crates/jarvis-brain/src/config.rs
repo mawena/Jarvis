@@ -123,6 +123,12 @@ pub struct SttConfig {
     /// Modèle ggml de whisper.cpp (`~/` accepté en tête de chemin).
     pub model_path: PathBuf,
     pub threads: i32,
+    /// Mots difficiles donnés à Whisper comme indice (noms d'applications, de jeux…),
+    /// écrits comme ils doivent sortir : `["GiGit", "Celluloid"]`. Garder la liste courte.
+    pub vocabulary: Vec<String>,
+    /// Fenêtre minimale de l'encodeur, en trames (50 par seconde, 1 500 au plus). Plus
+    /// grande : reconnaissance plus sûre mais plus lente (512 ≈ 1,9 s, 1 500 ≈ 7 s).
+    pub min_audio_ctx: i32,
 }
 
 impl Default for SttConfig {
@@ -134,6 +140,8 @@ impl Default for SttConfig {
         Self {
             model_path,
             threads: 6,
+            vocabulary: Vec::new(),
+            min_audio_ctx: 512,
         }
     }
 }
@@ -301,6 +309,8 @@ mod tests {
         let c = Config::load(&p).unwrap();
         assert_eq!(c.stt.threads, 4);
         assert_eq!(c.stt.model_path, SttConfig::default().model_path);
+        assert!(c.stt.vocabulary.is_empty());
+        assert_eq!(c.stt.min_audio_ctx, 512);
     }
 
     #[test]

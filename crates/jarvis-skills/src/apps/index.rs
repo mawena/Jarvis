@@ -89,7 +89,53 @@ impl AppIndex {
         // Names first; ids only when no name reaches the threshold.
         best_fuzzy(&self.entries, &matcher, &cleaned, |e| &e.name)
             .or_else(|| best_fuzzy(&self.entries, &matcher, &cleaned, |e| &e.id))
+            .or_else(|| close_spelling(&self.entries, &cleaned))
     }
+}
+
+/// Last resort for a name misheard by speech recognition (« vigit » for « GiGit »): the
+/// name or id within one edit (names of 4-6 letters) or two edits (longer names).
+/// Ambiguous matches (two apps at the same distance) are refused.
+fn close_spelling<'a>(entries: &'a [AppEntry], query: &str) -> Option<&'a AppEntry> {
+    let len = query.chars().count();
+    let allowed = match len {
+        0..=3 => return None,
+        4..=6 => 1,
+        _ => 2,
+    };
+    let mut best: Option<(usize, &AppEntry)> = None;
+    let mut tie = false;
+    for e in entries {
+        let d = levenshtein(query, &e.name.to_lowercase())
+            .min(levenshtein(query, &e.id.to_lowercase()));
+        if d > allowed {
+            continue;
+        }
+        match best {
+            Some((bd, _)) if d > bd => {}
+            Some((bd, _)) if d == bd => tie = true,
+            _ => {
+                best = Some((d, e));
+                tie = false;
+            }
+        }
+    }
+    if tie { None } else { best.map(|(_, e)| e) }
+}
+
+/// Edit distance in characters (insertion, deletion, substitution).
+fn levenshtein(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut cur = vec![i + 1; b.len() + 1];
+        for (j, cb) in b.iter().enumerate() {
+            let cost = usize::from(ca != *cb);
+            cur[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(cur[j] + 1);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 /// Best fuzzy match on one field: highest score, then shortest field, then index order.
@@ -182,5 +228,25 @@ mod tests {
     #[test]
     fn seuil_flou_epingle() {
         assert!(flou().find("xyzzy", &HashMap::new()).is_none());
+    }
+
+    #[test]
+    fn nom_mal_entendu_retrouve() {
+        let idx = flou();
+        let none = HashMap::new();
+        assert_eq!(idx.find("vigit", &none).unwrap().id, "gigit");
+        assert_eq!(idx.find("gigitte", &none).unwrap().id, "gigit");
+        assert_eq!(idx.find("celuloide", &none).unwrap().name, "Celluloid");
+        // Trop loin, ou trop court pour deviner : rien.
+        assert!(idx.find("jiji", &none).is_none());
+        assert!(idx.find("youtube", &none).is_none());
+    }
+
+    #[test]
+    fn distance_d_edition() {
+        assert_eq!(levenshtein("gigit", "gigit"), 0);
+        assert_eq!(levenshtein("vigit", "gigit"), 1);
+        assert_eq!(levenshtein("", "abc"), 3);
+        assert_eq!(levenshtein("été", "ete"), 2);
     }
 }
