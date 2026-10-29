@@ -16,10 +16,15 @@ const FULL_AUDIO_CTX: i32 = 1_500;
 const AUDIO_CTX_MARGIN: i32 = 128;
 /// Garde-fou contre les boucles de répétition (une commande tient en bien moins).
 const MAX_TOKENS: i32 = 128;
+/// Au-delà, l'indice ralentit chaque phrase et Whisper n'en garde que la fin.
+const MAX_VOCABULARY_WORDS: usize = 40;
 
 pub struct WhisperTranscriber {
     ctx: Arc<WhisperContext>,
     threads: i32,
+    /// Indice donné à Whisper : « Jarvis. » puis le vocabulaire de l'utilisateur.
+    prompt: Arc<str>,
+    min_audio_ctx: i32,
     /// Une transcription à la fois : chacune crée son propre état Whisper (mémoire, CPU).
     lock: Arc<Semaphore>,
 }
@@ -45,6 +50,8 @@ impl WhisperTranscriber {
         Ok(Self {
             ctx: Arc::new(ctx),
             threads: cfg.threads.max(1),
+            prompt: initial_prompt(&cfg.vocabulary).into(),
+            min_audio_ctx: cfg.min_audio_ctx,
             lock: Arc::new(Semaphore::new(1)),
         })
     }
@@ -76,9 +83,28 @@ fn is_too_short(audio: &[f32]) -> bool {
 /// Whisper encode toujours 30 s d'audio ; pour une phrase courte, on réduit la
 /// fenêtre à sa longueur réelle (plus une marge). Mesuré sur le PC de Charles
 /// avec `small` : 0,9 à 2 s au lieu de 6 à 9 s (exemple `bench_stt`).
-fn audio_ctx(samples: usize) -> i32 {
+fn audio_ctx(samples: usize, min: i32) -> i32 {
     let frames = i32::try_from(samples.div_ceil(320)).unwrap_or(FULL_AUDIO_CTX); // 16 000 / 50
-    frames.saturating_add(AUDIO_CTX_MARGIN).min(FULL_AUDIO_CTX)
+    frames
+        .saturating_add(AUDIO_CTX_MARGIN)
+        .max(min)
+        .clamp(1, FULL_AUDIO_CTX)
+}
+
+/// « Jarvis. » suivi des mots difficiles, sous la forme « Jarvis. GiGit, Celluloid. » :
+/// Whisper reprend plus volontiers l'orthographe des mots vus dans l'indice.
+fn initial_prompt(vocabulary: &[String]) -> String {
+    let words: Vec<&str> = vocabulary
+        .iter()
+        .map(|w| w.trim())
+        .filter(|w| !w.is_empty())
+        .take(MAX_VOCABULARY_WORDS)
+        .collect();
+    if words.is_empty() {
+        "Jarvis.".to_string()
+    } else {
+        format!("Jarvis. {}.", words.join(", "))
+    }
 }
 
 fn expand_home(p: &Path) -> PathBuf {
@@ -98,6 +124,8 @@ impl Transcriber for WhisperTranscriber {
         }
         let ctx = Arc::clone(&self.ctx);
         let threads = self.threads;
+        let prompt = Arc::clone(&self.prompt);
+        let window = audio_ctx(audio.len(), self.min_audio_ctx);
         let audio = audio.to_vec();
         serialized(&self.lock, move || {
             let mut state = ctx
@@ -114,8 +142,8 @@ impl Transcriber for WhisperTranscriber {
             params.set_no_timestamps(true);
             params.set_no_context(true);
             params.set_single_segment(true);
-            params.set_initial_prompt("Jarvis.");
-            params.set_audio_ctx(audio_ctx(audio.len()));
+            params.set_initial_prompt(&prompt);
+            params.set_audio_ctx(window);
             // Pas de nouvel essai à température plus haute : avec la fenêtre réduite,
             // ces essais faisaient monter certaines phrases à 7-12 s.
             params.set_temperature_inc(0.0);
@@ -147,10 +175,34 @@ mod tests {
 
     #[test]
     fn fenetre_ajustee_a_la_longueur() {
-        assert_eq!(audio_ctx(16_000), 50 + AUDIO_CTX_MARGIN);
-        assert_eq!(audio_ctx(16_001), 51 + AUDIO_CTX_MARGIN);
-        assert_eq!(audio_ctx(16_000 * 30), FULL_AUDIO_CTX);
-        assert_eq!(audio_ctx(usize::MAX), FULL_AUDIO_CTX);
+        assert_eq!(audio_ctx(16_000, 0), 50 + AUDIO_CTX_MARGIN);
+        assert_eq!(audio_ctx(16_001, 0), 51 + AUDIO_CTX_MARGIN);
+        assert_eq!(audio_ctx(16_000 * 30, 0), FULL_AUDIO_CTX);
+        assert_eq!(audio_ctx(usize::MAX, 0), FULL_AUDIO_CTX);
+    }
+
+    #[test]
+    fn fenetre_minimale_respectee() {
+        // Une commande courte garde la fenêtre minimale (reconnaissance plus sûre).
+        assert_eq!(audio_ctx(16_000 * 2, 512), 512);
+        // Une phrase longue la dépasse.
+        assert_eq!(audio_ctx(16_000 * 10, 512), 500 + AUDIO_CTX_MARGIN);
+        // Réglage hors bornes : ramené à 30 s au plus, 1 trame au moins.
+        assert_eq!(audio_ctx(16_000, 9_999), FULL_AUDIO_CTX);
+        assert_eq!(audio_ctx(0, -5), AUDIO_CTX_MARGIN);
+    }
+
+    #[test]
+    fn indice_avec_vocabulaire() {
+        assert_eq!(initial_prompt(&[]), "Jarvis.");
+        assert_eq!(initial_prompt(&[" ".into()]), "Jarvis.");
+        assert_eq!(
+            initial_prompt(&["GiGit".into(), " Celluloid ".into()]),
+            "Jarvis. GiGit, Celluloid."
+        );
+        let long: Vec<String> = (0..100).map(|i| format!("mot{i}")).collect();
+        let p = initial_prompt(&long);
+        assert!(p.contains("mot39") && !p.contains("mot40"), "{p}");
     }
 
     #[tokio::test]
@@ -182,6 +234,7 @@ mod tests {
         let cfg = SttConfig {
             model_path: PathBuf::from("/inexistant/ggml-absent.bin"),
             threads: 2,
+            ..SttConfig::default()
         };
         let err = WhisperTranscriber::load(&cfg).err().expect("doit échouer");
         let msg = err.to_string();
