@@ -15,8 +15,10 @@ pub struct EarConfig {
     pub threshold: Option<f32>,
     /// Nom du périphérique d'entrée (défaut : le micro par défaut du système).
     pub device: Option<String>,
-    /// Nom de cette oreille : annonces (défaut : `pc`) et appairage par `jarvis-ear
-    /// pair` (défaut : nom de la machine).
+    /// Nom donné au cerveau par `jarvis-ear pair` (défaut : nom de la machine), et
+    /// montré au démarrage. L'oreille du PC, appairée d'office par le socket, s'appelle
+    /// toujours « PC » (`link::LOCAL_NAME`) et l'ignore ; les annonces vont à l'oreille
+    /// de la dernière phrase, par son identifiant, pas par son nom.
     pub name: Option<String>,
     /// Adresse du cerveau (`hôte[:port]`, port 7341 par défaut), essayée avant les
     /// adresses connues et la découverte mDNS.
@@ -37,7 +39,7 @@ impl EarConfig {
         }
     }
 
-    /// Nom de l'oreille ; absent ou vide : `pc`.
+    /// Nom de l'oreille pour le journal ; absent ou vide : `pc`.
     pub fn name(&self) -> String {
         match self.name.as_deref().map(str::trim) {
             Some(name) if !name.is_empty() => name.to_string(),

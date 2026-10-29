@@ -237,9 +237,13 @@ configuration et données, modèles compris).
 # wakeword_path = "~/.local/share/jarvis/wakeword/jarvis.rpw"
 # threshold = 0.5          # seuil de détection du mot d'éveil (plus haut = moins de fausses détections)
 # device = "nom du micro"  # micro par défaut sinon
-# name = "Salon"           # nom de l'oreille (annonces : « pc » ; appairage : nom de la machine)
+# name = "Salon"           # nom donné par jarvis-ear pair (défaut : nom de la machine)
 # brain_address = "192.168.1.20"   # adresse du cerveau (hôte[:port]) si mDNS ne le trouve pas
 ```
+
+`name` ne sert qu'à l'appairage par code (`jarvis-ear pair`) : l'oreille du PC, appairée
+d'office par le socket, s'appelle toujours « PC » et l'ignore. Les annonces des agents vont à
+l'oreille de la dernière phrase, reconnue par son identifiant, pas par son nom.
 
 Le cerveau et ses fichiers réseau (certificat, registre des oreilles) : [reseau.md](reseau.md).
 

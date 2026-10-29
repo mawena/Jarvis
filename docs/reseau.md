@@ -128,8 +128,19 @@ et `~/.local/state/jarvis/ear-essai-muted`. Il doit être appairé avant d'être
 
 Une oreille qui perd le cerveau (PC en veille, cerveau arrêté) se reconnecte seule. Si on lui
 parle entre-temps, elle répond « le PC est endormi » (la voix de Jarvis, reçue à l'avance du
-cerveau ; sinon un bip d'échec) en moins de 2 s. Rien n'est envoyé ni gardé en attente : la
+cerveau ; sinon un bip d'échec) en 2 s environ. Rien n'est envoyé ni gardé en attente : la
 phrase est perdue.
+
+Cerveau arrêté proprement : la connexion tombe aussitôt, la réponse est immédiate. Après une
+mise en veille brutale du PC, la connexion peut sembler ouverte un moment (jusqu'à ce que
+l'oreille constate le silence) : l'oreille envoie alors la phrase, mais sans élection du
+cerveau dans les 2 s, elle dit quand même « le PC est endormi » et abandonne la phrase. De
+même si le lien tombe pendant que Jarvis réfléchit : la réponse ne viendra plus, l'oreille le
+dit. Un traitement trop long (plus de 47 s) se termine par un bip d'échec.
+
+« Jarvis » redit pendant que Jarvis réfléchit (cerveau occupé par la phrase précédente) : le
+bip de réveil retentit, puis la réponse à la première phrase arrive comme prévu ; le nouveau
+réveil est simplement ignoré, sans bip d'échec.
 
 L'icône de l'oreille du PC dit « PC injoignable », « connexion au PC… » ou « appairage refusé :
 relancez jarvis-ear pair » (oreille retirée ou jeton refusé).
