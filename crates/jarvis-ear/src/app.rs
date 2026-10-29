@@ -748,6 +748,11 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             }
             ControlResponse::Error { message } => {
                 tracing::warn!("le cerveau signale une erreur : {message}");
+                // Traitement interrompu ou trop long : pas de silence. Rien en écoute
+                // coupée, comme pour toute réponse qui n'est pas la réactivation.
+                if !muted {
+                    self.play_reply(Some(Sound::Failure), None);
+                }
             }
             _ => {}
         }
@@ -1588,6 +1593,26 @@ mod tests {
         });
         h.wait_for("réponse de la première phrase jouée", |h| {
             h.tray.borrow().last_heard.as_deref() == Some("suivant")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn erreur_du_cerveau_bip_d_echec() {
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .answer(|_| {
+            Some(ControlResponse::Error {
+                message: "Traitement trop long.".into(),
+            })
+        })
+        .start();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("bip d'échec", |h| {
+            h.played() == vec![wake_beep(), failure_beep()]
         })
         .await;
     }
