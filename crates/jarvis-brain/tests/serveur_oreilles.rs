@@ -11,9 +11,9 @@ use jarvis_brain::llm::Understanding;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, Hub, HubSettings, Limits, NetworkPaths, Services};
 use jarvis_brain::server::{SpeakerState, serve_with_hub};
-use jarvis_brain::testing::{FakeDucker, FakeLlm, FakeSkill, FakeTranscriber};
+use jarvis_brain::testing::{FakeDucker, FakeLlm, FakeSkill, FakeSynthesizer, FakeTranscriber};
 use jarvis_brain::tls::BrainIdentity;
-use jarvis_brain::tts::Voice;
+use jarvis_brain::tts::{Speech, Voice};
 use jarvis_ear_core::net::tls::{TlsConnector, pinned_client_config};
 use jarvis_ear_core::net::{
     AsyncStream, Connector, EarLink, LinkConfig, LinkState, PairError, Pairing, PairingStore,
@@ -66,6 +66,11 @@ async fn rig() -> Rig {
 /// `skill_delay` : durée de la compétence « suivant » ; `process_timeout` : traitement
 /// d'une phrase au plus.
 async fn rig_with(skill_delay: Duration, process_timeout: Duration) -> Rig {
+    rig_full(skill_delay, process_timeout, Voice::none()).await
+}
+
+/// Comme [`rig_with`], avec la voix des réponses et des annonces.
+async fn rig_full(skill_delay: Duration, process_timeout: Duration, voice: Voice) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let identity = BrainIdentity::load_or_create(&dir.path().join("tls")).unwrap();
     let mut registry = EarRegistry::load(&dir.path().join("ears.toml")).unwrap();
@@ -100,7 +105,7 @@ async fn rig_with(skill_delay: Duration, process_timeout: Duration) -> Rig {
     let services = Services {
         brain: brain.clone(),
         listen: listen.clone(),
-        voice: Voice::none(),
+        voice,
         board: board.clone(),
         modes: Some(changes),
         voice_tag: "test".into(),
@@ -908,6 +913,50 @@ async fn annonce_poussee_a_l_oreille_connectee() {
         next_within(&mut ws, Duration::from_millis(300)).await,
         Next::Silent
     );
+}
+
+#[tokio::test]
+async fn annonce_gardee_si_l_oreille_part_pendant_sa_synthese() {
+    let synth = FakeSynthesizer::new(Speech {
+        samples: vec![1_000; 1_600],
+        sample_rate: 16_000,
+    })
+    .with_delay(Duration::from_millis(800));
+    let rig = rig_full(
+        Duration::ZERO,
+        net::hub::PROCESS_TIMEOUT,
+        Voice::new(Arc::new(synth)),
+    )
+    .await;
+    let mut ws = salon(&rig).await;
+    rig.board.announce(Notice {
+        title: "Agent".into(),
+        speech: "Tâche finie.".into(),
+        body: String::new(),
+        outcome: Outcome::Done,
+        urgent: false,
+        speak: true,
+    });
+    // Partie pendant la synthèse de l'annonce.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let _ = ws.close(None).await;
+    drop(ws);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // De retour : l'annonce n'est pas perdue (relève suivante, dans les 5 s).
+    let mut ws = salon(&rig).await;
+    let BrainMessage::Response {
+        utterance: None,
+        response: ControlResponse::Announcements { items },
+    } = (match next_within(&mut ws, Duration::from_secs(8)).await {
+        Next::Msg(m) => m,
+        other => panic!("annonces attendues, reçu {other:?}"),
+    })
+    else {
+        panic!("annonces attendues")
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].speech, "Tâche finie.");
+    assert!(items[0].audio.is_some());
 }
 
 #[tokio::test]

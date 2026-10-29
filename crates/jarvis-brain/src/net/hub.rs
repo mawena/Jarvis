@@ -2,7 +2,7 @@
 //! les sessions, le registre et la fenêtre d'appairage. `Hub` en est la poignée
 //! (clonable) : chaque appel est un message à cette tâche.
 
-use crate::announce::AnnouncementBoard;
+use crate::announce::{AnnouncementBoard, Pending};
 use crate::arbiter::{Arbiter, ArbiterAction, EndVerdict, WakeReport};
 use crate::brain::Brain;
 use crate::ears::{EarRecord, EarRegistry, hex};
@@ -183,9 +183,12 @@ enum Command {
         audio: SpeechAudio,
     },
     PollAnnouncements,
+    /// Annonces prêtes pour `ear` ; `items` : les mêmes, telles que relevées (remises
+    /// en file si l'oreille est partie).
     Deliver {
         ear: EarId,
         message: BrainMessage,
+        items: Vec<Pending>,
     },
 }
 
@@ -587,9 +590,14 @@ impl State {
             }
             Command::OfflinePhrase { id, audio } => self.offline_phrase(id, audio),
             Command::PollAnnouncements => self.poll_announcements(),
-            Command::Deliver { ear, message } => {
+            Command::Deliver {
+                ear,
+                message,
+                items,
+            } => {
                 if !self.send(&ear, message) {
-                    debug!(oreille = %ear, "oreille partie : message perdu");
+                    debug!(oreille = %ear, "oreille partie : annonces remises en file");
+                    self.services.board.requeue(items);
                 }
             }
         }
@@ -1137,20 +1145,30 @@ impl State {
         }
         let ears: Vec<EarId> = self.sessions.keys().cloned().collect();
         for ear in ears {
-            let taken = self.services.board.take_for(ear.as_str());
+            let taken = self.services.board.take_pending_for(ear.as_str());
             if taken.is_empty() {
                 continue;
             }
             let voice = self.services.voice.clone();
             let me = self.me.clone();
             tokio::spawn(async move {
-                let items = crate::server::voiced(&voice, taken).await;
+                let raw = taken
+                    .iter()
+                    .map(|p| (p.speech.clone(), p.outcome))
+                    .collect();
+                let items = crate::server::voiced(&voice, raw).await;
                 let message = BrainMessage::Response {
                     utterance: None,
                     response: ControlResponse::Announcements { items },
                 };
                 if let Some(tx) = me.upgrade() {
-                    let _ = tx.send(Command::Deliver { ear, message }).await;
+                    let _ = tx
+                        .send(Command::Deliver {
+                            ear,
+                            message,
+                            items: taken,
+                        })
+                        .await;
                 }
             });
             return;
