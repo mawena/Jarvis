@@ -6,6 +6,8 @@ use crate::paths::{
 };
 use crate::system::{OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
+use jarvis_skills::agent::AgentSettings;
+use jarvis_skills::agent::registry::Registry;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
@@ -300,7 +302,25 @@ fn write_units(paths: &Paths, out: &mut dyn Write) -> Result<(Vec<Service>, bool
     Ok((created, written))
 }
 
+/// Prévient, sans bloquer, que les tâches de l'agent en cours seront interrompues
+/// (le registre du cerveau est sur disque ; les processus, eux, meurent avec le service).
+fn warn_running_tasks(paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    match Registry::running_on_disk(&paths.tasks_dir()) {
+        0 => {}
+        1 => writeln!(
+            out,
+            "Attention : 1 tâche d'agent en cours sera interrompue."
+        )?,
+        n => writeln!(
+            out,
+            "Attention : {n} tâches d'agent en cours seront interrompues."
+        )?,
+    }
+    Ok(())
+}
+
 pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    warn_running_tasks(paths, out)?;
     let source = installed_source(paths)?;
     writeln!(out, "Compilation (release) dans {}…", source.display())?;
     build(sys, &source)?;
@@ -435,6 +455,9 @@ pub fn service_verb(
         "enable" => ("activé au démarrage", "activer"),
         _ => ("désactivé au démarrage", "désactiver"),
     };
+    if matches!(verb, "stop" | "restart") && services.contains(&Service::Brain) {
+        warn_running_tasks(paths, out)?;
+    }
     let mut order = services.to_vec();
     if matches!(verb, "stop" | "disable") {
         order.reverse();
@@ -781,7 +804,185 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
     }
     ear_diagnostics(paths, sys, out)?;
     crate::searx::diagnostics(paths, sys, out)?;
+    agent_diagnostics(paths, sys, out)?;
     Ok(if failures > 0 { 1 } else { 0 })
+}
+
+/// Options de `claude` dont dépend la ligne de commande de l'agent.
+const CLAUDE_OPTIONS: [&str; 6] = [
+    "--permission-mode",
+    "--setting-sources",
+    "--session-id",
+    "--append-system-prompt",
+    "--disallowedTools",
+    "stream-json",
+];
+
+/// Section `[agent]` de la configuration, `~/` développé depuis `paths.home`.
+fn agent_settings(paths: &Paths) -> Result<AgentSettings, String> {
+    let section = match fs::read_to_string(&paths.config_file) {
+        Ok(text) => toml::from_str::<toml::Table>(&text)
+            .map_err(|e| e.message().to_string())?
+            .remove("agent"),
+        Err(_) => None,
+    };
+    let mut s: AgentSettings = match section {
+        Some(v) => v
+            .try_into()
+            .map_err(|e: toml::de::Error| e.message().to_string())?,
+        None => AgentSettings::default(),
+    };
+    let home = |p: &Path| match p.strip_prefix("~") {
+        Ok(rest) => paths.home.join(rest),
+        Err(_) => p.to_path_buf(),
+    };
+    s.claude_path = home(&s.claude_path);
+    for p in &mut s.projects {
+        p.path = home(&p.path);
+    }
+    Ok(s)
+}
+
+fn is_executable(p: &Path) -> bool {
+    fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Agent de code : avertissements seulement (le reste de Jarvis marche sans).
+fn agent_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let settings = match agent_settings(paths) {
+        Ok(s) => s,
+        Err(e) => {
+            writeln!(
+                out,
+                "! Section [agent] illisible ({e}) — corrigez {}",
+                paths.config_file.display()
+            )?;
+            return Ok(());
+        }
+    };
+    if !settings.enabled {
+        writeln!(
+            out,
+            "! Agent de code désactivé — optionnel : `enabled = true` dans la section [agent] de config.toml"
+        )?;
+        return Ok(());
+    }
+
+    let claude = &settings.claude_path;
+    if is_executable(claude) {
+        let claude = claude.to_string_lossy();
+        let version = sys
+            .run(&claude, &["--version"])
+            .ok()
+            .filter(|o| o.code == 0)
+            .and_then(|o| o.stdout.split_whitespace().next().map(String::from));
+        match version {
+            Some(v) => writeln!(out, "✓ Claude Code présent ({v})")?,
+            None => writeln!(out, "✓ Claude Code présent")?,
+        }
+        let help = sys
+            .run(&claude, &["--help"])
+            .ok()
+            .filter(|o| o.code == 0)
+            .map(|o| o.stdout);
+        match help {
+            Some(help) => {
+                let missing: Vec<&str> = CLAUDE_OPTIONS
+                    .into_iter()
+                    .filter(|opt| !help.contains(opt))
+                    .collect();
+                if missing.is_empty() {
+                    writeln!(out, "✓ Options requises de Claude Code présentes")?;
+                } else {
+                    writeln!(
+                        out,
+                        "! Options absentes de `claude --help` : {} — mettez Claude Code à jour (`claude update`)",
+                        missing.join(", ")
+                    )?;
+                }
+            }
+            None => writeln!(
+                out,
+                "! `claude --help` a échoué — vérifiez l'installation de Claude Code"
+            )?,
+        }
+    } else {
+        writeln!(
+            out,
+            "! Claude Code introuvable ({}) — optionnel (agent de code) : installez Claude Code ou corrigez `claude_path` dans [agent]",
+            claude.display()
+        )?;
+    }
+
+    match settings.projects.len() {
+        0 => writeln!(
+            out,
+            "! Aucun projet pour l'agent de code — ajoutez un [[agent.projects]] dans config.toml (voir docs/agent.md)"
+        )?,
+        1 => writeln!(out, "✓ 1 projet pour l'agent de code")?,
+        n => writeln!(out, "✓ {n} projets pour l'agent de code")?,
+    }
+    for p in &settings.projects {
+        project_diagnostics(sys, p, out)?;
+    }
+
+    let notify = sys
+        .run("sh", &["-c", "command -v notify-send"])
+        .is_ok_and(|o| o.code == 0);
+    if notify {
+        writeln!(out, "✓ notify-send présent")?;
+    } else {
+        writeln!(
+            out,
+            "! notify-send absent — optionnel (fin des tâches de l'agent) : sudo apt install libnotify-bin"
+        )?;
+    }
+    Ok(())
+}
+
+/// Un projet : dossier, dépôt git, branche de base (celle de `base`, sinon de git flow,
+/// sinon `develop`, comme l'agent).
+fn project_diagnostics(
+    sys: &dyn System,
+    p: &jarvis_skills::agent::Project,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let (name, dir) = (&p.name, p.path.display());
+    if !p.path.is_dir() {
+        writeln!(
+            out,
+            "! Projet {name} : dossier introuvable ({dir}) — corrigez `path` dans [[agent.projects]]"
+        )?;
+        return Ok(());
+    }
+    let dir_s = p.path.to_string_lossy();
+    let git = |args: &[&str]| {
+        let mut full = vec!["-C", &dir_s];
+        full.extend_from_slice(args);
+        sys.run("git", &full).ok()
+    };
+    if !git(&["rev-parse", "--git-dir"]).is_some_and(|o| o.code == 0) {
+        writeln!(out, "! Projet {name} : pas un dépôt git ({dir})")?;
+        return Ok(());
+    }
+    let base = match &p.base {
+        Some(b) => b.clone(),
+        None => git(&["config", "--get", "gitflow.branch.develop"])
+            .filter(|o| o.code == 0)
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "develop".into()),
+    };
+    let head = format!("refs/heads/{base}");
+    if git(&["rev-parse", "--verify", "--quiet", &head]).is_some_and(|o| o.code == 0) {
+        writeln!(out, "✓ Projet {name} ({dir}, branche {base})")?;
+    } else {
+        writeln!(
+            out,
+            "! Projet {name} : branche de base {base} absente ({dir}) — `git flow init` ou réglez `base`"
+        )?;
+    }
+    Ok(())
 }
 
 /// Oreille du PC : avertissements seulement (le cerveau fonctionne sans).
@@ -1770,5 +1971,219 @@ WantedBy=graphical-session.target
 
         // L'oreille ne change jamais le code de sortie (ici 1 : Ollama injoignable).
         assert_eq!((code_saute, code_actif, code_absent), (1, 1, 1));
+    }
+
+    const AIDE_CLAUDE: &str = "Usage: claude [options]\n\
+        --append-system-prompt <prompt>\n\
+        --disallowedTools, --disallowed-tools <tools...>\n\
+        --output-format <format>  \"text\", \"json\", or \"stream-json\"\n\
+        --permission-mode <mode>\n\
+        --session-id <uuid>\n\
+        --setting-sources <sources>\n";
+
+    /// Faux `claude` exécutable à l'emplacement par défaut (`~/.local/bin/claude`).
+    fn fake_claude(paths: &Paths, sys: &mut Fake, help: &str) -> PathBuf {
+        let claude = paths.bin_dir.join("claude");
+        fs::create_dir_all(&paths.bin_dir).unwrap();
+        fs::write(&claude, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        sys.replies.insert(
+            format!("{} --version", claude.display()),
+            (0, "2.1.312 (Claude Code)\n".into()),
+        );
+        sys.replies
+            .insert(format!("{} --help", claude.display()), (0, help.into()));
+        claude
+    }
+
+    fn write_config(paths: &Paths, text: &str) {
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(&paths.config_file, text).unwrap();
+    }
+
+    #[test]
+    fn doctor_signale_claude_absent() {
+        let (_home, paths, sys) = installed();
+        let (code, o) = doctor_out(&paths, &sys);
+        let claude = paths.bin_dir.join("claude");
+        assert!(
+            o.contains(&format!("! Claude Code introuvable ({})", claude.display())),
+            "{o}"
+        );
+        assert!(o.contains("`claude_path`"), "{o}");
+        // Rien n'est lancé à la place de claude, et le code de sortie ne change pas.
+        assert!(
+            !sys.cmds.borrow().iter().any(|c| c.contains("claude")),
+            "{:?}",
+            sys.cmds.borrow()
+        );
+        assert!(!o.contains("✗ Claude"), "{o}");
+        assert_eq!(code, 1, "seul Ollama (injoignable) fait échouer");
+
+        // Agent désactivé : un seul avertissement, aucune autre vérification.
+        write_config(&paths, "[agent]\nenabled = false\n");
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Agent de code désactivé"), "{o}");
+        assert!(!o.contains("Claude Code introuvable"), "{o}");
+        assert!(!o.contains("Projet"), "{o}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_compte_les_projets() {
+        let (home, paths, mut sys) = installed();
+        let projets = home.path().join("projets");
+        for p in ["jarvis", "pas-git", "sans-base"] {
+            fs::create_dir_all(projets.join(p)).unwrap();
+        }
+        write_config(
+            &paths,
+            "[[agent.projects]]\nname = \"Jarvis\"\npath = \"~/projets/jarvis\"\n\n\
+             [[agent.projects]]\nname = \"Absent\"\npath = \"~/projets/absent\"\n\n\
+             [[agent.projects]]\nname = \"PasGit\"\npath = \"~/projets/pas-git\"\n\n\
+             [[agent.projects]]\nname = \"SansBase\"\npath = \"~/projets/sans-base\"\n",
+        );
+        let git = |p: &str, args: &str| format!("git -C {} {args}", projets.join(p).display());
+        sys.replies
+            .insert(git("pas-git", "rev-parse --git-dir"), (128, String::new()));
+        sys.replies.insert(
+            git("sans-base", "config --get gitflow.branch.develop"),
+            (0, "dev\n".into()),
+        );
+        sys.replies.insert(
+            git("sans-base", "rev-parse --verify --quiet refs/heads/dev"),
+            (1, String::new()),
+        );
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ 4 projets pour l'agent de code"), "{o}");
+        assert!(
+            o.contains(&format!(
+                "✓ Projet Jarvis ({}, branche develop)",
+                projets.join("jarvis").display()
+            )),
+            "{o}"
+        );
+        assert!(
+            o.contains(&format!(
+                "! Projet Absent : dossier introuvable ({})",
+                projets.join("absent").display()
+            )),
+            "{o}"
+        );
+        assert!(o.contains("! Projet PasGit : pas un dépôt git"), "{o}");
+        assert!(
+            o.contains("! Projet SansBase : branche de base dev absente"),
+            "{o}"
+        );
+        assert_eq!(code, 1, "avertissements seulement");
+
+        // Une base explicite remplace celle de git flow.
+        write_config(
+            &paths,
+            "[[agent.projects]]\nname = \"Jarvis\"\npath = \"~/projets/jarvis\"\nbase = \"main\"\n",
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ 1 projet pour l'agent de code"), "{o}");
+        assert!(o.contains("branche main)"), "{o}");
+
+        // Aucun projet.
+        write_config(&paths, "[agent]\nprojects = []\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Aucun projet pour l'agent de code"), "{o}");
+    }
+
+    #[test]
+    fn doctor_signale_option_manquante() {
+        let (_home, paths, mut sys) = installed();
+        fake_claude(&paths, &mut sys, AIDE_CLAUDE);
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Claude Code présent (2.1.312)"), "{o}");
+        assert!(
+            o.contains("✓ Options requises de Claude Code présentes"),
+            "{o}"
+        );
+        assert!(o.contains("✓ notify-send présent"), "{o}");
+
+        // Ancienne version : ni --session-id ni stream-json.
+        let ancienne = AIDE_CLAUDE
+            .replace("--session-id <uuid>\n", "")
+            .replace(", or \"stream-json\"", "");
+        fake_claude(&paths, &mut sys, &ancienne);
+        sys.replies
+            .insert("sh -c command -v notify-send".into(), (1, String::new()));
+        let (code_ancienne, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Options absentes de `claude --help` : --session-id, stream-json"),
+            "{o}"
+        );
+        assert!(o.contains("! notify-send absent"), "{o}");
+        assert_eq!((code, code_ancienne), (1, 1), "avertissements seulement");
+    }
+
+    fn running_task(paths: &Paths, id: &str, state: jarvis_skills::agent::TaskState) {
+        use jarvis_skills::agent::{TaskId, TaskRecord, registry::Registry};
+        let reg = Registry::open(paths.tasks_dir()).unwrap();
+        let id = TaskId(id.into());
+        reg.save(&TaskRecord {
+            log: reg.log_path(&id),
+            id,
+            project: "Jarvis".into(),
+            instruction: "finis les tests".into(),
+            branch: "feature/jarvis-finis-tests".into(),
+            worktree: PathBuf::from("/tmp/w"),
+            base: "develop".into(),
+            base_sha: "0123".into(),
+            started_at: 10,
+            ended_at: None,
+            state,
+            summary: None,
+            files_changed: None,
+            violations: vec![],
+            cost_usd: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn redemarrage_previent_des_taches_en_cours() {
+        use jarvis_skills::agent::TaskState;
+        const UNE: &str = "Attention : 1 tâche d'agent en cours sera interrompue.\n";
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+
+        // Aucune tâche (ni dossier) : aucun avertissement.
+        let (_, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert!(!o.contains("Attention"), "{o}");
+
+        // Une tâche terminée ne compte pas.
+        running_task(&paths, "finie", TaskState::Succeeded);
+        let (_, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert!(!o.contains("Attention"), "{o}");
+
+        // Une tâche en cours : avertissement en tête, et le redémarrage a lieu quand même.
+        running_task(&paths, "a", TaskState::Running);
+        sys.cmds.borrow_mut().clear();
+        let (code, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert_eq!(code, 0);
+        assert!(o.starts_with(UNE), "{o}");
+        assert_eq!(sys.cmds.borrow().len(), 2);
+        let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
+        assert!(o.starts_with(UNE), "{o}");
+        // L'oreille seule n'interrompt rien ; démarrer non plus.
+        let (_, o) = verb_out(&paths, &sys, "restart", &[Service::Ear]);
+        assert!(!o.contains("Attention"), "{o}");
+        let (_, o) = verb_out(&paths, &sys, "start", &Service::ALL);
+        assert!(!o.contains("Attention"), "{o}");
+
+        // Pluriel, et la mise à jour prévient aussi.
+        running_task(&paths, "b", TaskState::Running);
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert!(
+            o.contains("Attention : 2 tâches d'agent en cours seront interrompues.\n"),
+            "{o}"
+        );
+        assert!(o.contains("Mise à jour terminée"), "{o}");
     }
 }
