@@ -283,11 +283,18 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             LinkEvent::Connected(_) => {}
             LinkEvent::Disconnected => {
                 // La réponse attendue ne viendra plus.
-                self.awaited = None;
+                let awaited = self
+                    .awaited
+                    .take()
+                    .is_some_and(|a| a.since.elapsed() < RESPONSE_TIMEOUT);
                 self.superseded = None;
                 if self.current.is_some() || self.election.is_some() {
                     tracing::warn!("connexion au cerveau perdue pendant la phrase");
                     self.abandon();
+                } else if awaited {
+                    tracing::warn!("connexion au cerveau perdue avant la réponse");
+                    self.say_asleep();
+                    self.link.nudge();
                 }
             }
             LinkEvent::Message(message) => self.on_message(message),
@@ -678,6 +685,9 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             utterance,
             muted: false,
         });
+        // Comme après un réveil : cerveau figé, « le PC est endormi » plutôt que le
+        // silence.
+        self.election = Some((utterance, Instant::now() + self.election_timeout));
     }
 
     /// Au repos : ni capture, ni lecture, ni réponse attendue, ni élection en cours.
@@ -951,6 +961,9 @@ mod tests {
                 }
                 EarMessage::ListenStart { utterance } => {
                     self.follow_ups.lock().unwrap().insert(utterance);
+                    if self.elect.load(Ordering::SeqCst) {
+                        self.reply(BrainMessage::Elected { utterance });
+                    }
                 }
                 EarMessage::ListenEnd { utterance, .. } => {
                     let follow_up = self.follow_ups.lock().unwrap().contains(&utterance);
@@ -2255,6 +2268,51 @@ mod tests {
         assert_eq!(h.follow_ups().len(), 2);
         assert!(h.follow_ups()[1].1);
         assert!(!h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
+    async fn cerveau_fige_pendant_l_ecoute_de_la_reponse_pc_endormi() {
+        let h = question();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("question lue", |h| {
+            h.played() == vec![wake_beep(), voice_played()]
+        })
+        .await;
+        // Le cerveau ne répond plus, le lien semble ouvert.
+        h.link.elect.store(false, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        h.player.finish();
+        h.wait_for("écoute de la réponse", |h| h.tray.borrow().capturing)
+            .await;
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), voice_played(), failure_beep()]
+        })
+        .await;
+        assert!(start.elapsed() >= Duration::from_millis(1_900));
+        assert!(!h.tray.borrow().capturing);
+        assert_eq!(h.follow_ups().last(), Some(&(false, true)));
+    }
+
+    #[tokio::test]
+    async fn lien_perdu_avant_la_reponse_pc_endormi() {
+        let h = Setup {
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("phrase finie", |h| h.listens().len() == 1).await;
+        let nudges = h.nudges();
+        h.link.disconnect();
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), asleep_played()]
+        })
+        .await;
+        assert!(h.nudges() > nudges);
     }
 
     #[tokio::test]
