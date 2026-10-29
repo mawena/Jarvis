@@ -100,12 +100,21 @@ impl AnnouncementBoard {
             // Fin des options : un titre qui commence par « - » reste un titre.
             "--".to_string(),
             notice.title.clone(),
-            notice.body.clone(),
+            // Le corps est lu comme du balisage (GNOME) : le résumé de l'agent n'y
+            // glisse ni lien ni mise en forme.
+            escape_markup(&notice.body),
         ];
         if let Err(e) = self.runner.spawn_detached("notify-send", &args) {
             warn!(erreur = %e, "notification de bureau impossible");
         }
     }
+}
+
+/// Texte brut pour un corps de notification : `&`, `<` et `>` échappés.
+fn escape_markup(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// L'oreille `ear` peut-elle prendre les annonces ?
@@ -204,6 +213,25 @@ mod tests {
                 ]
             )]
         );
+    }
+
+    #[test]
+    fn corps_de_notification_sans_balisage() {
+        let s = setup();
+        s.board.announce(Notice {
+            title: "Tâche terminée : Jarvis".into(),
+            body: "Résumé : <a href=\"https://x.test\">clic</a> & <b>gras</b>".into(),
+            ..notice("C'est fait.")
+        });
+        let (_, args) = &s.runner.calls()[0];
+        assert_eq!(args[3], "--");
+        assert_eq!(args[4], "Tâche terminée : Jarvis");
+        assert_eq!(
+            args[5],
+            "Résumé : &lt;a href=\"https://x.test\"&gt;clic&lt;/a&gt; &amp; &lt;b&gt;gras&lt;/b&gt;"
+        );
+        // La phrase dite, elle, reste telle quelle.
+        assert_eq!(s.board.take_for("pc")[0].0, "C'est fait.");
     }
 
     #[test]

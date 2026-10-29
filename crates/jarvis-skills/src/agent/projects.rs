@@ -8,6 +8,10 @@ use fuzzy_matcher::skim::SkimMatcherV2;
 /// Score flou minimal (même seuil que les applications).
 const MIN_SCORE: i64 = 50;
 
+/// Mot d'éveil : un projet de ce nom n'est nommé que par « projet Jarvis »
+/// (ou un alias), jamais par « …, merci Jarvis ».
+const WAKE_WORD: &str = "jarvis";
+
 /// Liste des projets connus de l'agent.
 #[derive(Debug, Clone, Default)]
 pub struct ProjectList {
@@ -55,14 +59,32 @@ impl ProjectList {
         }
     }
 
+    /// Le nom entendu ressemble à un projet connu sans le désigner sûrement
+    /// (ambigu, ou à une ou deux lettres près).
+    pub fn is_near(&self, spoken: &str) -> bool {
+        let query = fold(spoken);
+        if query.chars().filter(|c| *c != ' ').count() < 3 {
+            return false;
+        }
+        let matcher = SkimMatcherV2::default();
+        self.projects.iter().flat_map(keys).any(|k| {
+            fuzzy(&matcher, &k, &query).is_some_and(|s| s >= MIN_SCORE)
+                || distance(&k, &query) <= k.chars().count() / 3
+        })
+    }
+
     /// Premier groupe de mots (déjà passés par `fold`) égal à un nom ou un
     /// alias : le projet, l'indice du premier mot et l'indice qui suit le
-    /// dernier.
+    /// dernier. Un nom égal au mot d'éveil ne compte que juste après « projet ».
     pub fn find_in(&self, words: &[&str]) -> Option<(&Project, usize, usize)> {
         for start in 0..words.len() {
             let mut best: Option<(&Project, usize)> = None;
+            let after_projet = start > 0 && words[start - 1] == "projet";
             for p in &self.projects {
                 for key in keys(p) {
+                    if key == WAKE_WORD && !after_projet {
+                        continue;
+                    }
                     let key: Vec<&str> = key.split(' ').collect();
                     let end = start + key.len();
                     let longer = best.is_none_or(|(_, e)| end > e);
@@ -93,6 +115,26 @@ fn fuzzy(matcher: &SkimMatcherV2, key: &str, query: &str) -> Option<i64> {
     let a = matcher.fuzzy_match(key, query);
     let b = matcher.fuzzy_match(query, key);
     a.max(b)
+}
+
+/// Distance d'édition (Levenshtein) entre deux textes.
+fn distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = if ca == *cb {
+                prev
+            } else {
+                1 + prev.min(cur).min(row[j])
+            };
+            prev = cur;
+        }
+    }
+    row[b.len()]
 }
 
 #[cfg(test)]
@@ -161,5 +203,33 @@ pub(crate) mod tests {
         assert_eq!(l.resolve(""), None);
         assert_eq!(l.resolve("a"), None);
         assert_eq!(l.find_in(&["corrige", "le", "bug"]), None);
+    }
+
+    #[test]
+    fn nom_jarvis_seulement_apres_projet() {
+        let l = connus();
+        assert_eq!(l.find_in(&["teste", "le", "micro", "jarvis"]), None);
+        assert_eq!(l.find_in(&["les", "tests", "de", "jarvis"]), None);
+        let mots = ["finis", "le", "projet", "jarvis"];
+        let (p, debut, fin) = l.find_in(&mots).unwrap();
+        assert_eq!((p.name.as_str(), debut, fin), ("Jarvis", 3, 4));
+        // L'alias compte partout, les autres noms aussi.
+        assert!(l.find_in(&["corrige", "l", "assistant"]).is_some());
+        assert!(l.find_in(&["corrige", "mawena"]).is_some());
+    }
+
+    #[test]
+    fn nom_proche_d_un_projet() {
+        let l = connus();
+        assert!(l.is_near("Jarvoss"));
+        assert!(l.is_near("mawenna"));
+        assert!(!l.is_near("vacances"));
+        assert!(!l.is_near("maison"));
+        assert!(!l.is_near("Zorglub"));
+        assert!(!l.is_near("ab"));
+        let ambigus = ProjectList::new(vec![projet("Mawena App", &[]), projet("Mawena Api", &[])]);
+        assert!(ambigus.is_near("mawena"));
+        assert_eq!(distance("jarvis", "jarvoss"), 2);
+        assert_eq!(distance("", "abc"), 3);
     }
 }

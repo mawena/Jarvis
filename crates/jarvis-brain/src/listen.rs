@@ -177,11 +177,14 @@ impl ListenService {
             let speech = if muted { "" } else { VERIFICATION_UNAVAILABLE };
             return heard("", speech, None);
         }
-        // `Unavailable { enrolled: false }` : jamais enrôlé, tout est accepté (voir
-        // `SpeakerState::unavailable`).
+        // `Unavailable { enrolled: false }` : jamais enrôlé, tout est accepté sauf
+        // l'agent de code (voir `SpeakerState::unavailable`).
         // Phrase courte acceptée par la session, sans vraie vérification : raccourcis seuls,
         // et en réponse à une question, annuler seulement (voir `short_reply_voice`).
         let mut unverified = false;
+        // Empreinte reconnue (`Verdict::Match`) : seule voix qui peut confier une
+        // tâche à l'agent. Sans empreinte ou sans vérification, tout le reste marche.
+        let mut recognized = false;
         if let SpeakerState::Ready(gate) = &self.speaker {
             let (g, audio) = (gate.clone(), samples.clone());
             // L'empreinte prend des dizaines de ms : hors du runtime.
@@ -189,7 +192,8 @@ impl ListenService {
                 .await
                 .unwrap_or(Verdict::NoMatch(0.0));
             match verdict {
-                Verdict::Match(_) | Verdict::NotEnrolled => {}
+                Verdict::Match(_) => recognized = true,
+                Verdict::NotEnrolled => {}
                 Verdict::SessionShort => unverified = true,
                 Verdict::NoMatch(score) => {
                     info!("voix non reconnue (score {score:.2})");
@@ -264,7 +268,7 @@ impl ListenService {
                 }
             }
             Some(EarAction::AwaitReply) | None => {
-                let answer = self.brain.answer_text(&text).await;
+                let answer = self.brain.answer_voice(&text, recognized).await;
                 self.answered(&text, answer)
             }
         }

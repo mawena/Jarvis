@@ -127,6 +127,8 @@ pub mod fake {
         pub sleeps: Cell<u32>,
         pub brain: Option<(Mode, String, String)>,
         pub path: Option<String>,
+        /// Autres variables d'environnement (`PATH` : `path`).
+        pub env: HashMap<String, String>,
     }
 
     impl System for Fake {
@@ -159,8 +161,11 @@ pub mod fake {
         fn brain_status(&self) -> Option<(Mode, String, String)> {
             self.brain.clone()
         }
-        fn env_var(&self, _: &str) -> Option<String> {
-            self.path.clone()
+        fn env_var(&self, name: &str) -> Option<String> {
+            match name {
+                "PATH" => self.path.clone(),
+                _ => self.env.get(name).cloned(),
+            }
         }
     }
 }

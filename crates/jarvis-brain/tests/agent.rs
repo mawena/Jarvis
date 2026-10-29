@@ -2,11 +2,12 @@
 //! jamais le vrai `claude`, jamais de vraie notification.
 
 use jarvis_brain::announce::AnnouncementBoard;
-use jarvis_brain::brain::{Brain, SystemClock};
+use jarvis_brain::brain::{Brain, NEEDS_KNOWN_VOICE, SystemClock};
 use jarvis_brain::listen::ListenService;
 use jarvis_brain::llm::Understanding;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::server::{SpeakerState, serve_with_board};
+use jarvis_brain::speaker::{SpeakerGate, SpeakerVerifier};
 use jarvis_brain::testing::{FakeDucker, FakeLlm, FakeTranscriber};
 use jarvis_brain::tts::Voice;
 use jarvis_protocol::{ControlRequest, ControlResponse, Mode};
@@ -269,6 +270,108 @@ async fn outils_agent_jamais_proposes_a_l_ia() {
         git(&s.repo, &["branch", "--format=%(refname:short)"]),
         "develop\nmain"
     );
+}
+
+/// Toujours la même empreinte : toute voix est celle de Charles.
+struct SameVoice;
+
+impl SpeakerVerifier for SameVoice {
+    fn embed(&self, _audio: &[f32]) -> anyhow::Result<Vec<f32>> {
+        Ok(vec![1.0, 0.0])
+    }
+}
+
+/// Vérification prête ; `enrolled` : empreinte de Charles enregistrée.
+fn gate(dir: &Path, enrolled: bool) -> SpeakerState {
+    let g = SpeakerGate::new(Arc::new(SameVoice), dir.join("charles.json"), 0.55, 0.65);
+    if enrolled {
+        g.enroll(&[vec![0.0; 16_000]]).unwrap();
+    }
+    SpeakerState::Ready(Arc::new(g))
+}
+
+/// La phrase de départ dite à l'oreille, avec cette vérification du locuteur.
+async fn heard(s: &Setup, speaker: SpeakerState) -> String {
+    let listen = ListenService::new(
+        s.brain.clone(),
+        Arc::new(FakeTranscriber::new(
+            "Jarvis, finis les tests du projet Jarvis",
+        )),
+        Arc::new(FakeDucker::new()),
+    )
+    .with_speaker_state(speaker);
+    match listen.listen(&[0; 3 * 16_000], false, false).await {
+        ControlResponse::Heard { speech, .. } => speech,
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn voix_sans_empreinte_ne_lance_pas_l_agent() {
+    let voices = tempfile::tempdir().unwrap();
+    for speaker in [
+        gate(voices.path(), false),
+        SpeakerState::Unavailable { enrolled: false },
+    ] {
+        let s = setup(
+            &successful_agent(),
+            Arc::new(RecordingAnnouncer::new()),
+            answer("x"),
+        );
+        assert_eq!(heard(&s, speaker).await, NEEDS_KNOWN_VOICE);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!s.claude_ran());
+        assert_eq!(s.worktrees(), 0);
+        assert_eq!(s.local.calls(), 0, "pas de repli sur l'IA");
+    }
+}
+
+#[tokio::test]
+async fn verification_desactivee_ne_lance_pas_l_agent() {
+    let s = setup(
+        &successful_agent(),
+        Arc::new(RecordingAnnouncer::new()),
+        answer("Réponse de l'IA."),
+    );
+    assert_eq!(heard(&s, SpeakerState::Disabled).await, NEEDS_KNOWN_VOICE);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(!s.claude_ran());
+    assert_eq!(s.worktrees(), 0);
+    // Le reste marche comme avant : l'IA répond.
+    let listen = ListenService::new(
+        s.brain.clone(),
+        Arc::new(FakeTranscriber::new("quel temps fait-il")),
+        Arc::new(FakeDucker::new()),
+    );
+    match listen.listen(&[0; 3 * 16_000], false, false).await {
+        ControlResponse::Heard { speech, .. } => assert_eq!(speech, "Réponse de l'IA."),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn voix_reconnue_lance_l_agent() {
+    let voices = tempfile::tempdir().unwrap();
+    let announcer = Arc::new(RecordingAnnouncer::new());
+    let s = setup(&successful_agent(), announcer.clone(), answer("x"));
+    assert_eq!(heard(&s, gate(voices.path(), true)).await, STARTED);
+    until(|| !announcer.notices().is_empty()).await;
+    assert!(s.claude_ran());
+}
+
+#[tokio::test]
+async fn texte_tape_lance_l_agent() {
+    let announcer = Arc::new(RecordingAnnouncer::new());
+    let s = setup(&successful_agent(), announcer.clone(), answer("x"));
+    assert_eq!(
+        s.brain
+            .handle_text("finis les tests du projet Jarvis")
+            .await
+            .speech,
+        STARTED
+    );
+    until(|| !announcer.notices().is_empty()).await;
+    assert!(s.claude_ran());
 }
 
 #[tokio::test]

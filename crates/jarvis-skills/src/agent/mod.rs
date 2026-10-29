@@ -1051,7 +1051,7 @@ mod tests {
         let b = bench(&successful_agent());
         let s = b
             .skill
-            .shortcut("Jarvis, corrige le bug du projet Zorglub")
+            .shortcut("Jarvis, demande à l'agent de corriger le bug du projet Zorglub")
             .unwrap();
         assert_eq!(s.tool, "agent_start");
         match b.skill.call(&s.tool, s.args).await {
