@@ -7,7 +7,10 @@ use crate::llm::{LlmBackend, summary_message, summary_prompt};
 use crate::mode_store::ModeStore;
 use jarvis_protocol::Mode;
 use jarvis_skills::search::{SearchSettings, Source, Summarizer};
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -51,6 +54,82 @@ impl ModeSummarizer {
     pub fn with_after_local(mut self, after: AfterLocal) -> Self {
         self.after_local = Some(after);
         self
+    }
+}
+
+/// Préchauffage du modèle local (en pratique `OllamaBackend::warm_up` avec les outils).
+pub type WarmUp = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+/// Vrai si le résumé local passe par un autre modèle que la compréhension
+/// (`local_summary_model` renseigné et différent).
+pub fn separate_summary_model(summary_model: &str, main_model: &str) -> bool {
+    let summary = summary_model.trim();
+    !summary.is_empty() && summary != main_model.trim()
+}
+
+/// Re-préchauffe le modèle de compréhension après un résumé local, en tâche de fond.
+///
+/// Rien n'est lancé si :
+/// - le résumé a son propre modèle : le cache du modèle de compréhension est intact ;
+/// - le mode n'est plus local au moment de l'appel : la prochaine phrase ira en ligne ;
+/// - un re-préchauffage est déjà en cours (un seul à la fois).
+pub struct Rewarmer {
+    modes: Arc<ModeStore>,
+    separate_model: bool,
+    warm: WarmUp,
+    busy: Arc<AtomicBool>,
+}
+
+/// Libère le verrou à la fin du préchauffage, même s'il panique ou est annulé.
+struct BusyGuard(Arc<AtomicBool>);
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
+}
+
+impl Rewarmer {
+    pub fn new(modes: Arc<ModeStore>, separate_model: bool, warm: WarmUp) -> Self {
+        Self {
+            modes,
+            separate_model,
+            warm,
+            busy: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Lance le re-préchauffage si besoin ; vrai s'il est parti.
+    pub fn trigger(&self) -> bool {
+        if self.separate_model || self.modes.get() != Mode::Local {
+            return false;
+        }
+        let Ok(rt) = tokio::runtime::Handle::try_current() else {
+            return false;
+        };
+        if self.busy.swap(true, Ordering::AcqRel) {
+            debug!("re-préchauffage déjà en cours");
+            return false;
+        }
+        let guard = BusyGuard(self.busy.clone());
+        let warm = (self.warm)();
+        rt.spawn(async move {
+            let _guard = guard;
+            warm.await;
+        });
+        true
+    }
+
+    /// Vrai pendant un re-préchauffage.
+    pub fn is_busy(&self) -> bool {
+        self.busy.load(Ordering::Acquire)
+    }
+
+    /// Action à passer à `ModeSummarizer::with_after_local`.
+    pub fn into_after_local(self) -> AfterLocal {
+        Arc::new(move || {
+            self.trigger();
+        })
     }
 }
 
@@ -358,5 +437,110 @@ mod tests {
         let r = tokio::time::timeout(s.budget(), s.summarize("q", &sources())).await;
         assert!(r.is_err(), "le résumé aurait dû dépasser le délai");
         assert_eq!(count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Préchauffage compté, qui attend `release` avant de finir.
+    fn warm_counter(release: Arc<tokio::sync::Notify>) -> (Arc<AtomicUsize>, WarmUp) {
+        let count = Arc::new(AtomicUsize::new(0));
+        let c = count.clone();
+        let warm: WarmUp = Arc::new(move || {
+            c.fetch_add(1, Ordering::SeqCst);
+            let release = release.clone();
+            Box::pin(async move { release.notified().await })
+        });
+        (count, warm)
+    }
+
+    #[tokio::test]
+    async fn rechauffage_en_mode_local_avec_le_meme_modele() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (count, warm) = warm_counter(release.clone());
+        let (_d, store) = modes(Mode::Local);
+        let r = Rewarmer::new(store, false, warm);
+        assert!(r.trigger());
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        release.notify_one();
+    }
+
+    #[tokio::test]
+    async fn pas_de_rechauffage_si_modele_de_resume_separe() {
+        let (count, warm) = warm_counter(Arc::new(tokio::sync::Notify::new()));
+        let (_d, store) = modes(Mode::Local);
+        let r = Rewarmer::new(store, true, warm);
+        assert!(!r.trigger());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn modele_de_resume_separe_selon_la_configuration() {
+        assert!(!separate_summary_model("", "qwen3:4b"));
+        assert!(!separate_summary_model("  ", "qwen3:4b"));
+        assert!(!separate_summary_model(" qwen3:4b ", "qwen3:4b"));
+        assert!(separate_summary_model("gemma3:1b", "qwen3:4b"));
+    }
+
+    #[tokio::test]
+    async fn pas_de_rechauffage_apres_passage_en_ligne() {
+        let (count, warm) = warm_counter(Arc::new(tokio::sync::Notify::new()));
+        let (_d, store) = modes(Mode::Local);
+        let r = Rewarmer::new(store.clone(), false, warm);
+        // Le résumé a commencé en local ; le mode change avant la fin.
+        store.set(Mode::Online).unwrap();
+        assert!(!r.trigger());
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn pas_de_rechauffage_apres_passage_en_ligne_via_le_resumeur() {
+        let (count, warm) = warm_counter(Arc::new(tokio::sync::Notify::new()));
+        let (_d, store) = modes(Mode::Local);
+        let rewarm = Rewarmer::new(store.clone(), false, warm);
+        let s = ModeSummarizer::new(
+            Arc::new(Muet),
+            llm(Ok("Résumé en ligne.".into())),
+            store.clone(),
+            "Monsieur",
+            &SearchSettings::default(),
+        )
+        .with_after_local(rewarm.into_after_local());
+        let srcs = sources();
+        let mut resume = Box::pin(s.summarize("q", &srcs));
+        // Le résumé local est en cours quand le mode passe en ligne.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), resume.as_mut())
+                .await
+                .is_err()
+        );
+        store.set(Mode::Online).unwrap();
+        drop(resume);
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn un_seul_rechauffage_a_la_fois() {
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (count, warm) = warm_counter(release.clone());
+        let (_d, store) = modes(Mode::Local);
+        let r = Rewarmer::new(store, false, warm);
+        assert!(r.trigger());
+        assert!(!r.trigger(), "un re-préchauffage est déjà en cours");
+        assert!(!r.trigger());
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::SeqCst), 1);
+        // Le premier se termine : un nouveau peut partir.
+        release.notify_one();
+        for _ in 0..10 {
+            if !r.is_busy() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!r.is_busy());
+        assert!(r.trigger());
+        tokio::task::yield_now().await;
+        assert_eq!(count.load(Ordering::SeqCst), 2);
+        release.notify_one();
     }
 }
