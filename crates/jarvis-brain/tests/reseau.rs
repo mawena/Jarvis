@@ -991,3 +991,80 @@ async fn pc_eveille_repond_avant_le_delai_de_l_oreille() {
     cuisine.wake(3, 0.9, -30.0).unwrap();
     assert_eq!(cuisine.msg().await, BrainMessage::Elected { utterance: 3 });
 }
+
+#[tokio::test]
+async fn oreille_qui_abandonne_sans_prevenir_son_retabli() {
+    // L'oreille n'a pas reçu son élection dans ses 2 s (PC tenu pour endormi) : elle a
+    // abandonné la phrase sans fin de phrase, la connexion restant ouverte (élection
+    // retardée par le réseau, PC sorti de veille avec le réveil encore en route…).
+    let rig = rig().await;
+    let (mut salon, mut cuisine) = two_ears(&rig).await;
+    let start = Instant::now();
+    salon.wake(1, 0.9, -30.0).unwrap();
+    salon.speak(1, SUIVANT, 3).unwrap();
+    assert_eq!(salon.msg().await, BrainMessage::Elected { utterance: 1 });
+    // Plus de son : la phrase est close et la musique rétablie bien avant les 15 s du
+    // délai de capture.
+    assert_eq!(salon.msg().await, BrainMessage::Stop { utterance: 1 });
+    eventually("son rétabli", || rig.ducker() == ["duck", "restore"]).await;
+    assert!(
+        start.elapsed() < Duration::from_secs(8),
+        "{:?}",
+        start.elapsed()
+    );
+    assert_eq!(rig.fakes.stt.calls(), 0);
+    cuisine.wake(1, 0.9, -30.0).unwrap();
+    assert_eq!(cuisine.msg().await, BrainMessage::Elected { utterance: 1 });
+}
+
+#[tokio::test]
+async fn capture_qui_continue_n_est_pas_abandonnee() {
+    // Son reçu en continu (paquets de 100 ms en temps réel) pendant plusieurs secondes :
+    // la phrase va jusqu'au bout.
+    let rig = rig().await;
+    let mut salon = ear(&rig, &rig.salon).await;
+    salon.wake(1, 0.9, -30.0).unwrap();
+    assert_eq!(salon.msg().await, BrainMessage::Elected { utterance: 1 });
+    for _ in 0..50 {
+        salon.speak(1, SUIVANT, 1).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    salon.end(1).unwrap();
+    assert_eq!(heard_text(&salon.msg().await, 1), "suivant");
+}
+
+#[tokio::test]
+async fn gagnante_partie_pendant_la_fenetre_l_autre_est_elue() {
+    let rig = rig().await;
+    let (salon, mut cuisine) = two_ears(&rig).await;
+    salon.wake(1, 0.95, -10.0).unwrap();
+    cuisine.wake(1, 0.5, -40.0).unwrap();
+    cuisine.speak(1, SUIVANT, 2).unwrap();
+    salon.link.close().await;
+    drop(salon);
+    // La meilleure est partie avant la fin de la fenêtre : la cuisine est élue.
+    assert_eq!(cuisine.msg().await, BrainMessage::Elected { utterance: 1 });
+    cuisine.speak(1, SUIVANT, 3).unwrap();
+    cuisine.end(1).unwrap();
+    assert_eq!(heard_text(&cuisine.msg().await, 1), "suivant");
+    assert_eq!(rig.ducker(), ["duck", "restore"]);
+}
+
+#[tokio::test]
+async fn fin_de_phrase_avant_l_election() {
+    // Phrase très courte : les deux fins arrivent avant la fin de la fenêtre.
+    let rig = rig().await;
+    let (mut salon, mut cuisine) = two_ears(&rig).await;
+    salon.wake(5, 0.5, -30.0).unwrap();
+    cuisine.wake(8, 0.9, -30.0).unwrap();
+    salon.speak(5, SUIVANT, 2).unwrap();
+    cuisine.speak(8, SUIVANT, 2).unwrap();
+    salon.end(5).unwrap();
+    cuisine.end(8).unwrap();
+    assert_eq!(cuisine.msg().await, BrainMessage::Elected { utterance: 8 });
+    assert_eq!(salon.msg().await, BrainMessage::Stop { utterance: 5 });
+    assert_eq!(heard_text(&cuisine.msg().await, 8), "suivant");
+    salon.silent(Duration::from_millis(500)).await;
+    assert_eq!(rig.fakes.stt.calls(), 1);
+    assert_eq!(rig.fakes.media.calls().len(), 1);
+}

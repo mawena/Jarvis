@@ -25,6 +25,10 @@ use super::{MAX_PHRASE_SAMPLES, MAX_SESSIONS};
 /// Capture sans fin de phrase au-delà de ce délai : abandonnée (phrase de 10 s au
 /// plus côté oreille, plus la seconde de tête).
 pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Capture sans son depuis ce délai : l'oreille l'a abandonnée sans prévenir (pas
+/// d'élection dans ses 2 s, `ELECTION_TIMEOUT`, ou micro bloqué). L'oreille envoie son
+/// son en continu, par paquets de 100 ms, jusqu'à la fin de phrase.
+pub const AUDIO_STALL: Duration = Duration::from_secs(3);
 /// Traitement d'une phrase (transcription, compétence, voix) au plus.
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
 /// Relève des annonces pour les oreilles connectées.
@@ -393,17 +397,21 @@ struct Capture {
     follow_up: bool,
     samples: Vec<i16>,
     started: Instant,
+    /// Dernier son reçu (ou début de la capture).
+    heard: Instant,
     /// Fin reçue avant la décision de l'arbitre.
     ended: Option<End>,
 }
 
 impl Capture {
     fn new(utterance: u32, follow_up: bool) -> Self {
+        let now = Instant::now();
         Capture {
             utterance,
             follow_up,
             samples: Vec::new(),
-            started: Instant::now(),
+            started: now,
+            heard: now,
             ended: None,
         }
     }
@@ -836,6 +844,7 @@ impl State {
             return;
         }
         capture.samples.extend_from_slice(samples);
+        capture.heard = Instant::now();
     }
 
     /// Phrase abandonnée : son rétabli si besoin, `Stop` à l'oreille.
@@ -847,14 +856,27 @@ impl State {
     }
 
     fn expire_captures(&mut self) {
-        let late: Vec<(EarId, u32)> = self
+        let late: Vec<(EarId, u32, bool)> = self
             .captures
             .iter()
-            .filter(|(_, c)| c.ended.is_none() && c.started.elapsed() > CAPTURE_TIMEOUT)
-            .map(|(e, c)| (e.clone(), c.utterance))
+            .filter(|(_, c)| {
+                c.ended.is_none()
+                    && (c.started.elapsed() > CAPTURE_TIMEOUT || c.heard.elapsed() > AUDIO_STALL)
+            })
+            .map(|(e, c)| {
+                (
+                    e.clone(),
+                    c.utterance,
+                    c.started.elapsed() > CAPTURE_TIMEOUT,
+                )
+            })
             .collect();
-        for (ear, utterance) in late {
-            warn!(oreille = %ear, "phrase sans fin : abandonnée");
+        for (ear, utterance, endless) in late {
+            if endless {
+                warn!(oreille = %ear, "phrase sans fin : abandonnée");
+            } else {
+                warn!(oreille = %ear, "plus de son de l'oreille : phrase abandonnée");
+            }
             self.cancel(&ear, utterance);
         }
     }
