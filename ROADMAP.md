@@ -99,7 +99,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 6.3 Compétence recherche avec résumé vocal court (IA du mode actif) — Ollama seul en mode local (repli sur un extrait au-delà de 10 s), Claude en ligne
 - [x] 6.4 « Ouvre les résultats » dans le navigateur du PC (page de résultats, ou le n-ième lien)
 - [x] 6.5 « Lance la vidéo de… » (`yt-dlp` ou SearXNG vidéos) — dans le navigateur, musique mise en pause
-- [ ] 6.6 Relecture de la phase 6 et corrections (en cours)
+- [x] 6.6 Relecture de la phase 6 et corrections : délai d'écoute de l'oreille porté à 50 s (recherche locale de 10 s), « … sur internet » limité aux questions, préchauffage local sans ralentir la commande suivante
 - [ ] 6.7 Essai réel avec Charles (Charles) — [fiche d'essai](docs/essais/essai-6.7-recherche.md)
 
 ## Phase 7 : agent de code
