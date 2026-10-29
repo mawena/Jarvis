@@ -1,4 +1,5 @@
-//! Orchestrateur : raccourci, sinon IA du mode courant, puis compétence.
+//! Orchestrateur : raccourci du cerveau, puis raccourci d'une compétence, sinon IA
+//! du mode courant, puis compétence.
 //! Une action risquée attend d'abord un « oui » (voir [`Brain::answer_follow_up`]).
 
 use crate::fastpath::{BrainCommand, match_brain_command, match_confirmation, match_fast};
@@ -170,10 +171,11 @@ impl Brain {
         self
     }
 
-    /// Les outils proposés à l'IA : ceux des compétences, sans les outils système
-    /// (`set_mode`, `status`), que les raccourcis couvrent.
+    /// Les outils proposés à l'IA : ceux que les compétences lui ouvrent
+    /// (`llm_tools`), sans les outils système (`set_mode`, `status`), que les
+    /// raccourcis couvrent.
     pub fn tools(&self) -> Vec<ToolSpec> {
-        self.skills.iter().flat_map(|s| s.tools()).collect()
+        self.skills.iter().flat_map(|s| s.llm_tools()).collect()
     }
 
     pub fn mode(&self) -> Mode {
@@ -227,6 +229,16 @@ impl Brain {
                 }
             }
         }
+        // Raccourcis propres aux compétences : jamais de repli sur l'IA, et jamais
+        // remplacés par un bip seul (`fast_path` reste faux).
+        if let Some(shortcut) = self.skills.iter().find_map(|s| s.shortcut(text)) {
+            debug!(route = "skill_shortcut", tool = %shortcut.tool);
+            let intent = Intent::new(shortcut.tool, shortcut.args);
+            return match self.run_or_ask(intent, source).await {
+                Step::Answer(a) => a,
+                Step::NotFound(m) => Reply::failed(m).into(),
+            };
+        }
         let mode = self.modes.get();
         let (backend, route) = match mode {
             Mode::Local => (&self.local, "local"),
@@ -264,6 +276,8 @@ impl Brain {
     /// raccourci reconnu. Une action risquée n'est jamais proposée : `None` aussi. Une
     /// voix non vérifiée peut annuler, pas faire répéter : « répète » donne `None` (ni
     /// question reposée, donc pas de délai prolongé, ni dernière réponse redite).
+    /// Les raccourcis propres aux compétences (`Skill::shortcut`) ne sont jamais
+    /// consultés : l'agent de code, par exemple, exige une voix vérifiée.
     pub async fn answer_fast(&self, text: &str) -> Option<Answer> {
         let answer = match match_brain_command(text) {
             Some(BrainCommand::Repeat) => {
@@ -1242,6 +1256,157 @@ mod tests {
         assert_eq!(
             s.brain.handle_text("quel temps").await.outcome,
             Outcome::Info
+        );
+    }
+
+    // --- Raccourcis propres aux compétences (agent de code) ---
+
+    const PHRASE_AGENT: &str = "Jarvis, finis les tests du projet Jarvis";
+
+    struct Agent {
+        brain: Brain,
+        llm: Arc<FakeLlm>,
+        media: Arc<FakeSkill>,
+        agent: Arc<FakeSkill>,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Médias (proposés à l'IA, réussite sans phrase) et l'agent factice `agent`.
+    fn agent_with(agent: FakeSkill, persona: Persona) -> Agent {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = Arc::new(answer("Réponse de l'IA."));
+        let media = Arc::new(FakeSkill::new(&["media_next"]).with_result(Ok(Reply::done(""))));
+        let agent = Arc::new(agent);
+        let brain = Brain::new(
+            vec![media.clone(), agent.clone()],
+            llm.clone(),
+            llm.clone(),
+            Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+        )
+        .with_persona(persona);
+        Agent {
+            brain,
+            llm,
+            media,
+            agent,
+            _dir: dir,
+        }
+    }
+
+    fn fake_agent() -> FakeSkill {
+        FakeSkill::new(&["agent_start"])
+            .with_shortcut(
+                PHRASE_AGENT,
+                "agent_start",
+                serde_json::json!({"project": "Jarvis"}),
+            )
+            .with_llm_tools(false)
+    }
+
+    fn agent() -> Agent {
+        agent_with(fake_agent(), Persona::default())
+    }
+
+    #[tokio::test]
+    async fn raccourci_de_competence_apres_les_raccourcis() {
+        // « suivant » est aussi un raccourci de l'agent : celui du cerveau passe avant.
+        let skill = FakeSkill::new(&["agent_start"])
+            .with_shortcut("suivant", "agent_start", serde_json::json!({}))
+            .with_llm_tools(false);
+        let a = agent_with(skill, Persona::default());
+        assert_eq!(a.brain.handle_text("suivant").await.speech, "Bien.");
+        assert_eq!(a.media.calls().len(), 1);
+        assert!(a.agent.calls().is_empty());
+
+        let a = agent();
+        let r = a.brain.handle_text(PHRASE_AGENT).await;
+        assert_eq!(r.speech, "ok");
+        assert_eq!(
+            a.agent.calls(),
+            vec![(
+                "agent_start".to_string(),
+                serde_json::json!({"project": "Jarvis"})
+            )]
+        );
+        assert_eq!(a.llm.calls(), 0);
+        // Une autre phrase va à l'IA, comme avant.
+        a.brain.handle_text("quel temps fait-il").await;
+        assert_eq!(a.llm.calls(), 1);
+        assert_eq!(a.agent.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn raccourci_de_competence_introuvable_sans_ia() {
+        let message = "Je ne connais pas le projet « Zorg ». Projets connus : Jarvis.";
+        let skill = fake_agent().with_result(Err(SkillError::NotFound(message.into())));
+        let a = agent_with(skill, Persona::default());
+        let r = a.brain.handle_text(PHRASE_AGENT).await;
+        assert_eq!((r.speech.as_str(), r.outcome), (message, Outcome::Failed));
+        assert_eq!(a.llm.calls(), 0);
+        assert_eq!(a.agent.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn voix_non_verifiee_ignore_les_raccourcis_de_competence() {
+        let a = agent();
+        assert!(a.brain.answer_fast(PHRASE_AGENT).await.is_none());
+        assert!(a.brain.handle_fast(PHRASE_AGENT).await.is_none());
+        assert!(a.agent.calls().is_empty());
+        assert_eq!(a.llm.calls(), 0);
+        // La voix vérifiée, elle, lance l'outil.
+        a.brain.answer_text(PHRASE_AGENT).await;
+        assert_eq!(a.agent.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn outils_hors_ia_non_proposes() {
+        let a = agent();
+        let names: Vec<String> = a.brain.tools().into_iter().map(|t| t.name).collect();
+        assert_eq!(names, ["media_next"]);
+        a.brain.handle_text("quel temps fait-il").await;
+        assert_eq!(a.llm.last_tools(), ["media_next"]);
+        // L'IA ne voit pas l'outil, mais le raccourci le lance.
+        a.brain.handle_text(PHRASE_AGENT).await;
+        assert_eq!(a.agent.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn raccourci_de_competence_jamais_en_bip_seul() {
+        use crate::listen::ListenService;
+        use crate::testing::{FakeDucker, FakeTranscriber};
+        use jarvis_protocol::{ControlResponse, Sound};
+
+        let depart = "Bien. Je confie cela à Claude.";
+        let persona = Persona {
+            sound_only_for_success: true,
+            ..Persona::default()
+        };
+        let skill = fake_agent().with_result(Ok(Reply::done(depart)));
+        let a = agent_with(skill, persona.clone());
+        let r = a.brain.answer_text(PHRASE_AGENT).await;
+        assert!(!r.fast_path);
+        assert_eq!(
+            (r.reply.speech.as_str(), r.reply.outcome),
+            (depart, Outcome::Done)
+        );
+
+        // Par l'oreille, avec le bip seul activé : la phrase est dite quand même.
+        let skill = fake_agent().with_result(Ok(Reply::done(depart)));
+        let a = agent_with(skill, persona);
+        let svc = ListenService::new(
+            Arc::new(a.brain),
+            Arc::new(FakeTranscriber::new(PHRASE_AGENT)),
+            Arc::new(FakeDucker::new()),
+        );
+        assert_eq!(
+            svc.listen(&[1, 2, 3], false, false).await,
+            ControlResponse::Heard {
+                text: PHRASE_AGENT.into(),
+                speech: depart.into(),
+                ear_action: None,
+                audio: None,
+                sound: Some(Sound::Success),
+            }
         );
     }
 }

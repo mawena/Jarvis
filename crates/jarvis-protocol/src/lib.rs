@@ -47,6 +47,9 @@ impl FromStr for Mode {
     }
 }
 
+/// Nom de l'oreille quand `ear` est absent.
+pub const DEFAULT_EAR: &str = "pc";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlRequest {
@@ -68,6 +71,15 @@ pub enum ControlRequest {
         /// mot d'éveil.
         #[serde(default)]
         follow_up: bool,
+        /// Nom de l'oreille ; absent : [`DEFAULT_EAR`].
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ear: Option<String>,
+    },
+    /// Annonces en attente pour cette oreille (fin d'une tâche d'agent…) ;
+    /// oreille absente : [`DEFAULT_EAR`].
+    Announcements {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ear: Option<String>,
     },
     /// Enregistre l'empreinte vocale : chaque élément est un échantillon audio
     /// (même format que `Listen.audio`).
@@ -102,6 +114,16 @@ pub struct SpeechAudio {
     pub sample_rate: u32,
 }
 
+/// Annonce à dire par l'oreille ; voix et bip facultatifs.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Announcement {
+    pub speech: String,
+    #[serde(default)]
+    pub audio: Option<SpeechAudio>,
+    #[serde(default)]
+    pub sound: Option<Sound>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlResponse {
@@ -123,6 +145,10 @@ pub enum ControlResponse {
         audio: Option<SpeechAudio>,
         #[serde(default)]
         sound: Option<Sound>,
+    },
+    /// Réponse à `Announcements` : vide s'il n'y a rien à dire.
+    Announcements {
+        items: Vec<Announcement>,
     },
     Error {
         message: String,
@@ -229,6 +255,7 @@ mod tests {
             audio: encode_pcm(&[1, 2, 3]),
             muted: true,
             follow_up: true,
+            ear: Some("salon".into()),
         };
         let json = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
@@ -305,6 +332,72 @@ mod tests {
                 audio: String::new(),
                 muted: false,
                 follow_up: false,
+                ear: None,
+            }
+        );
+    }
+
+    #[test]
+    fn listen_sans_ear_reste_lisible() {
+        let r: ControlRequest =
+            serde_json::from_str(r#"{"type":"listen","audio":"","muted":true,"follow_up":true}"#)
+                .unwrap();
+        assert_eq!(
+            r,
+            ControlRequest::Listen {
+                audio: String::new(),
+                muted: true,
+                follow_up: true,
+                ear: None,
+            }
+        );
+        // Sans oreille, rien n'est envoyé : un ancien cerveau lit la même ligne.
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(!json.contains("ear"), "{json}");
+        let r: ControlRequest = serde_json::from_str(r#"{"type":"announcements"}"#).unwrap();
+        assert_eq!(r, ControlRequest::Announcements { ear: None });
+        assert_eq!(DEFAULT_EAR, "pc");
+    }
+
+    #[test]
+    fn announcements_aller_retour() {
+        let r = ControlRequest::Announcements {
+            ear: Some("pc".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"type":"announcements","ear":"pc"}"#);
+        assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
+        let r = ControlResponse::Announcements {
+            items: vec![Announcement {
+                speech: "La tâche sur Jarvis est terminée.".into(),
+                audio: Some(SpeechAudio {
+                    pcm: encode_pcm(&[1, -1]),
+                    sample_rate: 22_050,
+                }),
+                sound: Some(Sound::Success),
+            }],
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.starts_with(r#"{"type":"announcements","items":["#),
+            "{json}"
+        );
+        assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn annonce_sans_audio_lisible() {
+        let r: ControlResponse =
+            serde_json::from_str(r#"{"type":"announcements","items":[{"speech":"Fini."}]}"#)
+                .unwrap();
+        assert_eq!(
+            r,
+            ControlResponse::Announcements {
+                items: vec![Announcement {
+                    speech: "Fini.".into(),
+                    audio: None,
+                    sound: None,
+                }],
             }
         );
     }
