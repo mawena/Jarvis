@@ -7,7 +7,8 @@
 //!   AUDIO_CTX=<n>   fenêtre fixe de n trames (1 500 = 30 s) ;
 //!   FLASH=1         attention « flash » de whisper.cpp ;
 //!   NO_FALLBACK=1   pas de nouvel essai à température plus haute quand le décodage hésite ;
-//!   REPEAT=<n>      répète chaque fichier n fois.
+//!   REPEAT=<n>      répète chaque fichier n fois ;
+//!   PROMPT=<texte>  indice donné à Whisper (« Jarvis. » par défaut).
 
 use std::time::Instant;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -22,6 +23,7 @@ fn main() -> anyhow::Result<()> {
     let audio_ctx = std::env::var("AUDIO_CTX").ok();
     let flash = std::env::var("FLASH").is_ok_and(|v| v == "1");
     let no_fallback = std::env::var("NO_FALLBACK").is_ok_and(|v| v == "1");
+    let prompt = std::env::var("PROMPT").unwrap_or_else(|_| "Jarvis.".into());
     let repeat: usize = std::env::var("REPEAT").map_or(Ok(1), |v| v.parse())?;
     let files: Vec<String> = files
         .iter()
@@ -58,9 +60,10 @@ fn main() -> anyhow::Result<()> {
         params.set_no_timestamps(true);
         params.set_no_context(true);
         params.set_single_segment(true);
-        params.set_initial_prompt("Jarvis.");
+        params.set_initial_prompt(&prompt);
         if no_fallback {
             params.set_temperature_inc(0.0);
+            params.set_max_tokens(128); // comme le cerveau
         }
         let ctx_frames = match audio_ctx.as_deref() {
             Some("auto") => Some(auto_audio_ctx(audio.len())),
