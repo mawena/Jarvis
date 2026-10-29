@@ -1,8 +1,6 @@
 //! Réseau des oreilles : connexion au cerveau (WebSocket sur TLS épinglé),
 //! reconnexion, découverte, appairage, phrase hors ligne. Portable (Linux, Android,
 //! iOS) : ni `cpal`, ni `directories`, ni D-Bus ; les chemins viennent de l'appelant.
-// Squelette (tâche 1) : à retirer par la tâche 4.
-#![allow(dead_code, unused_variables)]
 
 pub mod backoff;
 pub mod batch;

@@ -1685,6 +1685,7 @@ dependencies = [
  "rustls",
  "rustpotter",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "tokio-rustls",
