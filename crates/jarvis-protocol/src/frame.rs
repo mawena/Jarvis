@@ -5,6 +5,10 @@
 pub const MIC_AUDIO: u8 = 0x01;
 /// Échantillons au plus par trame (1 s).
 pub const MAX_FRAME_SAMPLES: usize = 16_000;
+/// Son d'une phrase envoyé au plus par l'oreille, de la première trame à la fin de
+/// phrase (seconde de tête comprise) : 14 s à 16 kHz. L'oreille borne ses captures
+/// (réveil et réponse à une question) à cette longueur ; le cerveau garde un peu plus.
+pub const MAX_PHRASE_SAMPLES: usize = 14 * 16_000;
 /// Type et numéro de phrase.
 const HEADER_LEN: usize = 5;
 

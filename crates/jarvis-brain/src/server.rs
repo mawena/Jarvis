@@ -12,7 +12,7 @@ use crate::speaker::SpeakerGate;
 use crate::tts::Voice;
 use anyhow::{Context, bail};
 use jarvis_protocol::{
-    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm,
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm, pairing_ended,
 };
 use jarvis_skills::{Outcome, SystemRunner};
 use std::io::{self, ErrorKind};
@@ -271,7 +271,7 @@ where
         outcome = ticket.outcome => match outcome {
             Ok(PairOutcome::Done { name }) => ControlResponse::PairingDone { name },
             Ok(PairOutcome::Ended { reason }) => ended(&reason),
-            Err(_) => ended("Fenêtre fermée."),
+            Err(_) => ended(pairing_ended::BRAIN_STOPPING),
         },
         _ = reader.fill_buf() => {
             // Ctrl-C de `jarvis pair` : connexion fermée.
@@ -280,7 +280,7 @@ where
         }
         () = tokio::time::sleep(guard) => {
             hub.pair_cancel(id).await;
-            ended("Délai écoulé.")
+            ended(pairing_ended::TIMED_OUT)
         }
     };
     send(write, &last).await?;

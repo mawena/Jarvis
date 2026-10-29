@@ -112,13 +112,17 @@ pub fn countdown(expires_in_secs: u64) -> (mpsc::Sender<()>, std::thread::JoinHa
     (stop, handle)
 }
 
-/// Tableau nom / plateforme / connectée / locale.
+/// Caractères de l'identifiant montrés par `jarvis ears` (assez pour `jarvis unpair`).
+pub const SHORT_ID: usize = 8;
+
+/// Tableau identifiant court / nom / plateforme / connectée / locale.
 pub fn ears_table(ears: &[EarSummary]) -> String {
     if ears.is_empty() {
         return "Aucune oreille appairée.".into();
     }
     let yes_no = |b: bool| if b { "oui" } else { "non" }.to_string();
     let mut rows = vec![[
+        "Id".to_string(),
         "Nom".to_string(),
         "Plateforme".to_string(),
         "Connectée".to_string(),
@@ -126,13 +130,14 @@ pub fn ears_table(ears: &[EarSummary]) -> String {
     ]];
     rows.extend(ears.iter().map(|e| {
         [
+            e.id.as_str().chars().take(SHORT_ID).collect(),
             e.name.clone(),
             e.platform.clone(),
             yes_no(e.connected),
             yes_no(e.local),
         ]
     }));
-    let widths: Vec<usize> = (0..4)
+    let widths: Vec<usize> = (0..rows[0].len())
         .map(|c| rows.iter().map(|r| r[c].chars().count()).max().unwrap_or(0))
         .collect();
     rows.iter()

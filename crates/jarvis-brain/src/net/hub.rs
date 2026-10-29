@@ -2,7 +2,7 @@
 //! les sessions, le registre et la fenêtre d'appairage. `Hub` en est la poignée
 //! (clonable) : chaque appel est un message à cette tâche.
 
-use crate::announce::AnnouncementBoard;
+use crate::announce::{AnnouncementBoard, Pending};
 use crate::arbiter::{Arbiter, ArbiterAction, EndVerdict, WakeReport};
 use crate::brain::Brain;
 use crate::ears::{EarRecord, EarRegistry, hex};
@@ -10,6 +10,7 @@ use crate::listen::ListenService;
 use crate::pairing::{PairAttempt, PairingWindow};
 use crate::tts::Voice;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
+use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
 use sha2::{Digest, Sha256};
@@ -22,15 +23,19 @@ use tracing::{debug, info, warn};
 
 use super::{MAX_PHRASE_SAMPLES, MAX_SESSIONS};
 
-/// Capture sans fin de phrase au-delà de ce délai : abandonnée (phrase de 10 s au
-/// plus côté oreille, plus la seconde de tête).
-pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Capture sans fin de phrase au-delà de ce délai : abandonnée (14 s de son au plus
+/// côté oreille, `jarvis_protocol::frame::MAX_PHRASE_SAMPLES`, envoyé en temps réel,
+/// plus la marge du réseau).
+pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Capture sans son depuis ce délai : l'oreille l'a abandonnée sans prévenir (pas
 /// d'élection dans ses 2 s, `ELECTION_TIMEOUT`, ou micro bloqué). L'oreille envoie son
 /// son en continu, par paquets de 100 ms, jusqu'à la fin de phrase.
 pub const AUDIO_STALL: Duration = Duration::from_secs(3);
-/// Traitement d'une phrase (transcription, compétence, voix) au plus.
-pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(60);
+/// Traitement d'une phrase (transcription, compétence, voix) au plus : au-dessus du
+/// pire cas (45 s, voir le test `budget_ecoute`), sous l'attente de la réponse par
+/// l'oreille (50 s, `LISTEN_TIMEOUT` de jarvis-ear) moins la fenêtre de l'arbitre et le
+/// réseau. Ainsi l'oreille reçoit toujours `Error` (bip d'échec) plutôt que rien.
+pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(47);
 /// Relève des annonces pour les oreilles connectées.
 const ANNOUNCE_EVERY: Duration = Duration::from_secs(5);
 /// Messages en attente vers la tâche du hub.
@@ -179,9 +184,12 @@ enum Command {
         audio: SpeechAudio,
     },
     PollAnnouncements,
+    /// Annonces prêtes pour `ear` ; `items` : les mêmes, telles que relevées (remises
+    /// en file si l'oreille est partie).
     Deliver {
         ear: EarId,
         message: BrainMessage,
+        items: Vec<Pending>,
     },
 }
 
@@ -368,6 +376,10 @@ pub fn offline_phrase_id(text: &str, voice_tag: &str) -> String {
 enum SoundCmd {
     Duck,
     Restore,
+    /// Prévient quand tout ce qui précède est fait : le traitement d'une phrase
+    /// l'attend avant de rétablir le son lui-même (`ListenService::listen`), pour
+    /// qu'une baisse encore en file ne passe pas après (son laissé baissé).
+    Flush(oneshot::Sender<()>),
 }
 
 async fn sound_loop(listen: Arc<ListenService>, mut rx: mpsc::UnboundedReceiver<SoundCmd>) {
@@ -375,6 +387,9 @@ async fn sound_loop(listen: Arc<ListenService>, mut rx: mpsc::UnboundedReceiver<
         match cmd {
             SoundCmd::Duck => listen.wake().await,
             SoundCmd::Restore => listen.restore().await,
+            SoundCmd::Flush(done) => {
+                let _ = done.send(());
+            }
         }
     }
 }
@@ -491,7 +506,7 @@ impl State {
                     let actions = self.arbiter.tick(Instant::now());
                     self.apply(actions);
                 }
-                () = until(expiry) => self.close_pairing("Délai écoulé."),
+                () = until(expiry) => self.close_pairing(pairing_ended::TIMED_OUT),
                 _ = tick.tick() => self.expire_captures(),
                 changed = async { modes.as_mut().expect("garde").changed().await }, if modes.is_some() => {
                     match changed {
@@ -507,7 +522,7 @@ impl State {
         }
         if let Some(open) = self.pairing.take() {
             let _ = open.waiter.send(PairOutcome::Ended {
-                reason: "Le cerveau s'arrête.".into(),
+                reason: pairing_ended::BRAIN_STOPPING.into(),
             });
         }
     }
@@ -569,7 +584,7 @@ impl State {
             }
             Command::PairCancel { id } => {
                 if self.pairing.as_ref().is_some_and(|p| p.id == id) {
-                    self.close_pairing("Fenêtre fermée.");
+                    self.close_pairing(pairing_ended::CANCELLED);
                 }
             }
             Command::PairLocal { name, reply } => {
@@ -583,9 +598,14 @@ impl State {
             }
             Command::OfflinePhrase { id, audio } => self.offline_phrase(id, audio),
             Command::PollAnnouncements => self.poll_announcements(),
-            Command::Deliver { ear, message } => {
+            Command::Deliver {
+                ear,
+                message,
+                items,
+            } => {
                 if !self.send(&ear, message) {
-                    debug!(oreille = %ear, "oreille partie : message perdu");
+                    debug!(oreille = %ear, "oreille partie : annonces remises en file");
+                    self.services.board.requeue(items);
                 }
             }
         }
@@ -1041,9 +1061,14 @@ impl State {
         let (ear, follow_up, muted) = (ear.clone(), capture.follow_up, end.muted);
         let me = self.me.clone();
         let limit = self.settings.process_timeout;
+        // La baisse du son de cette phrase peut être encore en file : `listen` ne
+        // rétablit le son qu'après elle.
+        let (flushed_tx, flushed) = oneshot::channel();
+        let _ = self.sound.send(SoundCmd::Flush(flushed_tx));
         tokio::spawn(async move {
             let (job_ear, job_listen) = (ear.clone(), listen.clone());
             let mut job = tokio::spawn(async move {
+                let _ = flushed.await;
                 let response = job_listen.listen(&job_ear, &audio, muted, follow_up).await;
                 voice.speak(response).await
             });
@@ -1133,20 +1158,30 @@ impl State {
         }
         let ears: Vec<EarId> = self.sessions.keys().cloned().collect();
         for ear in ears {
-            let taken = self.services.board.take_for(ear.as_str());
+            let taken = self.services.board.take_pending_for(ear.as_str());
             if taken.is_empty() {
                 continue;
             }
             let voice = self.services.voice.clone();
             let me = self.me.clone();
             tokio::spawn(async move {
-                let items = crate::server::voiced(&voice, taken).await;
+                let raw = taken
+                    .iter()
+                    .map(|p| (p.speech.clone(), p.outcome))
+                    .collect();
+                let items = crate::server::voiced(&voice, raw).await;
                 let message = BrainMessage::Response {
                     utterance: None,
                     response: ControlResponse::Announcements { items },
                 };
                 if let Some(tx) = me.upgrade() {
-                    let _ = tx.send(Command::Deliver { ear, message }).await;
+                    let _ = tx
+                        .send(Command::Deliver {
+                            ear,
+                            message,
+                            items: taken,
+                        })
+                        .await;
                 }
             });
             return;
@@ -1158,7 +1193,7 @@ impl State {
     fn pair_start(&mut self) -> Result<PairTicket, String> {
         if let Some(old) = self.pairing.take() {
             let _ = old.waiter.send(PairOutcome::Ended {
-                reason: "Une autre fenêtre d'appairage a été ouverte.".into(),
+                reason: pairing_ended::REPLACED.into(),
             });
         }
         let (window, code) = PairingWindow::open(Instant::now(), self.settings.pairing_ttl);
@@ -1233,7 +1268,7 @@ impl State {
                     }
                     Err(e) => {
                         warn!(erreur = %e, "registre des oreilles : écriture impossible");
-                        self.close_pairing(&format!("Enregistrement impossible : {e}."));
+                        self.close_pairing(&pairing_ended::not_saved(&e.to_string()));
                         closed
                     }
                 }
@@ -1241,7 +1276,7 @@ impl State {
             PairAttempt::WrongCode { attempts_left } => {
                 info!(%from, restants = attempts_left, "code d'appairage faux");
                 if !open.window.is_open(now) {
-                    self.close_pairing("Trop d'essais.");
+                    self.close_pairing(pairing_ended::TOO_MANY_ATTEMPTS);
                 }
                 BrainMessage::Rejected {
                     reason: RejectReason::WrongCode { attempts_left },
@@ -1254,7 +1289,7 @@ impl State {
                 }
             }
             PairAttempt::Closed => {
-                self.close_pairing("Délai écoulé.");
+                self.close_pairing(pairing_ended::TIMED_OUT);
                 closed
             }
         }
@@ -1341,6 +1376,18 @@ fn clean(text: &str, max: usize, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phrase_la_plus_longue_de_l_oreille_gardee_en_entier() {
+        // Marge d'au moins 0,5 s sur ce que l'oreille envoie.
+        const { assert!(MAX_PHRASE_SAMPLES >= jarvis_protocol::frame::MAX_PHRASE_SAMPLES + 16_000 / 2) };
+        // Envoyée en temps réel : la capture n'est pas tenue pour sans fin avant.
+        let secs = Duration::from_secs_f64(MAX_PHRASE_SAMPLES as f64 / 16_000.0);
+        assert!(
+            CAPTURE_TIMEOUT >= secs + Duration::from_secs(3),
+            "{CAPTURE_TIMEOUT:?}"
+        );
+    }
 
     #[test]
     fn coupe_retiree_et_bornee() {

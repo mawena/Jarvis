@@ -265,11 +265,19 @@ impl Transcriber for FakeTranscriber {
 #[derive(Default)]
 pub struct FakeDucker {
     events: Mutex<Vec<&'static str>>,
+    /// Durée d'une baisse (`wpctl` lent), notée à la fin.
+    duck_delay: std::time::Duration,
 }
 
 impl FakeDucker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Baisse lente : `duck` ne la note qu'au bout de `delay`.
+    pub fn with_duck_delay(mut self, delay: std::time::Duration) -> Self {
+        self.duck_delay = delay;
+        self
     }
 
     /// Appels dans l'ordre : `"duck"` ou `"restore"`.
@@ -281,6 +289,9 @@ impl FakeDucker {
 #[async_trait::async_trait]
 impl Ducker for FakeDucker {
     async fn duck(&self) {
+        if !self.duck_delay.is_zero() {
+            tokio::time::sleep(self.duck_delay).await;
+        }
         self.events.lock().unwrap().push("duck");
     }
 

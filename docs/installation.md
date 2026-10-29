@@ -30,7 +30,8 @@ Si un ancien `jarvis-brain` existe dans `~/.cargo/bin` : `cargo uninstall jarvis
 - **Le cerveau** (`jarvis-brain.service`) et **l'oreille du PC** (`jarvis-ear.service`)
   démarrent seuls à l'ouverture de la session graphique et s'arrêtent avec elle.
 - L'oreille démarre après le cerveau, mais n'en dépend pas : sans cerveau, elle tourne quand
-  même et son icône affiche « PC injoignable ».
+  même. Son icône affiche « connexion au PC… » tant qu'elle n'a pas encore pu s'appairer
+  (premier démarrage), puis « PC injoignable » ou « connexion au PC… » une fois appairée.
 - L'oreille du PC parle au cerveau par le réseau des oreilles (TLS sur `127.0.0.1`, port
   7341), comme toute autre oreille, et s'appaire seule à son premier démarrage. Le socket
   Unix reste pour `jarvis`, `jarvisctl`, l'enrôlement et l'appairage.

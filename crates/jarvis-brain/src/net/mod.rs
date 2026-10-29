@@ -42,8 +42,10 @@ pub const MAX_HANDSHAKES_PER_IP: usize = 2;
 pub const LOOPBACK_HANDSHAKES: usize = 8;
 /// Délai de toute la poignée de main : TLS, WebSocket et premier message.
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
-/// Son d'une phrase gardé au plus : 1 s de tête + 12 s, à 16 kHz.
-pub const MAX_PHRASE_SAMPLES: usize = 13 * 16_000;
+/// Son d'une phrase gardé au plus : ce que l'oreille envoie au plus
+/// ([`jarvis_protocol::frame::MAX_PHRASE_SAMPLES`]), plus une seconde de marge (paquets
+/// de 100 ms, dernière trame de détection de parole).
+pub const MAX_PHRASE_SAMPLES: usize = jarvis_protocol::frame::MAX_PHRASE_SAMPLES + 16_000;
 /// Fenêtre de l'arbitre au plus : l'oreille attend son élection 2 s après `wake`
 /// (`ELECTION_TIMEOUT` de `jarvis-ear-core`), puis tient le PC pour endormi.
 pub const MAX_ARBITER_WINDOW: Duration = Duration::from_secs(1);

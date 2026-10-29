@@ -71,9 +71,15 @@ voir plus bas). L'appairage est dans `~/.local/share/jarvis/ear/pairing.toml` (0
 ## Lister et retirer les oreilles
 
 ```bash
-jarvis ears              # nom, plateforme, connectée ou non
-jarvis unpair Salon      # par nom ou identifiant
+jarvis ears              # identifiant court, nom, plateforme, connectée ou non
+jarvis unpair Salon      # par nom
+jarvis unpair 3f9a1c07   # ou par identifiant (la colonne Id de jarvis ears suffit)
 ```
+
+Une machine réappairée sous le même nom laisse son ancienne fiche : le cerveau ne la remplace
+pas, deux téléphones du même modèle pouvant porter le même nom. Avec deux oreilles du même nom,
+`jarvis unpair <nom>` demande l'identifiant : retirez l'ancienne (« Connectée : non ») par sa
+colonne Id.
 
 Une oreille retirée est déconnectée tout de suite et refusée ensuite ; pour la reprendre,
 refaites l'appairage. L'oreille du PC, elle, se réappaire aussitôt par le socket Unix : pour
@@ -122,8 +128,19 @@ et `~/.local/state/jarvis/ear-essai-muted`. Il doit être appairé avant d'être
 
 Une oreille qui perd le cerveau (PC en veille, cerveau arrêté) se reconnecte seule. Si on lui
 parle entre-temps, elle répond « le PC est endormi » (la voix de Jarvis, reçue à l'avance du
-cerveau ; sinon un bip d'échec) en moins de 2 s. Rien n'est envoyé ni gardé en attente : la
+cerveau ; sinon un bip d'échec) en 2 s environ. Rien n'est envoyé ni gardé en attente : la
 phrase est perdue.
+
+Cerveau arrêté proprement : la connexion tombe aussitôt, la réponse est immédiate. Après une
+mise en veille brutale du PC, la connexion peut sembler ouverte un moment (jusqu'à ce que
+l'oreille constate le silence) : l'oreille envoie alors la phrase, mais sans élection du
+cerveau dans les 2 s, elle dit quand même « le PC est endormi » et abandonne la phrase. De
+même si le lien tombe pendant que Jarvis réfléchit : la réponse ne viendra plus, l'oreille le
+dit. Un traitement trop long (plus de 47 s) se termine par un bip d'échec.
+
+« Jarvis » redit pendant que Jarvis réfléchit (cerveau occupé par la phrase précédente) : le
+bip de réveil retentit, puis la réponse à la première phrase arrive comme prévu ; le nouveau
+réveil est simplement ignoré, sans bip d'échec.
 
 L'icône de l'oreille du PC dit « PC injoignable », « connexion au PC… » ou « appairage refusé :
 relancez jarvis-ear pair » (oreille retirée ou jeton refusé).

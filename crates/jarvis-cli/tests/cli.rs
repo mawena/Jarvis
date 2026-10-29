@@ -1,4 +1,4 @@
-use jarvis_protocol::{ControlRequest, ControlResponse, EarId, EarSummary};
+use jarvis_protocol::{ControlRequest, ControlResponse, EarId, EarSummary, pairing_ended};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -126,7 +126,7 @@ fn pair_fenetre_expiree_code_1() {
             (
                 Duration::from_millis(50),
                 ControlResponse::PairingEnded {
-                    reason: "délai écoulé".into(),
+                    reason: pairing_ended::TIMED_OUT.into(),
                 },
             ),
         ],
@@ -138,6 +138,44 @@ fn pair_fenetre_expiree_code_1() {
         String::from_utf8_lossy(&out.stderr).trim(),
         "Fenêtre d'appairage fermée : délai écoulé."
     );
+}
+
+#[test]
+fn pair_raisons_du_cerveau_bien_ponctuees() {
+    for (reason, shown) in [
+        (
+            pairing_ended::TOO_MANY_ATTEMPTS.to_string(),
+            "Fenêtre d'appairage fermée : trop d'essais.",
+        ),
+        (
+            pairing_ended::REPLACED.to_string(),
+            "Fenêtre d'appairage fermée : une autre fenêtre d'appairage a été ouverte.",
+        ),
+        (
+            pairing_ended::BRAIN_STOPPING.to_string(),
+            "Fenêtre d'appairage fermée : le cerveau s'arrête.",
+        ),
+        (
+            pairing_ended::not_saved("disque plein"),
+            "Fenêtre d'appairage fermée : enregistrement impossible (disque plein).",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let brain = faux_cerveau(
+            dir.path(),
+            vec![
+                (Duration::ZERO, fenetre()),
+                (
+                    Duration::from_millis(50),
+                    ControlResponse::PairingEnded { reason },
+                ),
+            ],
+        );
+        let out = jarvis(dir.path(), &["pair"]);
+        brain.join().unwrap();
+        assert_eq!(out.status.code(), Some(1));
+        assert_eq!(String::from_utf8_lossy(&out.stderr).trim(), shown);
+    }
 }
 
 #[test]
@@ -166,8 +204,8 @@ fn ears_liste_les_oreilles() {
             Duration::ZERO,
             ControlResponse::Ears {
                 ears: vec![
-                    ear("a1", "PC", "linux", true, true),
-                    ear("b2", "Pixel 4 XL", "android", false, false),
+                    ear("a1b2c3d4e5f60718", "PC", "linux", true, true),
+                    ear("0f1e2d3c4b5a6978", "Pixel 4 XL", "android", false, false),
                 ],
             },
         )],
@@ -182,9 +220,9 @@ fn ears_liste_les_oreilles() {
     assert_eq!(
         lines,
         [
-            "Nom         Plateforme  Connectée  Locale",
-            "PC          linux       oui        oui",
-            "Pixel 4 XL  android     non        non",
+            "Id        Nom         Plateforme  Connectée  Locale",
+            "a1b2c3d4  PC          linux       oui        oui",
+            "0f1e2d3c  Pixel 4 XL  android     non        non",
         ]
     );
 }

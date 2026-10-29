@@ -82,6 +82,10 @@ pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     election: Option<(u32, Instant)>,
     election_timeout: Duration,
     awaited: Option<Awaited>,
+    /// Réponse attendue mise de côté par un nouveau réveil, le temps de la décision du
+    /// cerveau : `elected` l'oublie (la nouvelle phrase la remplace), `stop` la rétablit
+    /// (cerveau occupé par cette phrase : sa réponse viendra et sera jouée).
+    superseded: Option<Awaited>,
     /// Une question attend la fin de la lecture pour écouter la réponse.
     awaiting_reply: bool,
     player: Box<dyn Player>,
@@ -127,6 +131,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             election: None,
             election_timeout: ELECTION_TIMEOUT,
             awaited: None,
+            superseded: None,
             awaiting_reply: false,
             player: Box::new(player),
             playing,
@@ -278,10 +283,18 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             LinkEvent::Connected(_) => {}
             LinkEvent::Disconnected => {
                 // La réponse attendue ne viendra plus.
-                self.awaited = None;
+                let awaited = self
+                    .awaited
+                    .take()
+                    .is_some_and(|a| a.since.elapsed() < RESPONSE_TIMEOUT);
+                self.superseded = None;
                 if self.current.is_some() || self.election.is_some() {
                     tracing::warn!("connexion au cerveau perdue pendant la phrase");
                     self.abandon();
+                } else if awaited {
+                    tracing::warn!("connexion au cerveau perdue avant la réponse");
+                    self.say_asleep();
+                    self.link.nudge();
                 }
             }
             LinkEvent::Message(message) => self.on_message(message),
@@ -294,20 +307,36 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                 if self.election.is_some_and(|(u, _)| u == utterance) {
                     tracing::debug!("oreille élue (phrase {utterance})");
                     self.election = None;
+                    // La nouvelle phrase est prise : la réponse de la précédente n'est
+                    // plus jouée.
+                    self.superseded = None;
                 }
             }
             BrainMessage::Stop { utterance } => {
-                if self.election.is_some_and(|(u, _)| u == utterance) {
+                let refused = self.election.is_some_and(|(u, _)| u == utterance);
+                if refused {
                     self.election = None;
                 }
                 if self.awaited.is_some_and(|a| a.utterance == utterance) {
                     self.awaited = None;
+                }
+                if self.superseded.is_some_and(|a| a.utterance == utterance) {
+                    self.superseded = None;
                 }
                 if self.current.is_some_and(|c| c.utterance == utterance) {
                     tracing::info!("capture arrêtée par le cerveau (autre oreille ou phrase)");
                     self.current = None;
                     self.batcher = AudioBatcher::new();
                     self.listener.reset();
+                }
+                // Réveil refusé pendant que le cerveau traite la phrase précédente :
+                // sa réponse reste attendue, et sera jouée. Pas de bip d'échec : `stop`
+                // est aussi ce que reçoit l'oreille perdante d'un réveil entendu par
+                // deux oreilles, que rien ne distingue d'un refus ; sans réponse en
+                // attente ici, la phrase en cours est celle d'une autre oreille, qui
+                // répondra.
+                if refused && self.awaited.is_none() {
+                    self.awaited = self.superseded.take();
                 }
             }
             BrainMessage::Response {
@@ -399,8 +428,6 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             self.player.stop();
         }
         self.awaiting_reply = false;
-        // Nouvelle phrase : la réponse de la précédente n'est plus jouée.
-        self.awaited = None;
         self.utterance = self.utterance.wrapping_add(1);
         let utterance = self.utterance;
         let wake = EarMessage::Wake {
@@ -416,6 +443,11 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             self.say_asleep();
             self.link.nudge();
             return;
+        }
+        // Nouvelle phrase : la réponse de la précédente est mise de côté jusqu'à la
+        // décision du cerveau (élue : oubliée ; refusée car il est occupé : rétablie).
+        if let Some(previous) = self.awaited.take() {
+            self.superseded = Some(previous);
         }
         // Écoute coupée : pas de bip (le mot d'éveil n'est là que pour réactiver).
         if !self.muted {
@@ -481,6 +513,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         self.current = None;
         self.election = None;
         self.awaited = None;
+        self.superseded = None;
         self.batcher = AudioBatcher::new();
         self.listener.reset();
         self.say_asleep();
@@ -513,9 +546,23 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             "ni élue ni arrêtée en {:?} : le PC est tenu pour endormi",
             self.election_timeout
         );
-        if self.current.is_some_and(|c| c.utterance == utterance)
-            || self.awaited.is_some_and(|a| a.utterance == utterance)
-        {
+        // Le lien peut sembler ouvert (cerveau figé, PC suspendu brutalement…) : fin de
+        // phrase vide envoyée au mieux, pour que le cerveau ne traite pas une phrase
+        // dont l'utilisateur a entendu « le PC est endormi » et rétablisse le son.
+        let capturing = self.current.is_some_and(|c| c.utterance == utterance);
+        let ended = self.awaited.filter(|a| a.utterance == utterance);
+        if capturing {
+            self.cancel_capture();
+        } else if let Some(ended) = ended {
+            // Phrase déjà finie : annulée si le cerveau ne l'a pas encore lancée.
+            let _ = self.link.send(EarMessage::ListenEnd {
+                utterance,
+                muted: ended.muted,
+                no_speech: true,
+                cut: None,
+            });
+        }
+        if capturing || ended.is_some() {
             self.abandon();
         }
     }
@@ -638,6 +685,9 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             utterance,
             muted: false,
         });
+        // Comme après un réveil : cerveau figé, « le PC est endormi » plutôt que le
+        // silence.
+        self.election = Some((utterance, Instant::now() + self.election_timeout));
     }
 
     /// Au repos : ni capture, ni lecture, ni réponse attendue, ni élection en cours.
@@ -698,6 +748,11 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             }
             ControlResponse::Error { message } => {
                 tracing::warn!("le cerveau signale une erreur : {message}");
+                // Traitement interrompu ou trop long : pas de silence. Rien en écoute
+                // coupée, comme pour toute réponse qui n'est pas la réactivation.
+                if !muted {
+                    self.play_reply(Some(Sound::Failure), None);
+                }
             }
             _ => {}
         }
@@ -911,6 +966,9 @@ mod tests {
                 }
                 EarMessage::ListenStart { utterance } => {
                     self.follow_ups.lock().unwrap().insert(utterance);
+                    if self.elect.load(Ordering::SeqCst) {
+                        self.reply(BrainMessage::Elected { utterance });
+                    }
                 }
                 EarMessage::ListenEnd { utterance, .. } => {
                     let follow_up = self.follow_ups.lock().unwrap().contains(&utterance);
@@ -1464,6 +1522,101 @@ mod tests {
         .await;
     }
 
+    /// Première phrase finie, réponse en attente ; le cerveau la traite encore : il
+    /// arrête tout nouveau réveil.
+    async fn first_phrase_then_busy(h: &Harness) {
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("première phrase", |h| h.listens().len() == 1)
+            .await;
+        h.link.stop.store(true, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn reveil_refuse_cerveau_occupe_la_reponse_attendue_est_jouee() {
+        let h = Setup {
+            wakes: 2,
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        first_phrase_then_busy(&h).await;
+        // « Jarvis » redit pendant le traitement : arrêté aussitôt.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("second réveil", |h| h.wakes() == 2).await;
+        h.wait_for("capture arrêtée", |h| !h.tray.borrow().capturing)
+            .await;
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("suivant", None, Some(Sound::Success)),
+        });
+        h.wait_for("réponse de la première phrase jouée", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("suivant")
+        })
+        .await;
+        // Ni bip d'échec ni « PC endormi » pour le réveil refusé.
+        assert_eq!(
+            h.played(),
+            vec![
+                wake_beep(),
+                Played::Stop,
+                wake_beep(),
+                success_beep(),
+                voice_played()
+            ]
+        );
+        tokio::time::sleep(ELECTION_TIMEOUT).await;
+        assert_eq!(h.played().len(), 5, "{:?}", h.played());
+    }
+
+    #[tokio::test]
+    async fn reveil_refuse_apres_la_fin_de_sa_phrase_la_reponse_attendue_est_jouee() {
+        let h = Setup {
+            wakes: 2,
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("première phrase", |h| h.listens().len() == 1)
+            .await;
+        // Le cerveau tarde à trancher : la seconde phrase (courte) finit avant.
+        h.link.elect.store(false, Ordering::SeqCst);
+        let speech = [vec![0.0; 1_600], vec![0.6; 8_000], vec![0.0; 16_000]].concat();
+        h.feed(speech).await;
+        h.wait_for("seconde fin", |h| h.listens().len() == 2).await;
+        h.link.reply(BrainMessage::Stop { utterance: 2 });
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("suivant", None, None),
+        });
+        h.wait_for("réponse de la première phrase jouée", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("suivant")
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn erreur_du_cerveau_bip_d_echec() {
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .answer(|_| {
+            Some(ControlResponse::Error {
+                message: "Traitement trop long.".into(),
+            })
+        })
+        .start();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("bip d'échec", |h| {
+            h.played() == vec![wake_beep(), failure_beep()]
+        })
+        .await;
+    }
+
     #[tokio::test]
     async fn cerveau_injoignable_dit_pc_endormi() {
         let h = Setup {
@@ -1550,11 +1703,65 @@ mod tests {
         assert!(elapsed < Duration::from_millis(2_500), "{elapsed:?}");
         assert!(!h.tray.borrow().capturing, "capture abandonnée");
         assert!(h.nudges() >= 1);
+        // Le cerveau en est prévenu au mieux : fin de phrase vide (son rétabli, rien
+        // de traité).
+        assert_eq!(
+            h.messages().last(),
+            Some(&EarMessage::ListenEnd {
+                utterance: 1,
+                muted: false,
+                no_speech: true,
+                cut: None,
+            })
+        );
         // Plus rien n'est envoyé pour cette phrase.
         let before = h.sent().len();
         h.feed(vec![0.0; 16_000]).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(h.sent().len(), before);
+    }
+
+    #[tokio::test]
+    async fn phrase_finie_sans_election_annulee_au_mieux() {
+        let h = Setup {
+            elect: false,
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        h.started().await;
+        // Phrase courte : finie avant l'échéance de l'élection.
+        let speech = [vec![0.0; 1_600], vec![0.6; 8_000], vec![0.0; 16_000]].concat();
+        h.feed(speech).await;
+        h.wait_for("fin de phrase", |h| h.listens().len() == 1)
+            .await;
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), asleep_played()]
+        })
+        .await;
+        let ends: Vec<bool> = h
+            .messages()
+            .into_iter()
+            .filter_map(|m| match m {
+                EarMessage::ListenEnd {
+                    utterance: 1,
+                    no_speech,
+                    ..
+                } => Some(no_speech),
+                _ => None,
+            })
+            .collect();
+        // La phrase, puis son annulation.
+        assert_eq!(ends, [false, true]);
+        // Réponse tardive : n'est plus jouée.
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("suivant", None, None),
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.played().len(), 2);
     }
 
     #[tokio::test]
@@ -2086,6 +2293,51 @@ mod tests {
         assert_eq!(h.follow_ups().len(), 2);
         assert!(h.follow_ups()[1].1);
         assert!(!h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
+    async fn cerveau_fige_pendant_l_ecoute_de_la_reponse_pc_endormi() {
+        let h = question();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("question lue", |h| {
+            h.played() == vec![wake_beep(), voice_played()]
+        })
+        .await;
+        // Le cerveau ne répond plus, le lien semble ouvert.
+        h.link.elect.store(false, Ordering::SeqCst);
+        let start = std::time::Instant::now();
+        h.player.finish();
+        h.wait_for("écoute de la réponse", |h| h.tray.borrow().capturing)
+            .await;
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), voice_played(), failure_beep()]
+        })
+        .await;
+        assert!(start.elapsed() >= Duration::from_millis(1_900));
+        assert!(!h.tray.borrow().capturing);
+        assert_eq!(h.follow_ups().last(), Some(&(false, true)));
+    }
+
+    #[tokio::test]
+    async fn lien_perdu_avant_la_reponse_pc_endormi() {
+        let h = Setup {
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("phrase finie", |h| h.listens().len() == 1).await;
+        let nudges = h.nudges();
+        h.link.disconnect();
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), asleep_played()]
+        })
+        .await;
+        assert!(h.nudges() > nudges);
     }
 
     #[tokio::test]

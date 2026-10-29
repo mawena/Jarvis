@@ -87,7 +87,7 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 | « Jarvis, … » | parler à Jarvis (l'oreille tourne en service) |
 | `jarvis say "lance VS Code"` | même chose, par écrit |
 | `jarvis mode local` / `jarvis mode en-ligne` | choisir l'IA |
-| `jarvis pair` / `jarvis ears` / `jarvis unpair <nom>` | appairer, lister, retirer une oreille |
+| `jarvis pair` / `jarvis ears` / `jarvis unpair <nom ou id>` | appairer, lister, retirer une oreille |
 | `jarvisctl status` | état du cerveau, de l'oreille, du mode, d'Ollama |
 | `jarvisctl logs [-f] [--oreille]` | journaux |
 | `jarvisctl start` / `stop` / `restart` `[cerveau\|oreille]` | piloter les services |

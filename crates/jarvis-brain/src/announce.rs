@@ -18,9 +18,11 @@ pub const LIFETIME: Duration = Duration::from_secs(10 * 60);
 /// Oreille cible sans relève depuis ce délai : une autre oreille peut la prendre.
 pub const STALE_AFTER: Duration = Duration::from_secs(20);
 
-struct Pending {
-    speech: String,
-    outcome: Outcome,
+/// Annonce en attente, avec son heure d'arrivée (gardée si elle est remise en file).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pending {
+    pub speech: String,
+    pub outcome: Outcome,
     at: Instant,
 }
 
@@ -60,6 +62,15 @@ impl AnnouncementBoard {
     /// Annonces à dire par cette oreille (vide si elles reviennent à une autre). Note
     /// aussi la relève.
     pub fn take_for(&self, ear: &str) -> Vec<(String, Outcome)> {
+        self.take_pending_for(ear)
+            .into_iter()
+            .map(|p| (p.speech, p.outcome))
+            .collect()
+    }
+
+    /// Comme [`Self::take_for`], en gardant l'heure d'arrivée de chaque annonce (pour
+    /// [`Self::requeue`]).
+    pub fn take_pending_for(&self, ear: &str) -> Vec<Pending> {
         let now = self.clock.now();
         let mut state = self.state.lock().unwrap();
         state.polls.insert(ear.to_string(), now);
@@ -75,11 +86,25 @@ impl AnnouncementBoard {
             nombre = state.queue.len(),
             "annonces relevées"
         );
-        state
-            .queue
-            .drain(..)
-            .map(|p| (p.speech, p.outcome))
-            .collect()
+        state.queue.drain(..).collect()
+    }
+
+    /// Annonces relevées qui n'ont pas pu partir (oreille partie pendant leur
+    /// synthèse) : remises en tête de file, avec leur heure d'arrivée (leur durée de
+    /// vie ne repart pas de zéro). Au-delà de [`MAX_PENDING`], les plus anciennes sont
+    /// oubliées.
+    pub fn requeue(&self, items: Vec<Pending>) {
+        if items.is_empty() {
+            return;
+        }
+        let mut state = self.state.lock().unwrap();
+        for item in items.into_iter().rev() {
+            state.queue.push_front(item);
+        }
+        while state.queue.len() > MAX_PENDING {
+            state.queue.pop_front();
+        }
+        debug!(nombre = state.queue.len(), "annonces remises en file");
     }
 
     /// Signalé à chaque nouvelle annonce (envoi immédiat, phase 4).
@@ -252,6 +277,46 @@ mod tests {
             s.board.take_for("pc"),
             [("Attention.".to_string(), Outcome::Failed)]
         );
+    }
+
+    #[test]
+    fn annonces_remises_en_tete_avec_leur_age() {
+        let s = setup();
+        s.board.announce(notice("Première."));
+        s.clock.advance(Duration::from_secs(60));
+        s.board.announce(notice("Deuxième."));
+        let taken = s.board.take_pending_for("pc");
+        assert_eq!(taken.len(), 2);
+        // Une nouvelle arrive pendant la synthèse, puis l'envoi échoue.
+        s.board.announce(notice("Troisième."));
+        s.board.requeue(taken);
+        assert_eq!(
+            speeches(s.board.take_for("pc")),
+            ["Première.", "Deuxième.", "Troisième."]
+        );
+        // L'heure d'arrivée est gardée : la première expire à son heure.
+        s.board.announce(notice("Première."));
+        let taken = s.board.take_pending_for("pc");
+        s.clock.advance(LIFETIME - Duration::from_secs(1));
+        s.board.requeue(taken);
+        s.clock.advance(Duration::from_secs(1));
+        assert!(s.board.take_for("pc").is_empty());
+    }
+
+    #[test]
+    fn annonces_remises_en_file_bornees() {
+        let s = setup();
+        for i in 0..MAX_PENDING {
+            s.board.announce(notice(&format!("Ancienne {i}.")));
+        }
+        let taken = s.board.take_pending_for("pc");
+        s.board.announce(notice("Nouvelle."));
+        s.board.requeue(taken);
+        let left = speeches(s.board.take_for("pc"));
+        assert_eq!(left.len(), MAX_PENDING);
+        // La plus ancienne est oubliée, la nouvelle gardée.
+        assert_eq!(left[0], "Ancienne 1.");
+        assert_eq!(left.last().unwrap(), "Nouvelle.");
     }
 
     #[test]
