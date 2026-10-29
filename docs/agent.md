@@ -7,9 +7,12 @@ part du projet Jarvis. Je vous préviens à la fin. », répond à « où en est
 « arrête la tâche », puis annonce la fin sur l'oreille la plus récemment active, avec une
 notification de bureau. Rien n'est poussé ni fusionné.
 
-Le départ est **direct, sans confirmation, dans les deux modes**, mais seulement pour la voix
-vérifiée de Charles ou du texte tapé (`jarvis say "…"`). Une voix non reconnue ne lance jamais
-l'agent, et l'IA de Jarvis ne peut pas le lancer : l'outil ne lui est jamais proposé.
+Le départ est **direct, sans confirmation, dans les deux modes**, mais seulement pour une voix
+**reconnue** par l'empreinte vocale ou du texte tapé (`jarvis say "…"`). Sans empreinte
+enregistrée, ou avec la vérification désactivée, aucune voix ne lance l'agent : « Je ne confie
+une tâche à l'agent qu'à une voix reconnue : enregistrez votre voix avec jarvis-ear enroll. »
+(`jarvis say` marche toujours). L'IA de Jarvis ne peut pas le lancer : l'outil ne lui est
+jamais proposé, et un outil qu'elle inventerait est refusé.
 
 ## Mise en route
 
@@ -19,14 +22,20 @@ sable des commandes de l'agent, `bubblewrap` et `socat` (`sudo apt install bubbl
 Sans bac à sable, Claude Code refuse de démarrer (`failIfUnavailable`).
 
 ```bash
-jarvisctl doctor    # Claude Code, sa version, ses options, les projets, notify-send
+jarvisctl doctor    # Claude Code, ses options, le bac à sable, les projets, notify-send
 ```
 
 `doctor` n'avertit (`!`) que si quelque chose manque : l'agent est facultatif, le reste de
-Jarvis marche sans. Il vérifie que `claude --help` connaît `--permission-mode`,
-`--setting-sources`, `--session-id`, `--append-system-prompt`, `--disallowedTools` et
-`stream-json`, puis, pour chaque projet, que le dossier existe, que c'est un dépôt git et que
-la branche de base est là.
+Jarvis marche sans. Il vérifie :
+
+- que `claude --help` connaît toutes les options utilisées (`--restricted`, `--tools`,
+  `--strict-mcp-config`, `--mcp-config`, `--permission-mode`, `--permission-prompts`,
+  `--settings`, `--session-id`, `--append-system-prompt`, `--disallowedTools`, `--verbose`,
+  `stream-json`) ;
+- que `bwrap` et `socat` sont là et que `bwrap` peut isoler une commande. Ubuntu 24.04 limite
+  les espaces de noms : si ce test échoue, la ligne indique le profil AppArmor à ajouter ;
+- pour chaque projet, que le dossier existe, que c'est un dépôt git et que la branche de base
+  est là.
 
 ## Projets
 
@@ -65,46 +74,55 @@ remplace cette liste. Redémarrer le cerveau après un changement (`jarvisctl re
 ## Phrases reconnues
 
 Comprises sans IA, précédées ou non de « Jarvis » ; les politesses (« s'il te plaît »,
-« tu peux… », « merci ») sont ignorées.
+« tu peux… », « merci », « merci Jarvis » en fin de phrase) sont ignorées.
 
 **Départ** : un verbe de code en tête de phrase **et** un projet connu (nom ou alias, ou un
 nom proche juste après « projet ») :
 
 - « finis les tests du projet Jarvis », « corrige le bug dans Mawena »,
   « ajoute un test au projet Jarvis », « lance les tests de l'assistant » ;
+- le projet **Jarvis** porte le nom de l'assistant : il faut dire « projet Jarvis » ou son
+  alias « l'assistant ». « Mets à jour Jarvis », « supprime l'alarme Jarvis » ou « ajoute du
+  lait à la liste, merci Jarvis » ne lancent rien ;
 - verbes : finis, termine, achève, corrige, répare, ajoute, écris, implémente, refactorise,
   nettoie, teste, documente, améliore, optimise, renomme, migre, supprime, prépare, mets à
   jour, fais passer, lance les tests, fais tourner les tests ;
-- ou une ouverture explicite : « demande à l'agent de relire le module audio de Jarvis »,
-  « confie à l'agent… », « tâche de code… ».
+- ou une ouverture explicite : « demande à l'agent de relire le module audio du projet
+  Jarvis », « confie à l'agent… », « tâche de code… ».
 
 La consigne envoyée est la phrase telle que dite (accents compris), sans « Jarvis, » de tête
-ni politesse finale, 2 000 caractères au plus. « Projet Zorglub » inconnu : « Je ne connais
-pas le projet « Zorglub ». Projets connus : … ». Sans projet nommé (« corrige le bug »), ce
-n'est pas une tâche : Jarvis répond normalement. « Lance Jarvis » ou « ouvre le projet
+ni politesse finale, 2 000 caractères au plus. Projet inconnu après une ouverture explicite
+(« demande à l'agent… du projet Zorglub »), ou nom proche d'un projet connu (« projet
+Jarvoss ») : « Je ne connais pas le projet « Zorglub ». Projets connus : … ». Sinon (« ajoute
+le projet vacances à ma liste »), comme sans projet nommé (« corrige le bug »), ce n'est pas
+une tâche : Jarvis répond normalement. « Lance Jarvis » ou « ouvre le projet
 Jarvis » ne lancent jamais l'agent.
 
-**Suivi** : « où en est la tâche ? », « ça avance, l'agent ? », « quelles tâches
-tournent ? », « état de la tâche », « où en est la tâche de Mawena ? ». Réponse : depuis
+**Suivi** : « où en est la tâche ? », « elle en est où, la tâche ? », « ça avance,
+l'agent ? », « la tâche est finie ? », « l'agent a terminé ? », « quelles tâches tournent ? »,
+« état de la tâche », « où en est la tâche de Mawena ? ». Réponse : depuis
 combien de temps la tâche tourne et sa dernière action (« lance « cargo test » »), ou « Aucune
 tâche en cours. » et la dernière terminée. Calculé à partir du flux de Claude Code : aucune IA,
 rien ne part en ligne.
 
-**Arrêt** : « arrête la tâche », « stoppe l'agent », « annule les tâches »,
-« interromps la tâche sur Mawena ». Avec deux tâches en cours, nommer le projet. « Arrête »
-seul ou « arrête la musique » ne touchent pas à l'agent. Le travail reste sur sa branche.
+**Arrêt** : « arrête la tâche », « tu peux arrêter la tâche ? », « stoppe l'agent »,
+« stop la tâche », « arrêtez la tâche », « annule les tâches », « interromps la tâche sur
+Mawena ». Avec deux tâches en cours, nommer le projet (« arrête la tâche du projet Jarvis »).
+« Arrête » ou « stop » seuls, ou « arrête la musique », ne touchent pas à l'agent. Le travail
+reste sur sa branche.
 
 ## Garde-fous
 
 - **Branche à part** : `<gitflow.prefix.feature>jarvis-<slug>` (par exemple
   `feature/jarvis-finis-tests`), créée depuis la branche de base (`base`, sinon
   `gitflow.branch.develop`, sinon `develop`) dans un worktree
-  `~/.local/share/jarvis/worktrees/<projet>-jarvis-<slug>-<id>`. Jamais `develop` ni `main` ;
+  `~/.local/share/jarvis/worktrees/<dossier du dépôt>-jarvis-<slug>-<id>` (nom du dossier en
+  minuscules, sans accents). Jamais `develop` ni `main` ;
   la copie de travail de Charles n'est jamais touchée.
 - **Modifications non enregistrées** (fichiers suivis modifiés ou indexés) : « Le projet
   Jarvis a des modifications non enregistrées : je ne lance rien. » Rien n'est créé. Les
   fichiers non suivis sont ignorés.
-- **Rien de poussé ni fusionné**, trois couches indépendantes :
+- **Rien de poussé ni fusionné**, trois couches :
   1. Claude Code en **mode restreint** (`--restricted`) : réglages utilisateur, projet
      (`.claude/settings.json` du dépôt) et local ignorés ; outils `Bash, Read, Edit, Write,
      Glob, Grep` seulement (`--tools`), aucun serveur MCP ni connecteur ; outils de fichiers
@@ -131,6 +149,9 @@ seul ou « arrête la musique » ne touchent pas à l'agent. Le travail reste su
   une commande de l'agent dure 15 minutes par défaut, 25 au plus. L'arrêt envoie `TERM` à
   Claude Code (qui arrête ses commandes), puis, 10 s plus tard, tue tout le groupe de
   processus (y compris un `cargo test` lancé par l'agent).
+- **Compilation dans le bac à sable** : l'agent a son propre `CARGO_HOME`, donc sa première
+  compilation retélécharge les crates. Seul `crates.io` est joignable : une dépendance git ou
+  un autre registre échoue. Le `~/.cargo/config.toml` de Charles ne s'applique pas.
 - **Redémarrage du cerveau** : les tâches en cours sont interrompues (`jarvisctl restart`,
   `stop` et `update` le disent avant) ; au démarrage suivant, une notification les signale.
   Le worktree et la branche restent.
@@ -152,7 +173,7 @@ journal.
 
 ```bash
 git worktree list                                   # dans le dépôt du projet
-cd ~/.local/share/jarvis/worktrees/Jarvis-jarvis-finis-tests-1a2b3c4d
+cd ~/.local/share/jarvis/worktrees/jarvis-jarvis-finis-tests-1a2b3c4d
 git log develop..HEAD                               # le commit de Jarvis
 claude --resume <id>                                # reprendre la session de l'agent (id dans la notification)
 ```
@@ -160,7 +181,7 @@ claude --resume <id>                                # reprendre la session de l'
 Pour garder le travail, depuis le dépôt du projet :
 
 ```bash
-git worktree remove ~/.local/share/jarvis/worktrees/Jarvis-jarvis-finis-tests-1a2b3c4d
+git worktree remove ~/.local/share/jarvis/worktrees/jarvis-jarvis-finis-tests-1a2b3c4d
 git flow feature finish jarvis-finis-tests
 ```
 
@@ -174,12 +195,13 @@ local** : la consigne et le code du projet partent chez Claude Code (Anthropic),
 l'**abonnement Claude Code de Charles**. La phrase de départ le dit (« je confie cela à
 Claude »). Aucune `ANTHROPIC_API_KEY` n'est transmise à l'agent (`pass_api_key = false`) : il
 n'est pas facturé sur la clé API du mode en ligne. Le suivi, l'arrêt et le compte des fichiers
-n'utilisent aucune IA ; le résumé de fin est la dernière ligne de l'agent (`RÉSUMÉ : …`).
+n'utilisent aucune IA ; le résumé de fin est la dernière ligne `RÉSUMÉ : …` de l'agent, ou à
+défaut la dernière phrase de sa réponse.
 
 ## Journaux
 
 - Journal brut de chaque tâche : `~/.local/state/jarvis/tasks/<id>.log` (sortie de Claude
   Code et erreurs, 20 Mo au plus), à côté de son enregistrement `<id>.json`. Dossier 0700,
-  fichiers 0600. Les 50 dernières tâches terminées sont gardées.
+  fichiers 0600. Au démarrage du cerveau, seules les 50 dernières tâches terminées sont gardées.
 - `jarvisctl logs` : la consigne (en `info`, comme toute phrase), « consigne envoyée à Claude
-  Code (en ligne) », le départ, la fin et les refus.
+  Code (en ligne) » au départ, puis la fin et les refus.
