@@ -1379,11 +1379,8 @@ mod tests {
 
     #[test]
     fn phrase_la_plus_longue_de_l_oreille_gardee_en_entier() {
-        let sent = jarvis_protocol::frame::MAX_PHRASE_SAMPLES;
-        assert!(
-            MAX_PHRASE_SAMPLES >= sent + 16_000 / 2,
-            "marge d'au moins 0,5 s"
-        );
+        // Marge d'au moins 0,5 s sur ce que l'oreille envoie.
+        const { assert!(MAX_PHRASE_SAMPLES >= jarvis_protocol::frame::MAX_PHRASE_SAMPLES + 16_000 / 2) };
         // Envoyée en temps réel : la capture n'est pas tenue pour sans fin avant.
         let secs = Duration::from_secs_f64(MAX_PHRASE_SAMPLES as f64 / 16_000.0);
         assert!(

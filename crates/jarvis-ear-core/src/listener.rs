@@ -660,7 +660,7 @@ mod tests {
             samples(Duration::from_secs(8)) + MIN_SPEECH,
             MAX_PHRASE_SAMPLES
         );
-        assert!(RATE + MAX_UTTERANCE <= MAX_PHRASE_SAMPLES);
+        const { assert!(RATE + MAX_UTTERANCE <= MAX_PHRASE_SAMPLES) };
     }
 
     /// VAD réel en miniature : parole dès qu'une valeur dépasse 0,5.
