@@ -1,4 +1,8 @@
 //! Serveur du socket de contrôle : une ligne JSON par requête, une par réponse.
+//!
+//! Le socket sert au CLI, à l'enrôlement vocal, à l'appairage (`jarvis pair`, oreille
+//! du PC) et aux annonces. Aucune phrase n'y passe : elles arrivent toutes par le
+//! réseau des oreilles ([`crate::net`]), où l'arbitre n'en retient qu'une.
 
 use crate::announce::AnnouncementBoard;
 use crate::brain::{Brain, SystemClock};
@@ -8,7 +12,7 @@ use crate::speaker::SpeakerGate;
 use crate::tts::Voice;
 use anyhow::{Context, bail};
 use jarvis_protocol::{
-    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, EarId, Sound, decode_pcm,
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm,
 };
 use jarvis_skills::{Outcome, SystemRunner};
 use std::io::{self, ErrorKind};
@@ -84,9 +88,12 @@ pub async fn serve_with_board(
 
 /// Comme [`serve_with_board`], avec le hub des oreilles en réseau (appairage,
 /// liste et retrait des oreilles). Sans hub : ces requêtes rendent une erreur.
+///
+/// `_listen` ne sert plus ici (les phrases passent par le hub) ; gardé pour ne pas
+/// changer la signature des appelants.
 pub async fn serve_with_hub(
     brain: Arc<Brain>,
-    listen: Arc<ListenService>,
+    _listen: Arc<ListenService>,
     speaker: SpeakerState,
     voice: Voice,
     board: Arc<AnnouncementBoard>,
@@ -97,7 +104,6 @@ pub async fn serve_with_hub(
     info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
     let shared = Arc::new(Shared {
         brain,
-        listen,
         speaker,
         voice,
         board,
@@ -178,7 +184,6 @@ async fn read_request<R: AsyncBufRead + Unpin>(reader: &mut R, max: usize) -> io
 /// Ce que partagent tous les clients.
 struct Shared {
     brain: Arc<Brain>,
-    listen: Arc<ListenService>,
     speaker: SpeakerState,
     voice: Voice,
     board: Arc<AnnouncementBoard>,
@@ -291,7 +296,6 @@ async fn send<W: AsyncWrite + Unpin>(write: &mut W, response: &ControlResponse) 
 async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
     let Shared {
         brain,
-        listen,
         speaker,
         voice,
         board,
@@ -302,27 +306,6 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
             speech: brain.handle_text(&text).await.speech,
         },
         ControlRequest::Status => status(brain),
-        ControlRequest::Wake => {
-            listen.wake().await;
-            status(brain)
-        }
-        ControlRequest::Listen {
-            audio,
-            muted,
-            follow_up,
-            ear,
-        } => match decode_pcm(&audio) {
-            Ok(samples) => {
-                board.touch(ear.as_deref().unwrap_or(DEFAULT_EAR));
-                let ear = EarId::unix_socket(ear.as_deref());
-                voice
-                    .speak(listen.listen(&ear, &samples, muted, follow_up).await)
-                    .await
-            }
-            Err(_) => ControlResponse::Error {
-                message: "audio invalide".into(),
-            },
-        },
         ControlRequest::Announcements { ear } => {
             announcements(board, voice, ear.as_deref().unwrap_or(DEFAULT_EAR)).await
         }

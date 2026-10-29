@@ -1,7 +1,8 @@
-//! Le pire cas d'une phrase tient dans le délai `Listen` de l'oreille.
+//! Le pire cas d'une phrase tient dans l'attente de la réponse par l'oreille.
 //!
-//! L'oreille abandonne une phrase après `LISTEN_TIMEOUT` (jarvis-ear, client.rs) :
-//! au-delà, Jarvis reste muet. Pire cas côté cerveau, mode par mode :
+//! Une fois élue, l'oreille attend la réponse à sa phrase `LISTEN_TIMEOUT`
+//! (jarvis-ear, client.rs, d'où `RESPONSE_TIMEOUT`) : au-delà, elle n'attend plus et
+//! Jarvis reste muet. Pire cas côté cerveau, mode par mode :
 //!
 //! ```text
 //!   reconnaissance vocale (marge)           2 s

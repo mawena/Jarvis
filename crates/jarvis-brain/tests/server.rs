@@ -178,41 +178,21 @@ async fn permissions_du_socket() {
 }
 
 #[tokio::test]
-async fn server_listen_et_status_local_model() {
+async fn ancienne_oreille_refusee_par_le_socket() {
+    // Plus aucune phrase par le socket : `wake` et `listen` d'une oreille trop ancienne
+    // sont refusés, sans fermer la connexion.
     let dir = tempfile::tempdir().unwrap();
     let socket = start(dir.path()).await;
     let mut c = Client::connect(&socket).await;
-    assert!(matches!(
-        c.send(ControlRequest::Wake).await,
-        ControlResponse::Status { .. }
-    ));
-    let r = c
-        .send(ControlRequest::Listen {
-            audio: encode_pcm(&[1, 2, 3]),
-            muted: false,
-            follow_up: false,
-            ear: None,
-        })
-        .await;
-    assert_eq!(
-        r,
-        ControlResponse::Heard {
-            text: "suivant".into(),
-            speech: "ok".into(),
-            ear_action: None,
-            audio: None,
-            sound: None,
-        }
+    let invalid = ControlResponse::Error {
+        message: "requête invalide".into(),
+    };
+    assert_eq!(c.raw(r#"{"type":"wake"}"#).await, invalid);
+    let listen = format!(
+        r#"{{"type":"listen","audio":"{}","muted":false,"follow_up":false}}"#,
+        encode_pcm(&[1, 2, 3])
     );
-    let r = c
-        .send(ControlRequest::Listen {
-            audio: "!!".into(),
-            muted: false,
-            follow_up: false,
-            ear: None,
-        })
-        .await;
-    assert!(matches!(r, ControlResponse::Error { .. }));
+    assert_eq!(c.raw(&listen).await, invalid);
     match c.send(ControlRequest::Status).await {
         ControlResponse::Status { local_model, .. } => assert_eq!(local_model, "qwen-test"),
         other => panic!("{other:?}"),
@@ -220,19 +200,10 @@ async fn server_listen_et_status_local_model() {
 }
 
 #[tokio::test]
-async fn oreille_nommee_et_annonces_vides() {
+async fn annonces_vides() {
     let dir = tempfile::tempdir().unwrap();
     let socket = start(dir.path()).await;
     let mut c = Client::connect(&socket).await;
-    let r = c
-        .send(ControlRequest::Listen {
-            audio: encode_pcm(&[1, 2, 3]),
-            muted: false,
-            follow_up: false,
-            ear: Some("salon".into()),
-        })
-        .await;
-    assert!(matches!(r, ControlResponse::Heard { .. }), "{r:?}");
     assert_eq!(
         c.raw(r#"{"type":"announcements"}"#).await,
         ControlResponse::Announcements { items: vec![] }
@@ -281,56 +252,6 @@ fn notice(speech: &str, outcome: jarvis_skills::Outcome) -> jarvis_skills::Notic
         urgent: false,
         speak: true,
     }
-}
-
-#[tokio::test]
-async fn listen_marque_l_oreille_active() {
-    use jarvis_skills::{Announcer, Outcome};
-    let dir = tempfile::tempdir().unwrap();
-    let (socket, board, _) = start_with_board(dir.path(), jarvis_brain::tts::Voice::none()).await;
-    let mut c = Client::connect(&socket).await;
-    let r = c
-        .send(ControlRequest::Listen {
-            audio: encode_pcm(&[1, 2, 3]),
-            muted: false,
-            follow_up: false,
-            ear: Some("salon".into()),
-        })
-        .await;
-    assert!(matches!(r, ControlResponse::Heard { .. }), "{r:?}");
-    board.announce(notice("C'est fait.", Outcome::Info));
-    // `pc` (oreille par défaut) n'est pas la cible.
-    assert_eq!(
-        c.raw(r#"{"type":"announcements"}"#).await,
-        ControlResponse::Announcements { items: vec![] }
-    );
-    let r = c
-        .send(ControlRequest::Announcements {
-            ear: Some("salon".into()),
-        })
-        .await;
-    assert_eq!(
-        r,
-        ControlResponse::Announcements {
-            items: vec![jarvis_protocol::Announcement {
-                speech: "C'est fait.".into(),
-                audio: None,
-                sound: None,
-            }]
-        }
-    );
-    // Un `Listen` sans nom : l'oreille par défaut devient la cible.
-    c.send(ControlRequest::Listen {
-        audio: encode_pcm(&[1, 2, 3]),
-        muted: false,
-        follow_up: false,
-        ear: None,
-    })
-    .await;
-    assert!(board.take_for("salon").is_empty());
-    board.announce(notice("Encore.", Outcome::Info));
-    assert!(board.take_for("salon").is_empty());
-    assert_eq!(board.take_for(jarvis_protocol::DEFAULT_EAR).len(), 1);
 }
 
 #[tokio::test]
@@ -482,57 +403,4 @@ async fn enroll_voice_par_le_socket() {
         .send(ControlRequest::EnrollVoice { samples: vec![] })
         .await;
     assert!(matches!(r, ControlResponse::Error { .. }));
-}
-
-#[tokio::test]
-async fn ecoute_renvoie_la_voix() {
-    use jarvis_brain::server::{SpeakerState, serve_with_voice};
-    use jarvis_brain::testing::FakeSynthesizer;
-    use jarvis_brain::tts::{Speech, Voice};
-    use jarvis_protocol::SpeechAudio;
-    let dir = tempfile::tempdir().unwrap();
-    let socket = dir.path().join("run/brain.sock");
-    let b = brain(dir.path());
-    let l = listen(&b);
-    let voice = Voice::new(Arc::new(FakeSynthesizer::new(Speech {
-        samples: vec![7, -7],
-        sample_rate: 22_050,
-    })));
-    let s = socket.clone();
-    tokio::spawn(async move { serve_with_voice(b, l, SpeakerState::Disabled, voice, &s).await });
-    for _ in 0..100 {
-        if UnixStream::connect(&socket).await.is_ok() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    let mut c = Client::connect(&socket).await;
-    let r = c
-        .send(ControlRequest::Listen {
-            audio: encode_pcm(&[1, 2, 3]),
-            muted: false,
-            follow_up: false,
-            ear: None,
-        })
-        .await;
-    assert_eq!(
-        r,
-        ControlResponse::Heard {
-            text: "suivant".into(),
-            speech: "ok".into(),
-            ear_action: None,
-            audio: Some(SpeechAudio {
-                pcm: encode_pcm(&[7, -7]),
-                sample_rate: 22_050,
-            }),
-            sound: None,
-        }
-    );
-    // « dis » passe par Say : texte seul, sans voix.
-    assert_eq!(
-        c.raw(r#"{"type":"say","text":"suivant"}"#).await,
-        ControlResponse::Reply {
-            speech: "ok".into()
-        }
-    );
 }
