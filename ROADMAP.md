@@ -78,13 +78,13 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 - [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
 - [x] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`) — v1 : messages JSON, trames audio binaires, empreinte du certificat, adresse d'appairage ; oreille transmise dans tout le cerveau
-- [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau — cœur réseau prêt (lien, reconnexion, appairage, phrase hors ligne, son en flux), reste l'oreille du PC (tâche 7)
+- [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau — cœur réseau et oreille du PC prêts (son en flux, appairage local automatique, `jarvis-ear pair`, profils), reste le serveur du cerveau (tâche 6)
 - [ ] 4.4 Serveur WebSocket + TLS avec certificat épinglé — TLS 1.3 épinglé et registre des oreilles prêts, reste le serveur (tâche 6)
 - [ ] 4.5 Découverte du cerveau par mDNS, adresse manuelle en secours — annonce et recherche prêtes (cohabitent avec avahi), reste le branchement (tâches 6 et 7)
 - [ ] 4.6 Appairage par code / QR code (`jarvis pair`) — fenêtre d'appairage et commandes `jarvis pair` / `ears` / `unpair` prêtes, reste le cerveau (tâche 6)
 - [ ] 4.7 Arbitre : une seule oreille gagne par phrase (fenêtre de 300 ms) — arbitre prêt, confirmation et session vocale propres à chaque oreille, reste le branchement (tâche 6)
 - [ ] 4.8 Réponse vocale jouée sur l'oreille gagnante
-- [ ] 4.9 Reconnexion automatique et message « le PC est endormi »
+- [ ] 4.9 Reconnexion automatique et message « le PC est endormi » — côté oreille prêt (reconnexion, « PC endormi » sans file d'attente, en moins de 2 s sans élection), reste le serveur du cerveau (tâche 6)
 
 ## Phase 5 : oreille Android (Pixel 4 XL)
 - [ ] 5.1 Rédiger le plan de la phase 5
