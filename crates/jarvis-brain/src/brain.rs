@@ -248,6 +248,14 @@ impl Brain {
         let tools = self.tools();
         match backend.understand(text, &tools).await {
             Ok(Understanding::Tool(intent)) => {
+                // Outil réservé aux raccourcis (agent de code) : jamais lancé par l'IA,
+                // même si elle en invente le nom.
+                let offered = tools.iter().any(|t| t.name == intent.tool)
+                    || self.system.tools().iter().any(|t| t.name == intent.tool);
+                if !offered && self.find(&intent.tool).is_some() {
+                    warn!(tool = %intent.tool, "outil hors IA choisi par l'IA : refusé");
+                    return Reply::failed(self.persona.addressed(UNKNOWN)).into();
+                }
                 if mode == Mode::Local
                     && intent.tool == "set_mode"
                     && intent.args.get("mode").and_then(|m| m.as_str()) == Some("online")
