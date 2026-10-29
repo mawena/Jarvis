@@ -1,5 +1,6 @@
 use anyhow::Context;
 use jarvis_protocol::Mode;
+use jarvis_skills::search::SearchSettings;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -18,6 +19,8 @@ pub struct Config {
     pub stt: SttConfig,
     pub speaker: SpeakerConfig,
     pub tts: TtsConfig,
+    /// Recherche sur internet (section `[search]`).
+    pub search: SearchSettings,
 }
 
 impl Default for Config {
@@ -32,6 +35,7 @@ impl Default for Config {
             stt: SttConfig::default(),
             speaker: SpeakerConfig::default(),
             tts: TtsConfig::default(),
+            search: SearchSettings::default(),
         }
     }
 }
@@ -344,6 +348,34 @@ mod tests {
         let persona = Persona::from(&c);
         assert_eq!(persona.address, "Charles");
         assert!(persona.sound_only_for_success);
+    }
+
+    #[test]
+    fn config_search_defauts() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        assert_eq!(c.search, SearchSettings::default());
+        assert_eq!(c.search.url, "http://127.0.0.1:8888");
+        assert_eq!(c.search.local_summary_timeout_ms, 10_000);
+        assert_eq!(c.search.online_summary_timeout_ms, 5000);
+        assert_eq!(c.search.summary_max_tokens, 80);
+        assert!(c.search.summarize);
+    }
+
+    #[test]
+    fn config_search_partielle() {
+        let (_d, p) = write(
+            "[search]\nurl = \"http://127.0.0.1:9999\"\nsummarize = false\n\
+             video_engines = [\"youtube\", \"peertube\"]\n",
+        );
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.search.url, "http://127.0.0.1:9999");
+        assert!(!c.search.summarize);
+        assert_eq!(c.search.video_engines, ["youtube", "peertube"]);
+        let defaut = SearchSettings::default();
+        assert_eq!(c.search.max_results, defaut.max_results);
+        assert_eq!(c.search.language, "fr-FR");
+        assert_eq!(c.search.local_summary_model, "");
+        assert_eq!(c.local, LocalLlmConfig::default());
     }
 
     #[test]

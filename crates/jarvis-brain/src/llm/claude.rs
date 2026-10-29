@@ -33,15 +33,46 @@ impl ClaudeBackend {
     pub fn from_env(cfg: &OnlineLlmConfig, address: &str) -> Self {
         Self::new(cfg, address, std::env::var(&cfg.api_key_env).ok())
     }
+
+    fn key(&self) -> Result<&str, LlmError> {
+        self.api_key
+            .as_deref()
+            .ok_or_else(|| LlmError::MissingApiKey(self.api_key_env.clone()))
+    }
+
+    /// Envoie `body` à `/v1/messages` et lit la réponse.
+    async fn post(&self, key: &str, body: &Value) -> Result<Value, LlmError> {
+        let resp = self
+            .client
+            .post(format!("{}/v1/messages", self.url))
+            .timeout(TIMEOUT)
+            .header("x-api-key", key)
+            .header("anthropic-version", "2023-06-01")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Unreachable(e.to_string()))?;
+        let status = resp.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+            return Err(LlmError::Rejected(format!(
+                "l'API Claude a répondu {status}"
+            )));
+        }
+        if !status.is_success() {
+            return Err(LlmError::Unreachable(format!(
+                "l'API Claude a répondu {status}"
+            )));
+        }
+        resp.json()
+            .await
+            .map_err(|e| LlmError::BadResponse(e.to_string()))
+    }
 }
 
 #[async_trait::async_trait]
 impl LlmBackend for ClaudeBackend {
     async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
-        let key = self
-            .api_key
-            .as_deref()
-            .ok_or_else(|| LlmError::MissingApiKey(self.api_key_env.clone()))?;
+        let key = self.key()?;
         let tools: Vec<Value> = tools
             .iter()
             .map(|t| {
@@ -57,33 +88,55 @@ impl LlmBackend for ClaudeBackend {
             // Documenté pour claude-haiku-5-5 (GA, sans en-tête bêta).
             "output_config": {"effort": "low"},
         });
-        let resp = self
-            .client
-            .post(format!("{}/v1/messages", self.url))
-            .timeout(TIMEOUT)
-            .header("x-api-key", key)
-            .header("anthropic-version", "2023-06-01")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| LlmError::Unreachable(e.to_string()))?;
-        let status = resp.status();
-        if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-            return Err(LlmError::Rejected(format!(
-                "l'API Claude a répondu {status}"
-            )));
-        }
-        if !status.is_success() {
-            return Err(LlmError::Unreachable(format!(
-                "l'API Claude a répondu {status}"
-            )));
-        }
-        let v: Value = resp
-            .json()
-            .await
-            .map_err(|e| LlmError::BadResponse(e.to_string()))?;
-        parse(&v)
+        parse(&self.post(key, &body).await?)
     }
+
+    /// Résumé d'une recherche : aucun outil envoyé, et un appel d'outil est refusé.
+    async fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, LlmError> {
+        let key = self.key()?;
+        let body = json!({
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": [{"role": "user", "content": user}],
+            "output_config": {"effort": "low"},
+        });
+        parse_completion(&self.post(key, &body).await?)
+    }
+}
+
+/// Texte des blocs `text`. Un bloc `tool_use` ou un refus est une erreur.
+fn parse_completion(v: &Value) -> Result<String, LlmError> {
+    let blocks = v
+        .get("content")
+        .and_then(Value::as_array)
+        .ok_or_else(|| LlmError::BadResponse("champ content absent".into()))?;
+    if blocks
+        .iter()
+        .any(|b| b.get("type").and_then(Value::as_str) == Some("tool_use"))
+    {
+        return Err(LlmError::BadResponse(
+            "appel d'outil inattendu dans un résumé".into(),
+        ));
+    }
+    if v.get("stop_reason").and_then(Value::as_str) == Some("refusal") {
+        return Err(LlmError::BadResponse("arrêt du modèle : refusal".into()));
+    }
+    let text: String = blocks
+        .iter()
+        .filter(|b| b.get("type").and_then(Value::as_str) == Some("text"))
+        .filter_map(|b| b.get("text").and_then(Value::as_str))
+        .collect();
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(LlmError::BadResponse("résumé vide".into()));
+    }
+    Ok(text.to_string())
 }
 
 fn parse(v: &Value) -> Result<Understanding, LlmError> {
@@ -301,6 +354,96 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, LlmError::MissingApiKey(_)), "{err:?}");
         assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_complete_sans_outils() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(header("x-api-key", "test-key"))
+            .and(header("anthropic-version", "2023-06-01"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": [
+                    {"type": "thinking", "thinking": "hmm", "signature": "s"},
+                    {"type": "text", "text": "Il fera "},
+                    {"type": "text", "text": "beau."}
+                ],
+                "stop_reason": "end_turn"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let got = backend(&server.uri(), Some("test-key"))
+            .complete("consigne", "Question : météo ?", 80)
+            .await
+            .unwrap();
+        assert_eq!(got, "Il fera beau.");
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(body.get("tools").is_none(), "{body}");
+        assert!(body.get("tool_choice").is_none(), "{body}");
+        assert_eq!(body["model"], "claude-haiku-5-5");
+        assert_eq!(body["system"], "consigne");
+        assert_eq!(body["max_tokens"], 80);
+        assert_eq!(body["output_config"], json!({"effort": "low"}));
+        assert_eq!(
+            body["messages"],
+            json!([{"role": "user", "content": "Question : météo ?"}])
+        );
+    }
+
+    #[tokio::test]
+    async fn claude_complete_outil_inattendu_erreur() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "content": [
+                    {"type": "text", "text": "Je lance."},
+                    {"type": "tool_use", "id": "t1", "name": "app_launch", "input": {}}
+                ],
+                "stop_reason": "tool_use"
+            })))
+            .mount(&server)
+            .await;
+        let err = backend(&server.uri(), Some("k"))
+            .complete("c", "q", 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::BadResponse(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn claude_complete_sans_cle_ne_contacte_rien() {
+        let server = MockServer::start().await;
+        let err = backend(&server.uri(), None)
+            .complete("c", "q", 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::MissingApiKey(_)), "{err:?}");
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn claude_complete_refus_ou_vide_erreur() {
+        for reponse in [
+            json!({"content": [{"type": "text", "text": "Non."}], "stop_reason": "refusal"}),
+            json!({"content": [], "stop_reason": "end_turn"}),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(reponse.clone()))
+                .mount(&server)
+                .await;
+            let err = backend(&server.uri(), Some("k"))
+                .complete("c", "q", 80)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, LlmError::BadResponse(_)),
+                "{reponse}: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
