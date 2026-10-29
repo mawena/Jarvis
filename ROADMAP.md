@@ -116,7 +116,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 7.5 Suivi (« où en est la tâche ? ») et arrêt (« arrête la tâche ») — registre des tâches prêt (gardé au redémarrage), reste le branchement (tâche 6)
 - [ ] 7.6 Annonce de fin sur l'oreille la plus récemment active et notification de bureau — brique prête (tableau d'annonces, l'oreille les récupère et les dit), reste le branchement (tâche 6)
 - [x] 7.7 Socle (tâche 1 du plan) : protocole (oreille d'origine de la phrase, annonces), réglages `[agent]`, raccourcis propres à une compétence jamais proposés à l'IA
-- [ ] 7.8 `jarvisctl` : `doctor` vérifie Claude Code et les projets, avertissement au redémarrage si une tâche tourne, `docs/agent.md`
+- [x] 7.8 `jarvisctl` : `doctor` vérifie Claude Code et les projets, avertissement au redémarrage si une tâche tourne, `docs/agent.md`
 - [ ] 7.9 Relecture de la phase 7 et corrections
 - [ ] 7.10 Essai réel avec Charles sur un projet d'essai (Charles) — fiche d'essai à venir
 
