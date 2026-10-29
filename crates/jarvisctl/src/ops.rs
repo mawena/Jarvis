@@ -1,7 +1,8 @@
 //! Logique des sous-commandes de `jarvisctl`.
 
 use crate::paths::{
-    BINARIES, DEFAULT_MODEL, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, VOICE_DIR, WHISPER_MODEL,
+    BINARIES, DEFAULT_MODEL, EAR_SERVICE, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, Service,
+    VOICE_DIR, WHISPER_MODEL,
 };
 use crate::system::{OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
@@ -28,6 +29,35 @@ EnvironmentFile=-%h/.config/jarvis/env
 Environment=TMPDIR=%t
 Restart=on-failure
 RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+"
+    .to_string()
+}
+
+/// Contenu exact de l'unité systemd utilisateur de l'oreille du PC.
+///
+/// Aucune variable à importer : l'icône passe par le bus D-Bus de session
+/// (`DBUS_SESSION_BUS_ADDRESS`), le micro et le son par PipeWire (`XDG_RUNTIME_DIR`), deux
+/// variables que le gestionnaire systemd de la session fournit déjà ; l'oreille n'ouvre pas
+/// de fenêtre et n'a pas besoin de `DISPLAY`.
+pub fn ear_unit() -> String {
+    "[Unit]
+Description=Jarvis — oreille du PC (micro, mot d'éveil, icône)
+# Le cerveau n'est pas requis : sans lui, l'icône affiche « cerveau injoignable ».
+After=graphical-session.target jarvis-brain.service pipewire.service
+PartOf=graphical-session.target
+# Sans mot d'éveil enregistré (`jarvis-ear enroll`), le service est sauté, pas en échec.
+ConditionPathExists=%h/.local/share/jarvis/wakeword/jarvis.rpw
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/jarvis-ear
+# « Quitter l'oreille » sort avec le code 0 : le service reste arrêté jusqu'à la
+# prochaine session ou `jarvisctl start oreille`.
+Restart=on-failure
+RestartSec=5
 
 [Install]
 WantedBy=graphical-session.target
@@ -176,10 +206,7 @@ pub fn install(
     }
     copy_binaries(&opts.source, paths, out)?;
     copy_libraries(&opts.source, paths, out)?;
-
-    fs::create_dir_all(paths.unit_path.parent().unwrap())?;
-    fs::write(&paths.unit_path, brain_unit())?;
-    writeln!(out, "Unité écrite : {}", paths.unit_path.display())?;
+    write_units(paths, out)?;
 
     fs::create_dir_all(&paths.config_dir)?;
     if !paths.env_file.exists() {
@@ -194,14 +221,24 @@ pub fn install(
     fs::write(&paths.install_file, format!("source = {source}\n"))?;
 
     systemctl(sys, &["daemon-reload"])?;
-    let r = systemctl(sys, &["enable", "--now", SERVICE])?;
-    if r.code != 0 {
-        bail!(
-            "`systemctl --user enable --now {SERVICE}` a échoué (code {})",
-            r.code
-        );
+    for svc in Service::ALL {
+        let unit = svc.unit();
+        let r = systemctl(sys, &["enable", "--now", unit])?;
+        if r.code != 0 {
+            bail!(
+                "`systemctl --user enable --now {unit}` a échoué (code {})",
+                r.code
+            );
+        }
+        if svc == Service::Ear && !paths.wakeword_enrolled() {
+            writeln!(
+                out,
+                "Service {unit} activé ; il démarrera après `jarvis-ear enroll`."
+            )?;
+        } else {
+            writeln!(out, "Service {unit} activé et démarré.")?;
+        }
     }
-    writeln!(out, "Service {SERVICE} activé et démarré.")?;
 
     let in_path = sys
         .env_var("PATH")
@@ -240,17 +277,67 @@ pub fn installed_source(paths: &Paths) -> Result<PathBuf> {
         .context("install.toml : clé `source` absente")
 }
 
+/// Écrit les unités systemd dont le contenu a changé ; renvoie les services dont l'unité
+/// vient d'être créée (absente avant), et si au moins une unité a été écrite.
+fn write_units(paths: &Paths, out: &mut dyn Write) -> Result<(Vec<Service>, bool)> {
+    let mut created = Vec::new();
+    let mut written = false;
+    for svc in Service::ALL {
+        let path = svc.unit_path(paths);
+        let content = svc.unit_content();
+        let existing = fs::read_to_string(path).ok();
+        if existing.as_deref() == Some(content.as_str()) {
+            continue;
+        }
+        if existing.is_none() {
+            created.push(svc);
+        }
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, content)?;
+        writeln!(out, "Unité écrite : {}", path.display())?;
+        written = true;
+    }
+    Ok((created, written))
+}
+
 pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
     let source = installed_source(paths)?;
     writeln!(out, "Compilation (release) dans {}…", source.display())?;
     build(sys, &source)?;
     copy_binaries(&source, paths, out)?;
     copy_libraries(&source, paths, out)?;
+    // Une installation antérieure à l'oreille en service n'a que l'unité du cerveau.
+    let (created, written) = write_units(paths, out)?;
+    if written {
+        systemctl(sys, &["daemon-reload"])?;
+    }
+    // Une unité déjà là garde son choix d'activation (`jarvisctl disable oreille`).
+    for svc in created {
+        let r = systemctl(sys, &["enable", svc.unit()])?;
+        if r.code != 0 {
+            bail!(
+                "`systemctl --user enable {}` a échoué (code {})",
+                svc.unit(),
+                r.code
+            );
+        }
+        writeln!(out, "Service {} activé au démarrage.", svc.unit())?;
+    }
     let r = systemctl(sys, &["restart", SERVICE])?;
     if r.code != 0 {
-        bail!("le redémarrage du service a échoué (code {})", r.code);
+        bail!("le redémarrage du cerveau a échoué (code {})", r.code);
     }
-    writeln!(out, "Mise à jour terminée, service redémarré.")?;
+    let r = systemctl(sys, &["restart", EAR_SERVICE])?;
+    if r.code != 0 {
+        bail!("le redémarrage de l'oreille a échoué (code {})", r.code);
+    }
+    writeln!(out, "Mise à jour terminée, cerveau et oreille redémarrés.")?;
+    if !paths.wakeword_enrolled() {
+        writeln!(
+            out,
+            "L'oreille démarrera après l'enregistrement du mot d'éveil : `jarvis-ear enroll`."
+        )?;
+    }
     Ok(())
 }
 
@@ -262,13 +349,20 @@ pub fn uninstall(
     input: &mut dyn BufRead,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let _ = systemctl(sys, &["stop", SERVICE]);
-    let _ = systemctl(sys, &["disable", SERVICE]);
-    if paths.unit_path.exists() {
-        fs::remove_file(&paths.unit_path)?;
+    // L'oreille d'abord : elle dépend du cerveau.
+    for svc in Service::ALL.into_iter().rev() {
+        let _ = systemctl(sys, &["stop", svc.unit()]);
+        let _ = systemctl(sys, &["disable", svc.unit()]);
+        let path = svc.unit_path(paths);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
     }
     let _ = systemctl(sys, &["daemon-reload"]);
-    writeln!(out, "Service arrêté, désactivé et unité supprimée.")?;
+    writeln!(
+        out,
+        "Services du cerveau et de l'oreille arrêtés, désactivés et unités supprimées."
+    )?;
 
     // jarvisctl en dernier.
     for bin in BINARIES {
@@ -317,9 +411,23 @@ pub fn uninstall(
     Ok(())
 }
 
-/// Verbe systemctl simple ; renvoie le code de sortie.
-pub fn service_verb(sys: &dyn System, verb: &str, out: &mut dyn Write) -> Result<i32> {
-    let r = systemctl(sys, &[verb, SERVICE])?;
+/// Services visés : celui indiqué, sinon le cerveau et l'oreille.
+pub fn targets(service: Option<Service>) -> Vec<Service> {
+    match service {
+        Some(s) => vec![s],
+        None => Service::ALL.to_vec(),
+    }
+}
+
+/// Verbe systemctl simple sur chaque service visé (arrêt : l'oreille d'abord) ; renvoie
+/// le premier code de sortie non nul, sinon 0.
+pub fn service_verb(
+    paths: &Paths,
+    sys: &dyn System,
+    verb: &str,
+    services: &[Service],
+    out: &mut dyn Write,
+) -> Result<i32> {
     let (done, label) = match verb {
         "start" => ("démarré", "démarrer"),
         "stop" => ("arrêté", "arrêter"),
@@ -327,12 +435,41 @@ pub fn service_verb(sys: &dyn System, verb: &str, out: &mut dyn Write) -> Result
         "enable" => ("activé au démarrage", "activer"),
         _ => ("désactivé au démarrage", "désactiver"),
     };
-    if r.code == 0 {
-        writeln!(out, "Service {done}.")?;
-    } else {
-        writeln!(out, "Impossible de {label} le service (code {}).", r.code)?;
+    let mut order = services.to_vec();
+    if matches!(verb, "stop" | "disable") {
+        order.reverse();
     }
-    Ok(r.code)
+    let mut code = 0;
+    for svc in order {
+        let unit = svc.unit();
+        // Installation antérieure à l'oreille en service : on ne bloque pas le cerveau.
+        if svc == Service::Ear && services.len() > 1 && !paths.ear_unit_path.exists() {
+            writeln!(
+                out,
+                "Service {unit} non installé, ignoré : lancez `jarvisctl update`."
+            )?;
+            continue;
+        }
+        let r = systemctl(sys, &[verb, unit])?;
+        if r.code != 0 {
+            writeln!(out, "Impossible de {label} {unit} (code {}).", r.code)?;
+            if code == 0 {
+                code = r.code;
+            }
+        } else if svc == Service::Ear
+            && matches!(verb, "start" | "restart")
+            && !paths.wakeword_enrolled()
+        {
+            // `ConditionPathExists` : systemctl réussit mais le service est sauté.
+            writeln!(
+                out,
+                "Service {unit} non démarré : aucun mot d'éveil enregistré, lancez `jarvis-ear enroll`."
+            )?;
+        } else {
+            writeln!(out, "Service {unit} {done}.")?;
+        }
+    }
+    Ok(code)
 }
 
 pub fn parse_show(text: &str) -> HashMap<String, String> {
@@ -404,45 +541,71 @@ fn model_names(json: &str, key: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Affiche l'état ; code 0 si actif, 3 sinon.
-pub fn status(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i32> {
+/// État systemd d'une unité : (actif, détail entre parenthèses).
+fn unit_state(sys: &dyn System, unit: &str) -> Result<(bool, String)> {
     let r = systemctl(
         sys,
         &[
             "show",
-            SERVICE,
+            unit,
             "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp",
         ],
     )?;
     let props = parse_show(&r.stdout);
     let get = |k: &str| props.get(k).map(String::as_str).unwrap_or("");
-    let active = get("ActiveState") == "active";
-    if active {
+    if get("ActiveState") == "active" {
         let mut detail = format!("pid {}", get("MainPID"));
         if let Some(t) = since(get("ActiveEnterTimestamp")) {
             detail.push_str(&format!(", depuis {t}"));
         }
-        writeln!(out, "Service   : actif ({detail})")?;
+        Ok((true, detail))
     } else {
         let state = match get("ActiveState") {
             "" => "inconnu",
             s => s,
         };
-        writeln!(out, "Service   : inactif ({state}, {})", get("SubState"))?;
+        Ok((false, format!("{state}, {}", get("SubState"))))
     }
+}
 
+/// Affiche l'état des services visés. Code 3 si le cerveau est inactif (ou l'oreille,
+/// quand elle seule est visée : l'oreille est facultative), 0 sinon.
+pub fn status(
+    paths: &Paths,
+    sys: &dyn System,
+    services: &[Service],
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let brain = services.contains(&Service::Brain);
+    let mut code = 0;
     let mut model = local_model(paths);
-    if active {
-        match sys.brain_status() {
-            Some((mode, version, reported)) => {
-                if !reported.is_empty() {
-                    model = reported;
+    if brain {
+        let (active, detail) = unit_state(sys, SERVICE)?;
+        if active {
+            writeln!(out, "Cerveau   : actif ({detail})")?;
+            match sys.brain_status() {
+                Some((mode, version, reported)) => {
+                    if !reported.is_empty() {
+                        model = reported;
+                    }
+                    writeln!(out, "Mode      : {mode} ({model})")?;
+                    writeln!(out, "Version   : {version}")?;
                 }
-                writeln!(out, "Mode      : {mode} ({model})")?;
-                writeln!(out, "Version   : {version}")?;
+                None => writeln!(out, "Mode      : cerveau injoignable sur son socket")?,
             }
-            None => writeln!(out, "Mode      : cerveau injoignable sur son socket")?,
+        } else {
+            writeln!(out, "Cerveau   : inactif ({detail})")?;
+            code = 3;
         }
+    }
+    if services.contains(&Service::Ear) {
+        let active = ear_status(paths, sys, out)?;
+        if !brain && !active {
+            code = 3;
+        }
+    }
+    if !brain {
+        return Ok(code);
     }
 
     match sys.http_get(OLLAMA_ADDR, "/api/version") {
@@ -466,7 +629,31 @@ pub fn status(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         "absente"
     };
     writeln!(out, "Clé Claude: {key}")?;
-    Ok(if active { 0 } else { 3 })
+    Ok(code)
+}
+
+/// Ligne de l'oreille ; renvoie vrai si son service est actif.
+fn ear_status(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<bool> {
+    let (active, detail) = unit_state(sys, EAR_SERVICE)?;
+    if active {
+        writeln!(out, "Oreille   : active ({detail})")?;
+    } else if !paths.ear_unit_path.exists() {
+        writeln!(
+            out,
+            "Oreille   : service non installé (lancez `jarvisctl update`)"
+        )?;
+    } else if !paths.wakeword_enrolled() {
+        writeln!(
+            out,
+            "Oreille   : non démarrée, aucun mot d'éveil enregistré (lancez `jarvis-ear enroll`)"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "Oreille   : inactive ({detail}) ; relance : `jarvisctl start oreille`"
+        )?;
+    }
+    Ok(active)
 }
 
 /// Affiche les vérifications ; renvoie 1 si une vérification obligatoire échoue.
@@ -498,22 +685,22 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
     check(
         out,
         paths.unit_path.is_file(),
-        "Unité systemd installée",
+        "Unité systemd du cerveau installée",
         "lancez `jarvisctl install`",
     )?;
     let enabled = systemctl(sys, &["is-enabled", SERVICE])?;
     check(
         out,
         enabled.stdout.trim() == "enabled",
-        "Service activé au démarrage",
-        "lancez `jarvisctl enable`",
+        "Cerveau activé au démarrage",
+        "lancez `jarvisctl enable cerveau`",
     )?;
     let active = systemctl(sys, &["is-active", SERVICE])?;
     check(
         out,
         active.stdout.trim() == "active",
-        "Service actif",
-        "lancez `jarvisctl start` puis `jarvisctl logs`",
+        "Cerveau actif",
+        "lancez `jarvisctl start cerveau` puis `jarvisctl logs`",
     )?;
 
     let ollama = sys
@@ -592,12 +779,12 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
             "! Clé API Claude absente — optionnelle (mode en ligne) : `jarvisctl set-api-key`"
         )?;
     }
-    ear_diagnostics(paths, out)?;
+    ear_diagnostics(paths, sys, out)?;
     Ok(if failures > 0 { 1 } else { 0 })
 }
 
 /// Oreille du PC : avertissements seulement (le cerveau fonctionne sans).
-fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
+fn ear_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
     let has_lib = |lib: &str| {
         fs::read_dir(&paths.lib_dir)
             .into_iter()
@@ -634,7 +821,7 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
             "lancez `scripts/download-models.sh voice`".into(),
         ),
         (
-            paths.data_dir.join("wakeword/jarvis.rpw").is_file(),
+            paths.wakeword_enrolled(),
             "Mot d'éveil enregistré".into(),
             "lancez `jarvis-ear enroll`".into(),
         ),
@@ -650,6 +837,45 @@ fn ear_diagnostics(paths: &Paths, out: &mut dyn Write) -> Result<()> {
         } else {
             writeln!(out, "! {label} absent — optionnel (oreille du PC) : {hint}")?;
         }
+    }
+    ear_service_diagnostics(paths, sys, out)
+}
+
+/// Service de l'oreille : installé, activé, actif (ou sauté faute de mot d'éveil).
+fn ear_service_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let warn = |out: &mut dyn Write, line: &str| -> Result<()> {
+        writeln!(out, "! {line}")?;
+        Ok(())
+    };
+    if !paths.ear_unit_path.is_file() {
+        return warn(
+            out,
+            "Service de l'oreille non installé — optionnel (oreille du PC) : lancez `jarvisctl update`",
+        );
+    }
+    writeln!(out, "✓ Service de l'oreille installé")?;
+    let enabled = systemctl(sys, &["is-enabled", EAR_SERVICE])?;
+    if enabled.stdout.trim() == "enabled" {
+        writeln!(out, "✓ Oreille activée au démarrage")?;
+    } else {
+        warn(
+            out,
+            "Oreille non activée au démarrage — optionnel (oreille du PC) : lancez `jarvisctl enable oreille`",
+        )?;
+    }
+    let active = systemctl(sys, &["is-active", EAR_SERVICE])?;
+    if active.stdout.trim() == "active" {
+        writeln!(out, "✓ Oreille active")?;
+    } else if !paths.wakeword_enrolled() {
+        warn(
+            out,
+            "Oreille non démarrée : pas de mot d'éveil enregistré — lancez `jarvis-ear enroll`",
+        )?;
+    } else {
+        warn(
+            out,
+            "Oreille inactive — optionnel (oreille du PC) : lancez `jarvisctl start oreille` puis `jarvisctl logs --oreille`",
+        )?;
     }
     Ok(())
 }
@@ -801,6 +1027,38 @@ mod tests {
     }
 
     #[test]
+    fn unite_de_l_oreille_exacte() {
+        assert_eq!(
+            ear_unit(),
+            "[Unit]
+Description=Jarvis — oreille du PC (micro, mot d'éveil, icône)
+# Le cerveau n'est pas requis : sans lui, l'icône affiche « cerveau injoignable ».
+After=graphical-session.target jarvis-brain.service pipewire.service
+PartOf=graphical-session.target
+# Sans mot d'éveil enregistré (`jarvis-ear enroll`), le service est sauté, pas en échec.
+ConditionPathExists=%h/.local/share/jarvis/wakeword/jarvis.rpw
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/jarvis-ear
+# « Quitter l'oreille » sort avec le code 0 : le service reste arrêté jusqu'à la
+# prochaine session ou `jarvisctl start oreille`.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+"
+        );
+        // L'oreille vit sans le cerveau : ordre de démarrage seulement, aucune dépendance.
+        let deps = ear_unit()
+            .lines()
+            .filter(|l| l.starts_with("Requires=") || l.starts_with("BindsTo="))
+            .count();
+        assert_eq!(deps, 0);
+    }
+
+    #[test]
     fn parse_systemctl_show() {
         let m = parse_show(
             "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n",
@@ -825,6 +1083,15 @@ mod tests {
             assert_eq!(mode_of(&paths.bin_dir.join(b)), 0o755);
         }
         assert_eq!(fs::read_to_string(&paths.unit_path).unwrap(), brain_unit());
+        assert_eq!(
+            fs::read_to_string(&paths.ear_unit_path).unwrap(),
+            ear_unit()
+        );
+        assert!(
+            paths
+                .ear_unit_path
+                .ends_with(".config/systemd/user/jarvis-ear.service")
+        );
         assert_eq!(mode_of(&paths.env_file), 0o600);
         assert!(
             fs::read_to_string(&paths.env_file)
@@ -844,7 +1111,44 @@ mod tests {
             .iter()
             .position(|c| c == "systemctl --user enable --now jarvis-brain.service")
             .unwrap();
-        assert!(reload < enable);
+        let enable_ear = cmds
+            .iter()
+            .position(|c| c == "systemctl --user enable --now jarvis-ear.service")
+            .unwrap();
+        assert!(reload < enable && enable < enable_ear);
+    }
+
+    #[test]
+    fn install_sans_mot_d_eveil_annonce_l_enrolement() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        let o = do_install(home.path(), &paths, &sys);
+        assert!(
+            o.contains(
+                "Service jarvis-ear.service activé ; il démarrera après `jarvis-ear enroll`."
+            ),
+            "{o}"
+        );
+        assert!(
+            o.contains("Service jarvis-brain.service activé et démarré."),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn install_echec_d_activation_de_l_oreille() {
+        let (home, paths) = setup();
+        let mut sys = Fake::default();
+        sys.replies.insert(
+            "systemctl --user enable --now jarvis-ear.service".into(),
+            (1, String::new()),
+        );
+        let opts = InstallOpts {
+            source: fake_source(home.path()),
+            no_build: true,
+        };
+        let err = install(&paths, &sys, &opts, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("jarvis-ear.service"), "{err}");
     }
 
     #[test]
@@ -884,17 +1188,18 @@ mod tests {
             assert!(!paths.bin_dir.join(b).exists());
         }
         assert!(!paths.unit_path.exists());
+        assert!(!paths.ear_unit_path.exists());
         assert!(paths.env_file.exists());
         assert!(paths.config_file.exists());
         let cmds = sys.cmds.borrow();
+        let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
+        // L'oreille s'arrête avant le cerveau.
         assert!(
-            cmds.iter()
-                .any(|c| c == "systemctl --user stop jarvis-brain.service")
+            pos("systemctl --user stop jarvis-ear.service")
+                < pos("systemctl --user stop jarvis-brain.service")
         );
-        assert!(
-            cmds.iter()
-                .any(|c| c == "systemctl --user disable jarvis-brain.service")
-        );
+        pos("systemctl --user disable jarvis-ear.service");
+        pos("systemctl --user disable jarvis-brain.service");
     }
 
     #[test]
@@ -961,9 +1266,9 @@ mod tests {
             (0, "ActiveState=inactive\nSubState=dead\nMainPID=0\nActiveEnterTimestamp=\n".into()),
         );
         let mut out = Vec::new();
-        assert_eq!(status(&paths, &sys, &mut out).unwrap(), 3);
+        assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 3);
         let o = text(out);
-        assert!(o.contains("Service   : inactif"));
+        assert!(o.contains("Cerveau   : inactif (inactive, dead)"), "{o}");
         assert!(o.contains("Ollama    : injoignable"));
         assert!(o.contains("Clé Claude: absente"));
     }
@@ -983,9 +1288,9 @@ mod tests {
             r#"{"models":[{"name":"llama3.2:3b"}]}"#.into(),
         );
         let mut out = Vec::new();
-        assert_eq!(status(&paths, &sys, &mut out).unwrap(), 0);
+        assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 0);
         let o = text(out);
-        assert!(o.contains("Service   : actif (pid 1234, depuis 16:28)"));
+        assert!(o.contains("Cerveau   : actif (pid 1234, depuis 16:28)"));
         assert!(o.contains("Mode      : local (llama3.2:3b)"));
         assert!(o.contains("Ollama    : joignable, modèle chargé"));
     }
@@ -1144,5 +1449,363 @@ mod tests {
         assert!(o.contains("✓ Modèle Whisper"), "{o}");
         assert!(o.contains("! Modèle d'empreinte vocale absent"), "{o}");
         assert!(o.contains("✓ Voix de Jarvis"), "{o}");
+    }
+
+    fn enroll_wakeword(paths: &Paths) {
+        fs::create_dir_all(paths.data_dir.join("wakeword")).unwrap();
+        fs::write(paths.data_dir.join("wakeword/jarvis.rpw"), "").unwrap();
+    }
+
+    /// Installation faite, journal des commandes vidé.
+    fn installed() -> (tempfile::TempDir, Paths, Fake) {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        sys.cmds.borrow_mut().clear();
+        (home, paths, sys)
+    }
+
+    fn verb_out(paths: &Paths, sys: &Fake, verb: &str, services: &[Service]) -> (i32, String) {
+        let mut out = Vec::new();
+        let code = service_verb(paths, sys, verb, services, &mut out).unwrap();
+        (code, text(out))
+    }
+
+    #[test]
+    fn verbe_sans_cible_vise_cerveau_puis_oreille() {
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+        let (code, o) = verb_out(&paths, &sys, "restart", &targets(None));
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec![
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        assert!(o.contains("Service jarvis-brain.service redémarré."), "{o}");
+        assert!(o.contains("Service jarvis-ear.service redémarré."), "{o}");
+    }
+
+    #[test]
+    fn arret_et_desactivation_commencent_par_l_oreille() {
+        for verb in ["stop", "disable"] {
+            let (_home, paths, sys) = installed();
+            verb_out(&paths, &sys, verb, &Service::ALL);
+            assert_eq!(
+                *sys.cmds.borrow(),
+                vec![
+                    format!("systemctl --user {verb} jarvis-ear.service"),
+                    format!("systemctl --user {verb} jarvis-brain.service")
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn cible_unique() {
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+        let (code, o) = verb_out(&paths, &sys, "start", &[Service::Ear]);
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user start jarvis-ear.service"]
+        );
+        assert_eq!(o, "Service jarvis-ear.service démarré.\n");
+        sys.cmds.borrow_mut().clear();
+        verb_out(&paths, &sys, "enable", &[Service::Brain]);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user enable jarvis-brain.service"]
+        );
+    }
+
+    #[test]
+    fn premier_code_d_echec_renvoye_et_l_autre_service_tente() {
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            "systemctl --user start jarvis-brain.service".into(),
+            (5, String::new()),
+        );
+        let (code, o) = verb_out(&paths, &sys, "start", &Service::ALL);
+        assert_eq!(code, 5);
+        assert!(
+            o.contains("Impossible de démarrer jarvis-brain.service (code 5)."),
+            "{o}"
+        );
+        assert!(o.contains("Service jarvis-ear.service démarré."), "{o}");
+        // Les deux échouent : le premier code compte.
+        sys.replies.insert(
+            "systemctl --user start jarvis-ear.service".into(),
+            (1, String::new()),
+        );
+        assert_eq!(verb_out(&paths, &sys, "start", &Service::ALL).0, 5);
+    }
+
+    #[test]
+    fn oreille_sans_mot_d_eveil_signalee_non_demarree() {
+        let (_home, paths, sys) = installed();
+        let (code, o) = verb_out(&paths, &sys, "start", &Service::ALL);
+        assert_eq!(code, 0);
+        assert!(
+            o.contains(
+                "Service jarvis-ear.service non démarré : aucun mot d'éveil enregistré, lancez `jarvis-ear enroll`."
+            ),
+            "{o}"
+        );
+        // L'activation, elle, est normale.
+        let (_, o) = verb_out(&paths, &sys, "enable", &[Service::Ear]);
+        assert_eq!(o, "Service jarvis-ear.service activé au démarrage.\n");
+    }
+
+    #[test]
+    fn unite_de_l_oreille_absente_ignoree_sans_cible() {
+        let (_home, paths, sys) = installed();
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let (code, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user restart jarvis-brain.service"]
+        );
+        assert!(o.contains("jarvisctl update"), "{o}");
+        // Visée explicitement, la commande part quand même (systemctl dira pourquoi).
+        sys.cmds.borrow_mut().clear();
+        verb_out(&paths, &sys, "restart", &[Service::Ear]);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user restart jarvis-ear.service"]
+        );
+    }
+
+    #[test]
+    fn update_ajoute_et_active_l_oreille_d_une_ancienne_installation() {
+        let (_home, paths, sys) = installed();
+        // Installation antérieure : seule l'unité du cerveau existe.
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert_eq!(
+            fs::read_to_string(&paths.ear_unit_path).unwrap(),
+            ear_unit()
+        );
+        let cmds: Vec<String> = sys
+            .cmds
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("systemctl"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                "systemctl --user daemon-reload",
+                "systemctl --user enable jarvis-ear.service",
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        assert!(
+            o.contains("Mise à jour terminée, cerveau et oreille redémarrés."),
+            "{o}"
+        );
+        assert!(o.contains("`jarvis-ear enroll`"), "{o}");
+    }
+
+    #[test]
+    fn update_garde_le_choix_d_activation_et_recharge_si_l_unite_change() {
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let systemctl_cmds = |sys: &Fake| -> Vec<String> {
+            sys.cmds
+                .borrow()
+                .iter()
+                .filter(|c| c.starts_with("systemctl"))
+                .cloned()
+                .collect()
+        };
+        // Unités à jour : ni rechargement ni activation, seulement les redémarrages.
+        assert_eq!(
+            systemctl_cmds(&sys),
+            vec![
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        assert!(!text(out).contains("jarvis-ear enroll"));
+
+        // Une unité ancienne est réécrite puis rechargée, sans réactivation.
+        sys.cmds.borrow_mut().clear();
+        fs::write(&paths.unit_path, "[Unit]\nancienne\n").unwrap();
+        update(&paths, &sys, &mut Vec::new()).unwrap();
+        assert_eq!(fs::read_to_string(&paths.unit_path).unwrap(), brain_unit());
+        assert_eq!(
+            systemctl_cmds(&sys),
+            vec![
+                "systemctl --user daemon-reload",
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+    }
+
+    #[test]
+    fn update_echec_du_redemarrage_de_l_oreille() {
+        let (_home, paths, mut sys) = installed();
+        sys.replies.insert(
+            "systemctl --user restart jarvis-ear.service".into(),
+            (1, String::new()),
+        );
+        let err = update(&paths, &sys, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("l'oreille"), "{err}");
+    }
+
+    const SHOW_EAR: &str = "systemctl --user show jarvis-ear.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp";
+    const SHOW_BRAIN: &str = "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp";
+
+    fn status_out(paths: &Paths, sys: &Fake, services: &[Service]) -> (i32, String) {
+        let mut out = Vec::new();
+        let code = status(paths, sys, services, &mut out).unwrap();
+        (code, text(out))
+    }
+
+    #[test]
+    fn status_montre_les_deux_services() {
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            SHOW_BRAIN.into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n".into()),
+        );
+        sys.replies.insert(
+            SHOW_EAR.into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=4321\nActiveEnterTimestamp=Wed 2026-10-28 16:28:05 CET\n".into()),
+        );
+        let (code, o) = status_out(&paths, &sys, &Service::ALL);
+        assert_eq!(code, 0);
+        assert!(
+            o.contains("Cerveau   : actif (pid 1234, depuis 16:28)"),
+            "{o}"
+        );
+        assert!(
+            o.contains("Oreille   : active (pid 4321, depuis 16:28)"),
+            "{o}"
+        );
+        assert!(o.contains("Ollama    :"), "{o}");
+
+        // L'oreille seule : ni cerveau, ni Ollama, ni clé.
+        let (code, o) = status_out(&paths, &sys, &[Service::Ear]);
+        assert_eq!(code, 0);
+        assert_eq!(o, "Oreille   : active (pid 4321, depuis 16:28)\n");
+    }
+
+    #[test]
+    fn status_oreille_inactive_n_affecte_que_sa_propre_cible() {
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            SHOW_BRAIN.into(),
+            (
+                0,
+                "ActiveState=active\nSubState=running\nMainPID=1\n".into(),
+            ),
+        );
+        sys.replies.insert(
+            SHOW_EAR.into(),
+            (0, "ActiveState=inactive\nSubState=dead\nMainPID=0\n".into()),
+        );
+        let (code, o) = status_out(&paths, &sys, &Service::ALL);
+        assert_eq!(code, 0, "l'oreille est facultative");
+        assert!(
+            o.contains(
+                "Oreille   : inactive (inactive, dead) ; relance : `jarvisctl start oreille`"
+            ),
+            "{o}"
+        );
+        assert_eq!(status_out(&paths, &sys, &[Service::Ear]).0, 3);
+        let (code, o) = status_out(&paths, &sys, &[Service::Brain]);
+        assert_eq!(code, 0);
+        assert!(!o.contains("Oreille"), "{o}");
+    }
+
+    #[test]
+    fn status_oreille_sans_mot_d_eveil_ou_non_installee() {
+        let (_home, paths, sys) = installed();
+        let (_, o) = status_out(&paths, &sys, &[Service::Ear]);
+        assert!(
+            o.contains("non démarrée, aucun mot d'éveil enregistré (lancez `jarvis-ear enroll`)"),
+            "{o}"
+        );
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let (_, o) = status_out(&paths, &sys, &[Service::Ear]);
+        assert!(
+            o.contains("service non installé (lancez `jarvisctl update`)"),
+            "{o}"
+        );
+    }
+
+    fn doctor_out(paths: &Paths, sys: &Fake) -> (i32, String) {
+        let mut out = Vec::new();
+        let code = doctor(paths, sys, &mut out).unwrap();
+        (code, text(out))
+    }
+
+    #[test]
+    fn doctor_verifie_le_service_de_l_oreille() {
+        let (_home, paths, mut sys) = installed();
+        // Installé et activé, mais sauté faute de mot d'éveil.
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-ear.service".into(),
+            (0, "enabled\n".into()),
+        );
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-ear.service".into(),
+            (3, "inactive\n".into()),
+        );
+        let (code_saute, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Service de l'oreille installé"), "{o}");
+        assert!(o.contains("✓ Oreille activée au démarrage"), "{o}");
+        assert!(
+            o.contains(
+                "! Oreille non démarrée : pas de mot d'éveil enregistré — lancez `jarvis-ear enroll`"
+            ),
+            "{o}"
+        );
+
+        // Mot d'éveil présent mais service arrêté (« Quitter l'oreille »).
+        enroll_wakeword(&paths);
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Oreille inactive"), "{o}");
+        assert!(o.contains("`jarvisctl start oreille`"), "{o}");
+
+        // Tout va bien.
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-ear.service".into(),
+            (0, "active\n".into()),
+        );
+        let (code_actif, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Oreille active"), "{o}");
+
+        // Désactivée puis non installée : avertissements seulement.
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-ear.service".into(),
+            (1, "disabled\n".into()),
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Oreille non activée au démarrage"), "{o}");
+        assert!(o.contains("`jarvisctl enable oreille`"), "{o}");
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let (code_absent, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Service de l'oreille non installé"), "{o}");
+        assert!(!o.contains("Oreille active"), "{o}");
+
+        // L'oreille ne change jamais le code de sortie (ici 1 : Ollama injoignable).
+        assert_eq!((code_saute, code_actif, code_absent), (1, 1, 1));
     }
 }
