@@ -87,7 +87,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 4.9 Reconnexion automatique et message « le PC est endormi » (sans file d'attente de son, en moins de 2 s)
 - [x] 4.10 Tests de bout en bout (tâche 8) et retrait de l'ancien chemin d'écoute, `doctor`, documentation (tâche 9)
 - [ ] 4.11 Relecture de la phase 4 et corrections
-- [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles)
+- [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles, [fiche](docs/essais/essai-4.12-reseau.md))
 
 ## Phase 5 : oreille Android (Pixel 4 XL)
 - [ ] 5.1 Rédiger le plan de la phase 5

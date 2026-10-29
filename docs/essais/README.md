@@ -13,7 +13,8 @@ l'éditeur, remplace `[ ]` par `[x]`) et remplis la section « Résultats » en 
 | 3 | [Une autre voix est ignorée](essai-2.18-autre-voix.md) | 10 min | 2.18 |
 | 4 | [Fausses détections sur une journée](essai-2.15-fausses-detections.md) | une journée | 2.15 |
 | 5 | [Recherche et vidéos](essai-6.7-recherche.md) | 20 min | 6.7 |
-| 6 | [L'agent de code](essai-7.10-agent.md) | 40 min | 7.10 |
+| 6 | [Les oreilles en réseau](essai-4.12-reseau.md) | 30 min | 4.12 |
+| 7 | [L'agent de code](essai-7.10-agent.md) | 40 min | 7.10 |
 
 Quand un essai est fini, dis-le-moi (ou colle la section « Résultats ») : je coche la tâche
 dans [ROADMAP.md](../../ROADMAP.md) et je corrige ce qui n'a pas marché.
