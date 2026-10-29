@@ -1,5 +1,6 @@
 use jarvis_protocol::{ControlRequest, ControlResponse, EarId, EarSummary};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
 use std::path::Path;
 use std::process::{Command, Output};
@@ -21,6 +22,22 @@ fn cerveau_absent_message_clair() {
     );
 }
 
+#[test]
+fn dossier_du_socket_ouvert_aux_autres_refuse() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("jarvis")).unwrap();
+    std::fs::set_permissions(
+        dir.path().join("jarvis"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
+    let _listener = UnixListener::bind(dir.path().join("jarvis/brain.sock")).unwrap();
+    let out = jarvis(dir.path(), &["status"]);
+    assert_eq!(out.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("peu sûr"), "{stderr}");
+}
+
 /// Faux cerveau sur `$XDG_RUNTIME_DIR/jarvis/brain.sock` : une connexion, une
 /// requête, puis chaque réponse après son délai. Rend la requête reçue.
 fn faux_cerveau(
@@ -28,6 +45,8 @@ fn faux_cerveau(
     replies: Vec<(Duration, ControlResponse)>,
 ) -> JoinHandle<ControlRequest> {
     std::fs::create_dir_all(dir.join("jarvis")).unwrap();
+    // Comme le vrai cerveau : dossier fermé aux autres.
+    std::fs::set_permissions(dir.join("jarvis"), std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = UnixListener::bind(dir.join("jarvis/brain.sock")).unwrap();
     std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();

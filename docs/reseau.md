@@ -45,8 +45,10 @@ jarvis pair
 Le terminal affiche un **code** à 6 chiffres, un **QR code**, l'adresse d'appairage
 (`jarvis://pair?…`), l'**empreinte courte** du PC (`A1B2-C3D4-E5F6-0718`) et un compte à
 rebours. La fenêtre reste ouverte 2 minutes, pour une seule oreille ; le code est à usage
-unique, 5 essais au plus. `jarvis pair` rend 0 quand une oreille s'est appairée, 1 sinon
-(délai écoulé, trop d'essais, `Ctrl+C`).
+unique. Chaque machine a 3 essais : après 3 codes faux, elle est refusée jusqu'à la fin de la
+fenêtre (« plus aucun essai depuis cette machine »), mais les autres peuvent encore s'appairer.
+Après 20 codes faux en tout, la fenêtre se ferme. `jarvis pair` rend 0 quand une oreille s'est
+appairée, 1 sinon (délai écoulé, trop d'essais, `Ctrl+C`).
 
 Sur l'oreille, au choix :
 
@@ -81,6 +83,13 @@ Le registre est `~/.local/share/jarvis/ears.toml` (0600) : seul le SHA-256 de ch
 est gardé. Deux réglages par oreille s'y modifient cerveau arrêté : `duck = false` (ne pas
 baisser la musique du PC à son réveil) et `bias` (petit avantage dans le choix de l'oreille,
 `0.1` par exemple).
+
+## Mode en ligne depuis une oreille
+
+Seule l'oreille du PC (son icône) peut passer le cerveau en mode en ligne. Une oreille d'une
+autre machine peut le repasser en local ; pour le mode en ligne, elle reçoit « Le mode en
+ligne se demande à la voix (avec confirmation) ou depuis le PC. » (dans son journal) : dites-le
+à voix haute (la phrase de confirmation est demandée), ou `jarvis mode en-ligne` sur le PC.
 
 ## Adresse manuelle
 
@@ -164,6 +173,34 @@ Puis, pour chaque autre oreille : `jarvis pair` sur le PC, `jarvis-ear pair …`
   invalide, port pris), le cerveau tourne quand même, sans oreilles : `jarvis pair`, `jarvis
   ears` et `jarvis unpair` répondent « Le réseau des oreilles est désactivé (voir les journaux
   du cerveau). ». La cause est dans `jarvisctl logs`.
+
+## Sécurité
+
+- **Le réseau est ouvert par défaut, sur toutes les interfaces** : `listen = "0.0.0.0:7341"`
+  écoute aussi sur le VPN, les réseaux docker et tout Wi-Fi où se trouve le PC. Pour
+  restreindre, au choix :
+  - le pare-feu (`ufw`, voir « Mise en route ») : seul le réseau de la maison passe ;
+  - `listen = "127.0.0.1:7341"` : seule l'oreille du PC passe ;
+  - `[network] enabled = false` : plus aucune oreille, **celle du PC comprise**.
+- **Sur un Wi-Fi public** (gare, café, hôtel), les autres voient le cerveau annoncé par mDNS
+  (son nom, son port) et peuvent tenter de s'y connecter. Sans le code, ils ne peuvent pas
+  s'appairer : la fenêtre ne s'ouvre qu'avec `jarvis pair`, 2 minutes, 3 essais par machine,
+  20 en tout. Une connexion sans `hello` valide est fermée au bout de 3 s, 2 à la fois au plus
+  par machine, et des places restent toujours libres pour l'oreille du PC. Le plus simple
+  reste de restreindre (ci-dessus) hors de chez soi.
+- **Téléphone ou oreille volé·e** : `jarvis unpair <nom>` tout de suite. Son jeton suffit pour
+  se connecter comme elle et envoyer du son, par exemple un enregistrement de votre voix pour
+  donner des ordres.
+- Le jeton de l'oreille du PC ne vaut que depuis le PC lui-même (`127.0.0.1`), et seule elle
+  peut passer le cerveau en mode en ligne (sinon : à la voix, avec confirmation).
+- **Annonces** (fin de tâche d'un agent…) : elles vont à l'oreille de la dernière phrase, ou, si
+  elle n'est plus connectée, à une autre oreille connectée. Elles peuvent donc être dites dans
+  une autre pièce, ou sur le téléphone.
+- **Socket du cerveau** : `jarvis`, `jarvisctl` et `jarvis-ear` refusent de lui parler si son
+  dossier (`$XDG_RUNTIME_DIR/jarvis`, sinon `/tmp/jarvis-<uid>`) n'est pas à vous et fermé aux
+  autres : « dossier du socket du cerveau peu sûr ». Si `/tmp/jarvis-<uid>` appartient à un
+  autre utilisateur, quelqu'un a tenté de se faire passer pour le cerveau : arrêtez Jarvis,
+  faites-le supprimer par l'administrateur, puis relancez.
 
 ## Dépannage
 

@@ -272,6 +272,7 @@ async fn start_brain(dir: &Path, fakes: &Fakes, bind: SocketAddr) -> BrainProc {
             hosts: vec!["127.0.0.1".parse().unwrap()],
             window: fakes.window,
             pairing_ttl: Duration::from_secs(120),
+            process_timeout: net::hub::PROCESS_TIMEOUT,
         };
         let hub = Hub::spawn(settings, registry, services, None);
         let tls = identity.server_config().unwrap();

@@ -178,8 +178,8 @@ Les deux oreilles tournent toujours.
   ```
 
   **Attendu :** l'oreille trouve le PC, montre son empreinte et demande « Est-ce la même que sur
-  le PC ? [o/N] ». Réponds `o`. L'appairage est refusé (mauvais code), et `jarvis pair` reste
-  ouvert.
+  le PC ? [o/N] ». Réponds `o`. L'appairage est refusé : « code faux (encore 2 essai(s)) »
+  (3 essais par machine), et `jarvis pair` reste ouvert.
 
 - [ ] Recommence avec le **bon code** :
 
