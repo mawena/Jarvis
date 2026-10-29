@@ -36,6 +36,12 @@ La commande se déroule en deux temps. Parle normalement, à ta distance habitue
 `jarvis-ear enroll --voice-only` refait seulement l'empreinte vocale (les 6 phrases), sans
 toucher au mot d'éveil. Tu peux relancer l'une ou l'autre à tout moment.
 
+Si le service de l'oreille tourne, l'enrôlement l'arrête d'abord (sinon il entendrait tes
+« Jarvis » et y réagirait) et le dit : « Service jarvis-ear arrêté pendant l'enrôlement… ». À la
+fin, il le relance (« Service jarvis-ear relancé. »), y compris après une erreur ou un `Ctrl+C`.
+Au tout premier enrôlement, c'est cette relance qui démarre l'oreille : avant, son service était
+sauté faute de mot d'éveil. Un service désactivé (`jarvisctl disable oreille`) n'est pas relancé.
+
 Avec l'empreinte, seule ta voix déclenche une action : une autre voix est ignorée sans être
 transcrite. Une phrase de moins d'une seconde est trop courte pour reconnaître une voix : elle
 n'est acceptée que dans les 3 minutes qui suivent une phrase reconnue, et seulement pour les
@@ -48,15 +54,44 @@ indisponible. ») : refais `jarvis-ear enroll --voice-only` ou `scripts/download
 speaker`. Sans empreinte du tout (installation neuve), toutes les voix sont acceptées et un
 avertissement est journalisé.
 
-## Lancer l'oreille
+## L'oreille en service
+
+L'oreille tourne en service systemd utilisateur (`jarvis-ear.service`, installé par
+`jarvisctl install` ou `jarvisctl update`) : elle **démarre seule avec la session**, il n'y a
+rien à lancer. Une icône « Jarvis » apparaît dans la zone de notification. Dis « Jarvis »,
+attends que la musique baisse, puis donne ta commande. La phrase se termine après 800 ms de
+silence. Sans parole 4 s après « Jarvis », elle est abandonnée ; une phrase dure 10 s au plus.
 
 ```bash
-jarvis-ear
+jarvisctl status oreille          # active ? depuis quand ?
+jarvisctl start oreille           # démarre (aussi : stop, restart)
+jarvisctl logs --oreille -f       # journal en direct (ou : journalctl --user -u jarvis-ear -f)
+jarvisctl disable oreille         # ne plus la démarrer avec la session (enable pour revenir)
 ```
 
-Une icône « Jarvis » apparaît dans la zone de notification. Dis « Jarvis », attends que la
-musique baisse, puis donne ta commande. La phrase se termine après 800 ms de silence. Sans
-parole 4 s après « Jarvis », elle est abandonnée ; une phrase dure 10 s au plus.
+- **Quitter l'oreille** (menu de l'icône) l'arrête jusqu'à la prochaine session, ou jusqu'à
+  `jarvisctl start oreille`. Une panne, elle, la relance seule au bout de 5 s.
+- Sans mot d'éveil enregistré, le service est sauté (ni démarré ni en échec) :
+  `jarvisctl status` affiche « non démarrée, aucun mot d'éveil enregistré ». Lance
+  `jarvis-ear enroll` : l'oreille démarre à la fin. Ce test porte sur le chemin par défaut
+  `~/.local/share/jarvis/wakeword/jarvis.rpw` ; avec un autre `wakeword_path` dans `ear.toml`,
+  garde aussi un fichier à ce chemin.
+- L'oreille démarre après le cerveau mais ne dépend pas de lui : sans cerveau, l'icône affiche
+  « cerveau injoignable ».
+- Si la zone de notification n'est pas encore prête à l'ouverture de la session, l'oreille
+  écoute quand même et l'icône apparaît dès que la zone est là.
+
+**Lancer l'oreille à la main** (pour la déboguer dans un terminal) : arrête d'abord le service,
+sinon deux oreilles entendraient tout en double.
+
+```bash
+jarvisctl stop oreille
+jarvis-ear                        # Ctrl+C pour quitter
+jarvisctl start oreille           # retour au service
+```
+
+Si le service tourne, `jarvis-ear` refuse de démarrer (code 1) et l'explique ; `jarvis-ear
+--force` passe outre.
 
 ## Icône et menu
 
@@ -67,12 +102,13 @@ parole 4 s après « Jarvis », elle est abandonnée ; une phrase dure 10 s au p
 - **Mode local / Mode en ligne** : change le mode du cerveau.
 - **Dernière phrase** : le dernier texte entendu (affichage seulement, non cliquable).
 - **Quitter l'oreille**. Si une phrase était en cours, la musique est d'abord remise à son
-  volume.
+  volume. Le service reste arrêté jusqu'à la prochaine session ou `jarvisctl start oreille`.
 
 La première ligne du menu résume l'état : écoute, micro coupé, cerveau injoignable, mode et
 modèle.
 
-L'écoute coupée est retenue au redémarrage de l'oreille (fichier `~/.local/state/jarvis/ear-muted`).
+L'écoute coupée est retenue au redémarrage de l'oreille, du service comme de la session
+(fichier `~/.local/state/jarvis/ear-muted`).
 La coupure totale, elle, ne l'est pas : l'oreille redémarre micro ouvert.
 
 Si la musique reste baissée (oreille ou cerveau arrêté au mauvais moment), elle remonte seule
@@ -235,5 +271,11 @@ Les lignes `!` concernent l'oreille (avertissements, pas d'échec) :
 - **Mot d'éveil ou empreinte absents** : `jarvis-ear enroll`.
 - **« Empreinte vocale indisponible : modèle introuvable »** : télécharge le modèle avec
   `scripts/download-models.sh speaker`, puis `jarvisctl restart`.
-- **Jarvis ne réagit pas** : `jarvisctl logs -f` ; vérifie que le micro n'est pas en écoute
-  coupée ou en coupure totale (icône), et que `jarvisctl status` montre le service actif.
+- **Oreille non démarrée : pas de mot d'éveil enregistré** : `jarvis-ear enroll`.
+- **Oreille inactive** (après « Quitter l'oreille » ou une panne répétée) :
+  `jarvisctl start oreille`, puis `jarvisctl logs --oreille`.
+- **Pas d'icône** : `jarvisctl status oreille`. Si l'oreille est active, cherche « zone de
+  notification » dans `jarvisctl logs --oreille`.
+- **Jarvis ne réagit pas** : `jarvisctl logs --oreille -f` (ce que l'oreille entend) et
+  `jarvisctl logs -f` (ce que le cerveau fait) ; vérifie que le micro n'est pas en écoute
+  coupée ou en coupure totale (icône), et que `jarvisctl status` montre les deux services actifs.

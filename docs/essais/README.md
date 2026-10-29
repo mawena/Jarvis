@@ -20,28 +20,40 @@ dans [ROADMAP.md](../../ROADMAP.md) et je corrige ce qui n'a pas marché.
 
 À faire une seule fois, avant le premier essai.
 
-- [ ] **1. Quitte l'oreille en cours.** Clique sur l'icône Jarvis en haut de l'écran →
-  **Quitter l'oreille**. Si elle tourne dans un terminal, tu peux aussi y faire `Ctrl+C`.
-- [ ] **2. Mets à jour le cerveau.** Dans un terminal, depuis le dossier du projet :
+- [ ] **1. Quitte l'oreille lancée à la main** (l'ancienne façon) : icône Jarvis en haut de
+  l'écran → **Quitter l'oreille**, ou `Ctrl+C` dans son terminal. Désormais l'oreille tourne en
+  service, toute seule ; une oreille restée dans un terminal ferait doublon.
+- [ ] **2. Mets à jour Jarvis.** Dans un terminal, depuis le dossier du projet :
 
   ```bash
   cd ~/Work/Mawena/Projects/Jarvis
   cargo run -q -p jarvisctl -- update
   ```
 
-  Attendu : la compilation se termine, puis « Mise à jour terminée, service redémarré. ».
-  Le cerveau redémarre tout seul.
-- [ ] **3. Vérifie l'installation.**
+  Attendu : la compilation se termine, puis « Mise à jour terminée, cerveau et oreille
+  redémarrés. ». La première fois, une ligne « Service jarvis-ear.service activé au
+  démarrage. » s'affiche aussi : l'oreille devient un service qui démarre avec la session.
+  Le cerveau et l'oreille redémarrent tout seuls : il n'y a plus rien à lancer.
+- [ ] **3. Vérifie l'icône.** L'icône Jarvis apparaît en haut de l'écran, quelques secondes
+  après la mise à jour. Si elle n'apparaît pas :
+
+  ```bash
+  jarvisctl status
+  ```
+
+  La ligne « Oreille » dit pourquoi : « non démarrée, aucun mot d'éveil enregistré » → lance
+  `jarvis-ear enroll` (l'oreille démarre à la fin) ; « inactive » → `jarvisctl start oreille`.
+- [ ] **4. Vérifie l'installation.**
 
   ```bash
   jarvisctl doctor
   ```
 
   Attendu : une coche `✓` devant chaque ligne, en particulier « Voix de Jarvis »,
-  « Modèle Whisper », « Modèle d'empreinte vocale », « Mot d'éveil enregistré » et
-  « Empreinte vocale enregistrée ». Une ligne `!` = quelque chose manque : la ligne dit quoi
-  lancer (par exemple `scripts/download-models.sh voice`).
-- [ ] **4. Ouvre un deuxième terminal pour le journal du cerveau** et laisse-le ouvert pendant
+  « Modèle Whisper », « Modèle d'empreinte vocale », « Mot d'éveil enregistré »,
+  « Empreinte vocale enregistrée » et « Oreille active ». Une ligne `!` = quelque chose
+  manque : la ligne dit quoi lancer (par exemple `scripts/download-models.sh voice`).
+- [ ] **5. Ouvre un deuxième terminal pour le journal du cerveau** et laisse-le ouvert pendant
   les essais :
 
   ```bash
@@ -50,13 +62,13 @@ dans [ROADMAP.md](../../ROADMAP.md) et je corrige ce qui n'a pas marché.
 
   C'est là que tu verras ce que Jarvis a entendu (« texte entendu »), si ta voix est reconnue
   (« voix reconnue score=… ») et ce qu'il a fait.
-- [ ] **5. Relance l'oreille** dans un troisième terminal :
+- [ ] **6. Si tu veux aussi le journal de l'oreille** (facultatif, dans un troisième terminal) :
 
   ```bash
-  jarvis-ear
+  jarvisctl logs --oreille -f
   ```
 
-  Attendu : « oreille démarrée » s'affiche, et l'icône Jarvis apparaît en haut de l'écran.
+  C'est là que s'affichent « mot d'éveil détecté (score …) » et l'état du micro.
 
 ## Bon à savoir : les phrases très courtes
 
@@ -72,6 +84,8 @@ puis recommence.
 - Le journal du cerveau est vide ou dit « cerveau arrêté » : `jarvisctl status`, puis
   `jarvisctl restart`.
 - L'icône affiche « Cerveau injoignable » : même chose.
+- Plus d'icône du tout (après « Quitter l'oreille », par exemple) : `jarvisctl start oreille`.
+  Si elle ne revient pas : `jarvisctl logs --oreille`.
 - Jarvis ne parle pas mais fait les actions : regarde la ligne « Voix de Jarvis » de
   `jarvisctl doctor`, et cherche « voix » dans le journal.
 - Note simplement ce que tu as vu : je m'occupe du reste.

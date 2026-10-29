@@ -8,20 +8,25 @@ noter quand **tu** dis « Jarvis ».
 
 ---
 
-## Le matin : démarrer l'enregistrement du journal
+## Le matin : vérifier que l'oreille tourne
 
-- [ ] **1.** Quitte l'oreille si elle tourne (icône Jarvis → **Quitter l'oreille**).
-- [ ] **2.** Relance-la en gardant son journal dans un fichier :
+L'oreille tourne en service : son journal est gardé par le système, il n'y a ni terminal à
+laisser ouvert ni fichier à créer.
+
+- [ ] **1.** Vérifie que l'icône Jarvis est en haut de l'écran. Sinon :
+  `jarvisctl start oreille`.
+- [ ] **2.** Vérifie que le service est actif :
 
   ```bash
-  jarvis-ear 2>&1 | tee -a ~/jarvis-essai-2.15.log
+  jarvisctl status oreille
   ```
 
-  Laisse ce terminal ouvert toute la journée (tu peux le réduire).
+  Attendu : « Oreille   : active (pid …, depuis …) ».
 - [ ] **3.** Note l'heure de départ : ……
 
-Le fichier ne contient que des lignes de texte (heure, « mot d'éveil détecté », phrase
-entendue) : **aucun son n'est enregistré**.
+Le journal ne contient que des lignes de texte (heure, « mot d'éveil détecté », phrase
+entendue) : **aucun son n'est enregistré**. Ne quitte pas l'oreille dans la journée (pas de
+« Quitter l'oreille ») : les détections ne seraient plus comptées.
 
 ## Pendant la journée
 
@@ -37,13 +42,15 @@ entendue) : **aucun son n'est enregistré**.
 - [ ] **5.** Compte toutes les détections de la journée :
 
   ```bash
-  grep -c "mot d'éveil détecté" ~/jarvis-essai-2.15.log
+  journalctl --user -u jarvis-ear --since "08:00" | grep -c "mot d'éveil détecté"
   ```
+
+  (remplace `08:00` par ton heure de départ, ici et aux étapes 6 et 7)
 
 - [ ] **6.** Affiche-les avec leur heure et leur score, pour repérer les fausses :
 
   ```bash
-  grep "mot d'éveil détecté" ~/jarvis-essai-2.15.log
+  journalctl --user -u jarvis-ear --since "08:00" | grep "mot d'éveil détecté"
   ```
 
 - [ ] **7.** Vois ce que le cerveau a entendu après chaque détection (les fausses donnent
@@ -53,12 +60,9 @@ entendue) : **aucun son n'est enregistré**.
   journalctl --user -u jarvis-brain --since "08:00" | grep -E "voix|texte entendu"
   ```
 
-  (remplace `08:00` par ton heure de départ)
-
 - [ ] **8.** Calcule : **fausses détections = détections (étape 5) − tes « Jarvis » (tes marques)**.
 
-- [ ] **9.** Quitte l'oreille avec `Ctrl+C` dans son terminal, puis relance-la normalement avec
-  `jarvis-ear` si tu veux continuer à t'en servir.
+Rien à arrêter : l'oreille continue de tourner normalement.
 
 ---
 
