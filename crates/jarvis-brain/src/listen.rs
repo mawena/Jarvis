@@ -690,6 +690,41 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn oui_d_une_autre_oreille_n_execute_pas() {
+        let (salon, cuisine) = (EarId::new("salon"), EarId::new("cuisine"));
+        let c = confirm(&["mets le PC en veille", "oui", "oui"]);
+        assert_eq!(
+            c.service.listen(&salon, &voice(0), false, false).await,
+            question()
+        );
+        // Voix de Charles, mais sur une autre oreille : rien.
+        let r = c.service.listen(&cuisine, &voice(0), false, true).await;
+        assert_eq!(r, heard("oui", "", None));
+        assert!(!c.brain.has_pending());
+        c.service.listen(&salon, &voice(0), false, true).await;
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_vocale_propre_a_chaque_oreille() {
+        let (salon, cuisine) = (EarId::new("salon"), EarId::new("cuisine"));
+        let s = with_gate(true);
+        s.service.listen(&salon, &voice(0), false, false).await;
+        assert_eq!(s.skill.calls().len(), 1);
+        // Phrase courte sur une autre oreille : hors session, ignorée.
+        let r = s
+            .service
+            .listen(&cuisine, &short_voice(), false, false)
+            .await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.skill.calls().len(), 1);
+        // Sur la même oreille : acceptée.
+        let r = s.service.listen(&salon, &short_voice(), false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.skill.calls().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn voix_inconnue_n_execute_pas_la_confirmation() {
         let c = confirm(&["mets le PC en veille", "oui"]);
         c.service.listen(&ear(), &voice(0), false, false).await;
