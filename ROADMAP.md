@@ -78,13 +78,16 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 - [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
 - [x] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`) — v1 : messages JSON, trames audio binaires, empreinte du certificat, adresse d'appairage ; oreille transmise dans tout le cerveau
-- [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau — cœur réseau et oreille du PC prêts (son en flux, appairage local automatique, `jarvis-ear pair`, profils), reste le serveur du cerveau (tâche 6)
-- [ ] 4.4 Serveur WebSocket + TLS avec certificat épinglé — TLS 1.3 épinglé et registre des oreilles prêts, reste le serveur (tâche 6)
-- [ ] 4.5 Découverte du cerveau par mDNS, adresse manuelle en secours — annonce et recherche prêtes (cohabitent avec avahi), reste le branchement (tâches 6 et 7)
-- [ ] 4.6 Appairage par code / QR code (`jarvis pair`) — fenêtre d'appairage et commandes `jarvis pair` / `ears` / `unpair` prêtes, reste le cerveau (tâche 6)
-- [ ] 4.7 Arbitre : une seule oreille gagne par phrase (fenêtre de 300 ms) — arbitre prêt, confirmation et session vocale propres à chaque oreille, reste le branchement (tâche 6)
-- [ ] 4.8 Réponse vocale jouée sur l'oreille gagnante
-- [ ] 4.9 Reconnexion automatique et message « le PC est endormi » — côté oreille prêt (reconnexion, « PC endormi » sans file d'attente, en moins de 2 s sans élection), reste le serveur du cerveau (tâche 6)
+- [x] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau — l'oreille du PC passe par le réseau (son en flux, appairage local automatique, `jarvis-ear pair`, profils)
+- [x] 4.4 Serveur WebSocket + TLS avec certificat épinglé — TLS 1.3, port 7341, rien accepté avant un `hello` valide, bornes (sessions, messages, phrases)
+- [x] 4.5 Découverte du cerveau par mDNS, adresse manuelle en secours (`brain_address`) — cohabite avec avahi
+- [x] 4.6 Appairage par code / QR code (`jarvis pair`, `jarvis ears`, `jarvis unpair`, `jarvis-ear pair`) — code à usage unique, 5 essais, 2 min, empreinte à comparer
+- [x] 4.7 Arbitre : une seule oreille gagne par phrase (fenêtre de 300 ms) — confirmation et session vocale propres à chaque oreille
+- [x] 4.8 Réponse vocale jouée sur l'oreille gagnante
+- [x] 4.9 Reconnexion automatique et message « le PC est endormi » (sans file d'attente de son, en moins de 2 s)
+- [ ] 4.10 Tests de bout en bout (tâche 8) et retrait de l'ancien chemin d'écoute, `doctor`, documentation (tâche 9)
+- [ ] 4.11 Relecture de la phase 4 et corrections
+- [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles)
 
 ## Phase 5 : oreille Android (Pixel 4 XL)
 - [ ] 5.1 Rédiger le plan de la phase 5
