@@ -22,9 +22,10 @@ use tracing::{debug, info, warn};
 
 use super::{MAX_PHRASE_SAMPLES, MAX_SESSIONS};
 
-/// Capture sans fin de phrase au-delà de ce délai : abandonnée (phrase de 10 s au
-/// plus côté oreille, plus la seconde de tête).
-pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Capture sans fin de phrase au-delà de ce délai : abandonnée (14 s de son au plus
+/// côté oreille, `jarvis_protocol::frame::MAX_PHRASE_SAMPLES`, envoyé en temps réel,
+/// plus la marge du réseau).
+pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 /// Capture sans son depuis ce délai : l'oreille l'a abandonnée sans prévenir (pas
 /// d'élection dans ses 2 s, `ELECTION_TIMEOUT`, ou micro bloqué). L'oreille envoie son
 /// son en continu, par paquets de 100 ms, jusqu'à la fin de phrase.
@@ -1341,6 +1342,21 @@ fn clean(text: &str, max: usize, fallback: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn phrase_la_plus_longue_de_l_oreille_gardee_en_entier() {
+        let sent = jarvis_protocol::frame::MAX_PHRASE_SAMPLES;
+        assert!(
+            MAX_PHRASE_SAMPLES >= sent + 16_000 / 2,
+            "marge d'au moins 0,5 s"
+        );
+        // Envoyée en temps réel : la capture n'est pas tenue pour sans fin avant.
+        let secs = Duration::from_secs_f64(MAX_PHRASE_SAMPLES as f64 / 16_000.0);
+        assert!(
+            CAPTURE_TIMEOUT >= secs + Duration::from_secs(3),
+            "{CAPTURE_TIMEOUT:?}"
+        );
+    }
 
     #[test]
     fn coupe_retiree_et_bornee() {

@@ -5,6 +5,7 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::{SAMPLE_RATE, Vad, WakeDetector};
+use jarvis_protocol::frame::MAX_PHRASE_SAMPLES;
 
 const RATE: usize = SAMPLE_RATE as usize;
 /// Dernière seconde conservée (contient « Jarvis »).
@@ -15,7 +16,8 @@ const PRE_ROLL: usize = RATE * 3 / 10;
 const END_SILENCE: usize = RATE * 8 / 10;
 /// Délai sans parole après le réveil avant abandon.
 const NO_SPEECH: usize = RATE * 4;
-/// Durée maximale de la phrase, mesurée depuis le réveil.
+/// Durée maximale de la phrase, mesurée depuis le réveil (seconde de tête en plus ;
+/// le tout borné à `MAX_PHRASE_SAMPLES`, ce que le cerveau accepte).
 const MAX_UTTERANCE: usize = RATE * 10;
 /// Temps de parole garanti même si elle commence à la fin du délai.
 const MIN_SPEECH: usize = MAX_UTTERANCE - NO_SPEECH;
@@ -159,7 +161,7 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
                         speech_start: None,
                         silence: 0,
                         no_speech: NO_SPEECH,
-                        max_len: MAX_UTTERANCE,
+                        max_len: MAX_UTTERANCE.min(MAX_PHRASE_SAMPLES - head_len),
                         guard: self.wake_guard,
                     };
                 } else {
@@ -232,10 +234,12 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
     }
 
     /// Capture tout de suite, sans mot d'éveil (réponse à une question de Jarvis) :
-    /// abandon si personne ne parle avant `wait`. La phrase n'a pas de seconde de tête.
+    /// abandon si personne ne parle avant `wait`. La phrase n'a pas de seconde de tête ;
+    /// elle dure au plus `MAX_PHRASE_SAMPLES` en tout (attente comprise).
     pub fn listen_now(&mut self, wait: Duration) {
         self.reset();
-        let no_speech = samples(wait);
+        let max_len = (samples(wait) + MIN_SPEECH).min(MAX_PHRASE_SAMPLES);
+        let no_speech = samples(wait).min(max_len);
         self.state = State::Capturing {
             post: Vec::new(),
             len: 0,
@@ -243,7 +247,7 @@ impl<W: WakeDetector, V: Vad> Listener<W, V> {
             speech_start: None,
             silence: 0,
             no_speech,
-            max_len: no_speech + MIN_SPEECH,
+            max_len,
             guard: self.listen_guard,
         };
     }
@@ -608,6 +612,55 @@ mod tests {
             panic!("{ev:?}")
         };
         assert_eq!(u.len(), PRE_ROLL + (250 + 50) * 256);
+    }
+
+    /// Longueur du flux d'une capture (tous les `Chunk`) et ses événements de fin.
+    fn streamed(l: &mut Listener<FakeWake, FakeVad>, signal: &[f32]) -> (usize, Vec<ListenEvent>) {
+        let (stream, rest) = split_stream(run(l, signal));
+        (stream.len(), rest)
+    }
+
+    #[test]
+    fn flux_borne_a_ce_que_le_cerveau_accepte() {
+        // Parole sans fin dès le réveil : seconde de tête + 10 s, sous la borne commune.
+        let (w, _) = FakeWake::new(100);
+        let mut l = Listener::new(w, FakeVad::new(0..100_000)).with_streaming(true);
+        let (len, rest) = streamed(&mut l, &ramp(RATE + 20 * RATE));
+        assert!(
+            matches!(rest.last(), Some(ListenEvent::Ended { .. })),
+            "{rest:?}"
+        );
+        assert!(len <= MAX_PHRASE_SAMPLES, "{len}");
+
+        // Écoute directe à attente longue : bornée elle aussi, attente comprise.
+        let (w, _) = FakeWake::new(usize::MAX);
+        let mut l = Listener::new(w, FakeVad::new(0..100_000)).with_streaming(true);
+        l.listen_now(Duration::from_secs(30));
+        let (len, rest) = streamed(&mut l, &ramp(40 * RATE));
+        assert!(
+            matches!(rest.as_slice(), [ListenEvent::Ended { .. }]),
+            "{rest:?}"
+        );
+        assert!(len <= MAX_PHRASE_SAMPLES, "{len}");
+        assert!(len + 256 > MAX_PHRASE_SAMPLES, "{len}");
+
+        // Sans parole : abandon au plus tard à la borne.
+        let (w, _) = FakeWake::new(usize::MAX);
+        let mut l = Listener::new(w, FakeVad::new(0..0)).with_streaming(true);
+        l.listen_now(Duration::from_secs(30));
+        let (len, rest) = streamed(&mut l, &ramp(40 * RATE));
+        assert_eq!(rest, [ListenEvent::NoSpeech]);
+        assert!(len <= MAX_PHRASE_SAMPLES, "{len}");
+    }
+
+    #[test]
+    fn reponse_a_une_question_tient_dans_la_borne() {
+        // Attente de 8 s (`REPLY_WAIT`) + 6 s de parole garantie = la borne commune.
+        assert_eq!(
+            samples(Duration::from_secs(8)) + MIN_SPEECH,
+            MAX_PHRASE_SAMPLES
+        );
+        assert!(RATE + MAX_UTTERANCE <= MAX_PHRASE_SAMPLES);
     }
 
     /// VAD réel en miniature : parole dès qu'une valeur dépasse 0,5.
