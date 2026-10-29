@@ -93,10 +93,14 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 ## Phase 6 : recherche et vidéos
 - [x] 6.1 Rédiger le plan de la phase 6 ([plan](docs/superpowers/plans/2026-10-29-phase-6-recherche.md))
-- [ ] 6.2 SearXNG auto-hébergé dans Docker
-- [ ] 6.3 Compétence recherche avec résumé vocal court (IA du mode actif)
-- [ ] 6.4 « Ouvre les résultats » dans le navigateur du PC
-- [ ] 6.5 « Lance la vidéo de… » (`yt-dlp` ou SearXNG vidéos)
+*Plan : [phase 6](docs/superpowers/plans/2026-10-29-phase-6-recherche.md), branche `feature/recherche`*
+
+- [x] 6.2 SearXNG auto-hébergé dans Docker — `jarvisctl searx up|down|status`, `127.0.0.1:8888` seulement, vérifié par `doctor`
+- [x] 6.3 Compétence recherche avec résumé vocal court (IA du mode actif) — Ollama seul en mode local (repli sur un extrait au-delà de 10 s), Claude en ligne
+- [x] 6.4 « Ouvre les résultats » dans le navigateur du PC (page de résultats, ou le n-ième lien)
+- [x] 6.5 « Lance la vidéo de… » (`yt-dlp` ou SearXNG vidéos) — dans le navigateur, musique mise en pause
+- [ ] 6.6 Relecture de la phase 6 et corrections (en cours)
+- [ ] 6.7 Essai réel avec Charles (Charles) — [fiche d'essai](docs/essais/essai-6.7-recherche.md)
 
 ## Phase 7 : agent de code
 - [x] 7.1 Rédiger le plan de la phase 7 ([plan](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md))
