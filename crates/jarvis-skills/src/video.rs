@@ -1,7 +1,7 @@
 //! « Lance la vidéo de… » : trouve une vidéo et la lance dans le navigateur.
 
 use crate::browser::{checked_url, open_url};
-use crate::media::{MediaPlayers, PlaybackStatus, PlayerCommand};
+use crate::media::{MediaPlayers, PauseMemory, PlaybackStatus, PlayerCommand, press_media_key};
 use crate::search::spoken::for_voice;
 use crate::search::{SearchSettings, SearxClient};
 use crate::{CommandRunner, Reply, Risk, Skill, SkillError, ToolSpec};
@@ -34,6 +34,7 @@ pub struct VideoSkill {
     players: Arc<dyn MediaPlayers>,
     runner: Arc<dyn CommandRunner>,
     settings: SearchSettings,
+    memory: Arc<PauseMemory>,
 }
 
 impl VideoSkill {
@@ -48,7 +49,14 @@ impl VideoSkill {
             players,
             runner,
             settings,
+            memory: PauseMemory::new(),
         }
+    }
+
+    /// Partage la mémoire de la pause avec la musique (« reprends »).
+    pub fn with_memory(mut self, memory: Arc<PauseMemory>) -> Self {
+        self.memory = memory;
+        self
     }
 
     async fn play(&self, query: &str) -> Reply {
@@ -133,24 +141,29 @@ impl VideoSkill {
         Some((url?, title.trim().to_string()))
     }
 
-    /// Met en pause les lecteurs MPRIS en lecture ; un échec est seulement noté.
+    /// Met en pause les lecteurs MPRIS en lecture, puis envoie la touche pause :
+    /// elle atteint aussi ce que MPRIS ne voit pas (YouTube dans Firefox en snap),
+    /// et ne fait rien si tout est déjà en pause. Un échec est seulement noté.
     async fn pause_music(&self) {
-        let list = match self.players.players().await {
-            Ok(list) => list,
-            Err(e) => {
-                tracing::warn!("lecteurs multimédia : {e:#}");
-                return;
+        let mut paused = false;
+        match self.players.players().await {
+            Ok(list) => {
+                for p in list.iter().filter(|p| p.status == PlaybackStatus::Playing) {
+                    match self
+                        .players
+                        .command(&p.bus_name, PlayerCommand::Pause)
+                        .await
+                    {
+                        Ok(()) => paused = true,
+                        Err(e) => tracing::warn!(player = %p.bus_name, "pause refusée : {e:#}"),
+                    }
+                }
             }
-        };
-        for p in list.iter().filter(|p| p.status == PlaybackStatus::Playing) {
-            if let Err(e) = self
-                .players
-                .command(&p.bus_name, PlayerCommand::Pause)
-                .await
-            {
-                tracing::warn!(player = %p.bus_name, "pause refusée : {e:#}");
-            }
+            Err(e) => tracing::warn!("lecteurs multimédia : {e:#}"),
         }
+        let key = press_media_key(self.runner.as_ref(), PlayerCommand::Pause);
+        // « reprends » passera par la touche si aucun lecteur MPRIS n'a été arrêté.
+        self.memory.remember_key_pause(key && !paused);
     }
 }
 
@@ -211,6 +224,14 @@ mod tests {
                 .push((bus_name.to_string(), cmd, opened));
             Ok(())
         }
+    }
+
+    /// La touche pause, envoyée avant d'ouvrir la vidéo.
+    fn pause_key() -> (String, Vec<String>) {
+        (
+            "xdotool".into(),
+            vec!["key".into(), "XF86AudioPause".into()],
+        )
     }
 
     fn player(name: &str, status: PlaybackStatus) -> PlayerInfo {
@@ -328,8 +349,38 @@ mod tests {
         assert_eq!(r.speech, "Je lance « Daft Punk - One More Time ».");
         assert_eq!(
             s.runner.calls(),
-            vec![xdg_open("https://www.youtube.com/watch?v=abc")]
+            vec![pause_key(), xdg_open("https://www.youtube.com/watch?v=abc")]
         );
+    }
+
+    #[tokio::test]
+    async fn musique_invisible_en_mpris_mise_en_pause_par_la_touche() {
+        // Essai 6.7 : YouTube dans Firefox (snap) joue, MPRIS ne voit qu'un VLC en pause.
+        let server = searx(json!([{
+            "title": "Daft Punk - One More Time",
+            "url": "https://www.youtube.com/watch?v=abc"
+        }]))
+        .await;
+        let s = setup(
+            settings(&server),
+            vec![player("vlc", PlaybackStatus::Paused)],
+        );
+        let memory = PauseMemory::new();
+        let skill = VideoSkill::new(
+            s.skill.client.clone(),
+            s.players.clone(),
+            s.runner.clone(),
+            s.skill.settings.clone(),
+        )
+        .with_memory(memory.clone());
+        play(&skill, "daft punk").await;
+        assert!(s.players.sent.lock().unwrap().is_empty(), "VLC touché");
+        assert_eq!(
+            s.runner.calls(),
+            vec![pause_key(), xdg_open("https://www.youtube.com/watch?v=abc")]
+        );
+        // « reprends » passera par la touche.
+        assert!(memory.take_key_pause());
     }
 
     #[tokio::test]
@@ -358,7 +409,7 @@ mod tests {
         );
         assert_eq!(
             s.runner.calls(),
-            vec![xdg_open("https://www.youtube.com/watch?v=abc")]
+            vec![pause_key(), xdg_open("https://www.youtube.com/watch?v=abc")]
         );
     }
 
@@ -379,6 +430,7 @@ mod tests {
             s.runner.calls(),
             vec![
                 ytdlp_call("bande-annonce de Dune"),
+                pause_key(),
                 xdg_open("https://www.youtube.com/watch?v=xyz")
             ]
         );
@@ -403,6 +455,7 @@ mod tests {
             s.runner.calls(),
             vec![
                 ytdlp_call("clip"),
+                pause_key(),
                 xdg_open("https://www.youtube.com/watch?v=xyz")
             ]
         );
