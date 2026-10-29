@@ -10,7 +10,8 @@ use jarvis_ear_core::resample::{Downmixer, f32_to_i16, i16_to_f32};
 use jarvis_ear_core::rustpotter::RustpotterDetector;
 use jarvis_ear_core::{MicState, Vad, WakeDetector};
 use jarvis_protocol::{
-    ControlRequest, ControlResponse, EarAction, Sound, SpeechAudio, decode_pcm, encode_pcm,
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, EarAction, Sound, SpeechAudio,
+    decode_pcm, encode_pcm,
 };
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
@@ -68,6 +69,7 @@ enum Internal {
         muted: bool,
     },
     Status(Result<ControlResponse, ClientError>),
+    Announcements(Result<ControlResponse, ClientError>),
 }
 
 pub struct App<W: WakeDetector, V: Vad, C: Capture> {
@@ -97,6 +99,14 @@ pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     /// Requête `Wake` en cours : la phrase attend qu'elle soit partie.
     pending_wake: Option<JoinHandle<()>>,
     status_in_flight: bool,
+    /// Phrases envoyées dont la réponse n'est pas encore arrivée.
+    listens_in_flight: usize,
+    /// Nom de l'oreille, pour les annonces.
+    name: String,
+    /// Faux si le cerveau ne connaît pas les annonces (ancienne version).
+    announcements_supported: bool,
+    /// Annonces relevées, jouées au repos.
+    announcements: Vec<Announcement>,
     /// Score de réveil minimal pendant la lecture.
     playback_wake_score: f32,
     internal_tx: mpsc::UnboundedSender<Internal>,
@@ -135,6 +145,10 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             last_heard: None,
             pending_wake: None,
             status_in_flight: false,
+            listens_in_flight: 0,
+            name: DEFAULT_EAR.to_string(),
+            announcements_supported: true,
+            announcements: Vec::new(),
             playback_wake_score: RustpotterDetector::DEFAULT_THRESHOLD + PLAYBACK_WAKE_MARGIN,
             internal_tx,
             internal_rx,
@@ -151,6 +165,12 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
     /// Seuil normal du mot d'éveil : celui de la lecture s'en déduit.
     pub fn with_wake_threshold(mut self, threshold: f32) -> Self {
         self.playback_wake_score = threshold + PLAYBACK_WAKE_MARGIN;
+        self
+    }
+
+    /// Nom de l'oreille envoyé au cerveau (défaut : `pc`).
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = name;
         self
     }
 
@@ -256,7 +276,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             audio: String::new(),
             muted: self.muted,
             follow_up: self.follow_up,
-            ear: None,
+            ear: Some(self.name.clone()),
         };
         match tokio::time::timeout(QUIT_TIMEOUT, self.brain.request(listen)).await {
             Ok(Ok(_)) => {}
@@ -344,6 +364,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         let wake = self.pending_wake.take();
         let brain = self.brain.clone();
         let tx = self.internal_tx.clone();
+        let ear = Some(self.name.clone());
+        self.listens_in_flight += 1;
         tokio::spawn(async move {
             // Le réveil part toujours avant la phrase.
             if let Some(wake) = wake {
@@ -354,7 +376,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     audio,
                     muted,
                     follow_up,
-                    ear: None,
+                    ear,
                 })
                 .await;
             let _ = tx.send(Internal::Heard { result, muted });
@@ -428,9 +450,15 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         true
     }
 
+    /// Lecture finie : écoute la réponse attendue, sinon joue les annonces en file.
+    fn on_playback(&mut self) {
+        self.listen_for_reply();
+        self.play_announcements();
+    }
+
     /// Lecture finie et question en attente : écoute la réponse sans mot d'éveil.
     /// Jamais en écoute coupée : seul le mot d'éveil peut y ouvrir une capture.
-    fn on_playback(&mut self) {
+    fn listen_for_reply(&mut self) {
         if !self.awaiting_reply || *self.playing.borrow_and_update() {
             return;
         }
@@ -448,6 +476,44 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         self.listener.listen_now(REPLY_WAIT);
         self.capturing = true;
         self.follow_up = true;
+    }
+
+    /// Au repos : ni capture, ni lecture, ni réponse attendue, ni réveil en cours.
+    fn idle(&self) -> bool {
+        !self.capturing
+            && !self.player.is_playing()
+            && !self.awaiting_reply
+            && self.listens_in_flight == 0
+            && self.pending_wake.is_none()
+    }
+
+    /// Joue les annonces en file si l'oreille est au repos, même écoute coupée
+    /// (sortie seulement). « Jarvis » les coupe comme une réponse.
+    fn play_announcements(&mut self) {
+        if self.announcements.is_empty() || !self.idle() {
+            return;
+        }
+        for announcement in std::mem::take(&mut self.announcements) {
+            tracing::info!("annonce jouée");
+            tracing::debug!("Jarvis : {}", announcement.speech);
+            self.play_reply(announcement.sound, announcement.audio);
+        }
+    }
+
+    /// Relève les annonces (après un statut réussi), sous le même drapeau que le statut.
+    fn poll_announcements(&mut self) {
+        if !self.announcements_supported || self.status_in_flight {
+            return;
+        }
+        self.status_in_flight = true;
+        let brain = self.brain.clone();
+        let tx = self.internal_tx.clone();
+        let ear = Some(self.name.clone());
+        tokio::spawn(async move {
+            let _ = tx.send(Internal::Announcements(
+                brain.request(ControlRequest::Announcements { ear }).await,
+            ));
+        });
     }
 
     fn poll_status(&mut self) {
@@ -475,45 +541,74 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     Ok(_) => return,
                     Err(_) => BrainLink::Unreachable,
                 };
+                if matches!(self.link, BrainLink::Connected { .. }) {
+                    self.poll_announcements();
+                }
             }
-            Internal::Heard { result, muted } => match result {
-                Ok(ControlResponse::Heard {
-                    text,
-                    speech,
-                    ear_action,
-                    audio,
-                    sound,
-                }) => {
-                    if !speech.is_empty() {
-                        tracing::debug!("Jarvis : {speech}");
+            Internal::Announcements(result) => {
+                self.status_in_flight = false;
+                match result {
+                    Ok(ControlResponse::Announcements { items }) => {
+                        self.announcements.extend(items);
+                        self.play_announcements();
                     }
-                    if !muted {
-                        if !text.is_empty() {
-                            tracing::info!("entendu : {text}");
-                            self.last_heard = Some(text);
-                        }
-                    } else if ear_action == Some(EarAction::Unmute) {
-                        // Seule la réactivation est journalisée pendant l'écoute coupée.
+                    // Ancien cerveau : il ne connaît pas cette requête.
+                    Ok(ControlResponse::Error { message }) => {
+                        tracing::debug!(
+                            "annonces non prises en charge ({message}) : relève arrêtée"
+                        );
+                        self.announcements_supported = false;
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::debug!("annonces non relevées : {e}"),
+                }
+            }
+            Internal::Heard { result, muted } => {
+                self.listens_in_flight = self.listens_in_flight.saturating_sub(1);
+                self.on_heard(result, muted);
+                self.play_announcements();
+            }
+        }
+    }
+
+    fn on_heard(&mut self, result: Result<ControlResponse, ClientError>, muted: bool) {
+        match result {
+            Ok(ControlResponse::Heard {
+                text,
+                speech,
+                ear_action,
+                audio,
+                sound,
+            }) => {
+                if !speech.is_empty() {
+                    tracing::debug!("Jarvis : {speech}");
+                }
+                if !muted {
+                    if !text.is_empty() {
                         tracing::info!("entendu : {text}");
+                        self.last_heard = Some(text);
                     }
-                    let played = self.play_reply(sound, audio);
-                    match ear_action {
-                        Some(EarAction::Mute) => self.set_muted(true),
-                        Some(EarAction::Unmute) => self.set_muted(false),
-                        Some(EarAction::AwaitReply) if played => {
-                            self.awaiting_reply = true;
-                            self.on_playback();
-                        }
-                        Some(EarAction::AwaitReply) | None => {}
+                } else if ear_action == Some(EarAction::Unmute) {
+                    // Seule la réactivation est journalisée pendant l'écoute coupée.
+                    tracing::info!("entendu : {text}");
+                }
+                let played = self.play_reply(sound, audio);
+                match ear_action {
+                    Some(EarAction::Mute) => self.set_muted(true),
+                    Some(EarAction::Unmute) => self.set_muted(false),
+                    Some(EarAction::AwaitReply) if played => {
+                        self.awaiting_reply = true;
+                        self.listen_for_reply();
                     }
+                    Some(EarAction::AwaitReply) | None => {}
                 }
-                Ok(ControlResponse::Error { message }) => {
-                    tracing::warn!("le cerveau signale une erreur : {message}");
-                }
-                Ok(_) => {}
-                Err(ClientError::BrainUnreachable) => self.link = BrainLink::Unreachable,
-                Err(e) => tracing::warn!("phrase non transmise : {e}"),
-            },
+            }
+            Ok(ControlResponse::Error { message }) => {
+                tracing::warn!("le cerveau signale une erreur : {message}");
+            }
+            Ok(_) => {}
+            Err(ClientError::BrainUnreachable) => self.link = BrainLink::Unreachable,
+            Err(e) => tracing::warn!("phrase non transmise : {e}"),
         }
     }
 }
@@ -722,6 +817,32 @@ mod tests {
         mute_file: Option<PathBuf>,
         wake_score: f32,
     ) -> Harness {
+        build_harness_full(
+            responder,
+            capture_fails,
+            speech_frames,
+            wakes,
+            mute_file,
+            wake_score,
+            STATUS_PERIOD,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build_harness_full(
+        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
+        + Send
+        + Sync
+        + 'static,
+        capture_fails: bool,
+        speech_frames: usize,
+        wakes: usize,
+        mute_file: Option<PathBuf>,
+        wake_score: f32,
+        status_period: Duration,
+        name: Option<&str>,
+    ) -> Harness {
         let shared = Arc::new(CaptureShared::default());
         let brain = Arc::new(FakeBrain {
             requests: Mutex::new(Vec::new()),
@@ -759,6 +880,10 @@ mod tests {
         if let Some(path) = mute_file {
             app = app.with_mute_file(path);
         }
+        if let Some(name) = name {
+            app = app.with_name(name.to_string());
+        }
+        app.status_period = status_period;
         Harness {
             capture: shared,
             brain,
@@ -899,6 +1024,14 @@ mod tests {
             .await;
     }
 
+    /// Relève périodique (statut, annonces).
+    fn is_poll(r: &ControlRequest) -> bool {
+        matches!(
+            r,
+            ControlRequest::Status | ControlRequest::Announcements { .. }
+        )
+    }
+
     #[tokio::test]
     async fn reveil_envoie_wake_puis_listen() {
         let h = harness(
@@ -921,11 +1054,7 @@ mod tests {
             h.tray.borrow().last_heard.as_deref() == Some("quelle heure est-il")
         })
         .await;
-        let sent: Vec<ControlRequest> = h
-            .requests()
-            .into_iter()
-            .filter(|r| !matches!(r, ControlRequest::Status))
-            .collect();
+        let sent: Vec<ControlRequest> = h.requests().into_iter().filter(|r| !is_poll(r)).collect();
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert_eq!(sent[0], ControlRequest::Wake);
         assert!(matches!(
@@ -1086,7 +1215,7 @@ mod tests {
             .unwrap()
             .clone()
             .into_iter()
-            .filter(|r| !matches!(r, ControlRequest::Status))
+            .filter(|r| !is_poll(r))
             .collect();
         assert_eq!(sent.len(), 2, "{sent:?}");
         assert_eq!(sent[0], ControlRequest::Wake);
@@ -1509,5 +1638,254 @@ mod tests {
         // Voix absente : l'écoute de la réponse commence dès la fin du bip.
         h.wait_for("écoute de la réponse", |h| h.tray.borrow().capturing)
             .await;
+    }
+
+    /// Cerveau qui donne une annonce (bip de réussite et voix) une seule fois, dès que
+    /// `ready` est levé ; `delivered` est levé quand elle est partie.
+    struct AnnouncingBrain {
+        ready: Arc<std::sync::atomic::AtomicBool>,
+        delivered: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl AnnouncingBrain {
+        fn new(ready: bool) -> Self {
+            Self {
+                ready: Arc::new(std::sync::atomic::AtomicBool::new(ready)),
+                delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn responder(
+            &self,
+        ) -> impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError> + Send + Sync + 'static
+        {
+            let (ready, delivered) = (self.ready.clone(), self.delivered.clone());
+            move |r| match r {
+                ControlRequest::Announcements { .. } => {
+                    let items = if ready.load(Ordering::SeqCst)
+                        && !delivered.swap(true, Ordering::SeqCst)
+                    {
+                        vec![jarvis_protocol::Announcement {
+                            speech: "La tâche est finie.".into(),
+                            audio: voice(),
+                            sound: Some(Sound::Success),
+                        }]
+                    } else {
+                        vec![]
+                    };
+                    Ok(ControlResponse::Announcements { items })
+                }
+                // Rien entendu : réponse vide, sans son.
+                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
+                    text: String::new(),
+                    speech: String::new(),
+                    ear_action: None,
+                    audio: None,
+                    sound: None,
+                }),
+                _ => status_ok(),
+            }
+        }
+
+        fn ready(&self) {
+            self.ready.store(true, Ordering::SeqCst);
+        }
+
+        fn delivered(&self) -> bool {
+            self.delivered.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Relève rapide (20 ms), `wakes` réveils au plus.
+    fn harness_announcing(brain: &AnnouncingBrain, wakes: usize) -> Harness {
+        build_harness_full(
+            brain.responder(),
+            false,
+            0,
+            wakes,
+            None,
+            0.9,
+            Duration::from_millis(20),
+            None,
+        )
+    }
+
+    fn success_beep() -> Played {
+        Played::Sound {
+            len: sounds::success(OUT_RATE).len(),
+            rate: OUT_RATE,
+        }
+    }
+
+    fn announcement_requests(h: &Harness) -> Vec<Option<String>> {
+        h.requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                ControlRequest::Announcements { ear } => Some(ear),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn annonce_jouee_au_repos() {
+        let brain = AnnouncingBrain::new(true);
+        let h = harness_announcing(&brain, 0);
+        h.wait_for("annonce jouée", |h| {
+            h.played() == vec![success_beep(), voice_played()]
+        })
+        .await;
+        // Relevée après un statut réussi, sous le nom par défaut.
+        let requests = h.requests();
+        assert_eq!(requests[0], ControlRequest::Status);
+        assert_eq!(announcement_requests(&h)[0].as_deref(), Some("pc"));
+        // Livrée une fois : jouée une fois.
+        h.wait_for("relèves suivantes", |h| {
+            announcement_requests(h).len() >= 3
+        })
+        .await;
+        assert_eq!(h.played().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn annonce_jouee_ecoute_coupee() {
+        let brain = AnnouncingBrain::new(false);
+        let h = harness_announcing(&brain, 0);
+        h.commands.send(TrayCommand::Mute).unwrap();
+        h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
+            .await;
+        brain.ready();
+        h.wait_for("annonce jouée", |h| {
+            h.played() == vec![success_beep(), voice_played()]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn annonce_attend_la_fin_de_la_capture() {
+        let brain = AnnouncingBrain::new(false);
+        let h = harness_announcing(&brain, 1);
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        // Réveil seul : la capture est en cours.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("capture en cours", |h| h.tray.borrow().capturing)
+            .await;
+        h.player.finish();
+        brain.ready();
+        h.wait_for("annonce relevée", |_| brain.delivered()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.played(), vec![wake_beep()], "rien pendant la capture");
+        // Fin de la capture (abandon faute de parole), puis réponse vide : annonce.
+        h.feed(vec![0.0; 70_000]).await;
+        h.wait_for("annonce jouée", |h| {
+            h.played() == vec![wake_beep(), success_beep(), voice_played()]
+        })
+        .await;
+        assert_eq!(h.listens().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn annonce_attend_la_fin_de_la_lecture() {
+        let brain = AnnouncingBrain::new(false);
+        let h = harness_announcing(&brain, 0);
+        h.wait_for("lien établi", |h| {
+            matches!(h.tray.borrow().brain, BrainLink::Connected { .. })
+        })
+        .await;
+        // Jarvis parle déjà.
+        h.player.playing.send_replace(true);
+        brain.ready();
+        h.wait_for("annonce relevée", |_| brain.delivered()).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(h.played().is_empty(), "{:?}", h.played());
+        h.player.finish();
+        h.wait_for("annonce jouée", |h| {
+            h.played() == vec![success_beep(), voice_played()]
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn reveil_coupe_l_annonce() {
+        let brain = AnnouncingBrain::new(true);
+        let h = harness_announcing(&brain, 1);
+        h.wait_for("annonce jouée", |h| {
+            h.played() == vec![success_beep(), voice_played()]
+        })
+        .await;
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        // « Jarvis » pendant l'annonce : coupure, bip, capture.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
+        assert_eq!(
+            h.played(),
+            vec![success_beep(), voice_played(), Played::Stop, wake_beep()]
+        );
+        assert!(h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
+    async fn ancien_cerveau_sans_annonces_ignore() {
+        let h = build_harness_full(
+            |r| match r {
+                ControlRequest::Announcements { .. } => Ok(ControlResponse::Error {
+                    message: "requête invalide".into(),
+                }),
+                _ => status_ok(),
+            },
+            false,
+            0,
+            0,
+            None,
+            0.9,
+            Duration::from_millis(20),
+            None,
+        );
+        h.wait_for("plusieurs statuts", |h| {
+            h.requests()
+                .iter()
+                .filter(|r| **r == ControlRequest::Status)
+                .count()
+                >= 4
+        })
+        .await;
+        assert_eq!(announcement_requests(&h).len(), 1, "plus de relève");
+        assert!(matches!(h.tray.borrow().brain, BrainLink::Connected { .. }));
+    }
+
+    #[tokio::test]
+    async fn listen_envoie_le_nom_de_l_oreille() {
+        let brain = AnnouncingBrain::new(false);
+        let h = build_harness_full(
+            brain.responder(),
+            false,
+            0,
+            1,
+            None,
+            0.9,
+            Duration::from_millis(20),
+            Some("salon"),
+        );
+        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+            .await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("phrase envoyée", |h| h.listens().len() == 1)
+            .await;
+        let ears: Vec<Option<String>> = h
+            .requests()
+            .into_iter()
+            .filter_map(|r| match r {
+                ControlRequest::Listen { ear, .. } => Some(ear),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ears, [Some("salon".to_string())]);
+        assert!(
+            announcement_requests(&h)
+                .iter()
+                .all(|e| e.as_deref() == Some("salon"))
+        );
     }
 }

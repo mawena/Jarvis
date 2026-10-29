@@ -1,15 +1,20 @@
 //! Serveur du socket de contrôle : une ligne JSON par requête, une par réponse.
 
-use crate::brain::Brain;
+use crate::announce::AnnouncementBoard;
+use crate::brain::{Brain, SystemClock};
 use crate::listen::ListenService;
 use crate::speaker::SpeakerGate;
 use crate::tts::Voice;
 use anyhow::{Context, bail};
-use jarvis_protocol::{ControlRequest, ControlResponse, decode_pcm};
+use jarvis_protocol::{
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm,
+};
+use jarvis_skills::{Outcome, SystemRunner};
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{
     AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
 };
@@ -56,14 +61,37 @@ pub async fn serve_with_voice(
     voice: Voice,
     socket: &Path,
 ) -> anyhow::Result<()> {
+    // Tableau neuf : personne n'y annonce rien.
+    let board = Arc::new(AnnouncementBoard::new(
+        Arc::new(SystemRunner),
+        Arc::new(SystemClock),
+    ));
+    serve_with_board(brain, listen, speaker, voice, board, socket).await
+}
+
+/// Comme [`serve_with_voice`], avec le tableau des annonces relevées par les oreilles.
+pub async fn serve_with_board(
+    brain: Arc<Brain>,
+    listen: Arc<ListenService>,
+    speaker: SpeakerState,
+    voice: Voice,
+    board: Arc<AnnouncementBoard>,
+    socket: &Path,
+) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
     info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
+    let shared = Arc::new(Shared {
+        brain,
+        listen,
+        speaker,
+        voice,
+        board,
+    });
     loop {
         let (stream, _) = listener.accept().await.context("acceptation d'un client")?;
-        let (brain, listen, speaker) = (brain.clone(), listen.clone(), speaker.clone());
-        let voice = voice.clone();
+        let shared = shared.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(brain, listen, speaker, voice, stream).await {
+            if let Err(e) = handle_client(shared, stream).await {
                 debug!("connexion terminée : {e}");
             }
         });
@@ -131,13 +159,16 @@ async fn read_request<R: AsyncBufRead + Unpin>(reader: &mut R, max: usize) -> io
     })
 }
 
-async fn handle_client(
+/// Ce que partagent tous les clients.
+struct Shared {
     brain: Arc<Brain>,
     listen: Arc<ListenService>,
     speaker: SpeakerState,
     voice: Voice,
-    stream: UnixStream,
-) -> io::Result<()> {
+    board: Arc<AnnouncementBoard>,
+}
+
+async fn handle_client(shared: Arc<Shared>, stream: UnixStream) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     loop {
@@ -158,7 +189,7 @@ async fn handle_client(
                 return Ok(());
             }
             Line::Request(line) => match serde_json::from_slice::<ControlRequest>(&line) {
-                Ok(request) => respond(&brain, &listen, &speaker, &voice, request).await,
+                Ok(request) => respond(&shared, request).await,
                 Err(_) => ControlResponse::Error {
                     message: "requête invalide".into(),
                 },
@@ -174,13 +205,14 @@ async fn send<W: AsyncWrite + Unpin>(write: &mut W, response: &ControlResponse) 
     write.write_all(out.as_bytes()).await
 }
 
-async fn respond(
-    brain: &Brain,
-    listen: &ListenService,
-    speaker: &SpeakerState,
-    voice: &Voice,
-    request: ControlRequest,
-) -> ControlResponse {
+async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
+    let Shared {
+        brain,
+        listen,
+        speaker,
+        voice,
+        board,
+    } = shared;
     match request {
         ControlRequest::Say { text } => ControlResponse::Reply {
             speech: brain.handle_text(&text).await.speech,
@@ -190,14 +222,14 @@ async fn respond(
             listen.wake().await;
             status(brain)
         }
-        // Le nom de l'oreille servira aux annonces (tâche 5).
         ControlRequest::Listen {
             audio,
             muted,
             follow_up,
-            ear: _,
+            ear,
         } => match decode_pcm(&audio) {
             Ok(samples) => {
+                board.touch(ear.as_deref().unwrap_or(DEFAULT_EAR));
                 voice
                     .speak(listen.listen(&samples, muted, follow_up).await)
                     .await
@@ -206,9 +238,8 @@ async fn respond(
                 message: "audio invalide".into(),
             },
         },
-        // Aucune annonce encore : le tableau des annonces arrive avec la tâche 5.
-        ControlRequest::Announcements { ear: _ } => {
-            ControlResponse::Announcements { items: vec![] }
+        ControlRequest::Announcements { ear } => {
+            announcements(board, voice, ear.as_deref().unwrap_or(DEFAULT_EAR)).await
         }
         ControlRequest::EnrollVoice { samples } => enroll_voice(speaker, samples).await,
         ControlRequest::SetMode { mode } => match brain.set_mode(mode) {
@@ -218,6 +249,33 @@ async fn respond(
             },
         },
     }
+}
+
+/// Temps total de synthèse des annonces d'une relève : l'oreille abandonne une
+/// requête à 30 s. Au-delà, les annonces restantes partent sans voix.
+const ANNOUNCE_SYNTH_BUDGET: Duration = Duration::from_secs(20);
+
+/// Annonces de l'oreille `ear`, avec voix et bip.
+async fn announcements(board: &AnnouncementBoard, voice: &Voice, ear: &str) -> ControlResponse {
+    let deadline = tokio::time::Instant::now() + ANNOUNCE_SYNTH_BUDGET;
+    let mut items = Vec::new();
+    for (speech, outcome) in board.take_for(ear) {
+        let audio = tokio::time::timeout_at(deadline, voice.audio_for(&speech))
+            .await
+            .ok()
+            .flatten();
+        let sound = match outcome {
+            Outcome::Done => Some(Sound::Success),
+            Outcome::Failed => Some(Sound::Failure),
+            Outcome::Info => None,
+        };
+        items.push(Announcement {
+            speech,
+            audio,
+            sound,
+        });
+    }
+    ControlResponse::Announcements { items }
 }
 
 fn status(brain: &Brain) -> ControlResponse {
