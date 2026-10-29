@@ -1,84 +1,82 @@
-//! Boucle principale de l'oreille : trames du micro, mot d'éveil, phrases envoyées au
-//! cerveau, réponses jouées, commandes de l'icône et statut périodique.
+//! Boucle principale de l'oreille : trames du micro, mot d'éveil, phrase envoyée en
+//! flux au cerveau par le réseau, élection, réponses jouées, commandes de l'icône.
+//!
+//! Hors connexion, rien n'est capté ni gardé : « Jarvis » fait dire « le PC est
+//! endormi » (phrase enregistrée, sinon bip d'échec) et relance la connexion.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use jarvis_ear_core::listener::{ListenEvent, Listener};
-use jarvis_ear_core::resample::{Downmixer, f32_to_i16, i16_to_f32};
+use jarvis_ear_core::net::batch::AudioBatcher;
+use jarvis_ear_core::net::{ELECTION_TIMEOUT, LinkEvent, LinkState};
+use jarvis_ear_core::resample::{Downmixer, i16_to_f32};
 use jarvis_ear_core::rustpotter::RustpotterDetector;
 use jarvis_ear_core::{MicState, Vad, WakeDetector};
+use jarvis_protocol::ear::{BrainMessage, EarMessage};
 use jarvis_protocol::{
     Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, EarAction, Sound, SpeechAudio,
-    decode_pcm, encode_pcm,
+    decode_pcm,
 };
 use tokio::sync::{mpsc, watch};
-use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::capture::{Capture, CaptureEvent};
-use crate::client::{self, ClientError};
+use crate::client::{Brain, ClientError, RESPONSE_TIMEOUT};
+use crate::link::Link;
 use crate::playback::{Player, SilentPlayer};
 use crate::sounds;
 use crate::tray::{BrainLink, TrayCommand, TrayState};
 
-/// Période d'interrogation du statut du cerveau.
-pub const STATUS_PERIOD: Duration = Duration::from_secs(5);
-
-/// Fichier `~/.local/state/jarvis/ear-muted` : présent tant que l'écoute est coupée.
-pub fn default_mute_file() -> Option<PathBuf> {
-    let base = directories::BaseDirs::new()?;
-    let dir = base.state_dir().unwrap_or_else(|| base.data_local_dir());
-    Some(dir.join("jarvis").join("ear-muted"))
-}
+/// Période de relève des annonces (socket Unix, oreille du PC).
+pub const ANNOUNCE_PERIOD: Duration = Duration::from_secs(5);
 
 /// Délai pour commencer à répondre à une question de Jarvis (`EarAction::AwaitReply`).
 pub const REPLY_WAIT: Duration = Duration::from_secs(8);
 
-/// Délai maximal de chaque requête envoyée en quittant.
-const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+/// Délai maximal de la fermeture du lien en quittant.
+const QUIT_TIMEOUT: Duration = Duration::from_secs(4);
 
 /// Pendant que Jarvis parle, le réveil exige ce score en plus du seuil normal : la voix
 /// de synthèse qui dit « Jarvis » ressemble moins au modèle (enregistré par
 /// l'utilisateur) que l'utilisateur lui-même, qui peut donc toujours couper la parole.
 pub const PLAYBACK_WAKE_MARGIN: f32 = 0.1;
 
-/// Liaison avec le cerveau (remplaçable dans les tests).
-#[async_trait::async_trait]
-pub trait Brain: Send + Sync + 'static {
-    async fn request(&self, req: ControlRequest) -> Result<ControlResponse, ClientError>;
-}
-
-/// Cerveau joint par son socket de contrôle.
-pub struct SocketBrain {
-    pub socket: PathBuf,
-}
-
-#[async_trait::async_trait]
-impl Brain for SocketBrain {
-    async fn request(&self, req: ControlRequest) -> Result<ControlResponse, ClientError> {
-        client::request(&self.socket, &req).await
-    }
-}
+/// Phrase « le PC est endormi » enregistrée (voix de Jarvis), si elle existe.
+pub type OfflinePhrase = Arc<dyn Fn() -> Option<SpeechAudio> + Send + Sync>;
 
 /// Résultats des requêtes lancées en tâche de fond.
 enum Internal {
-    Heard {
-        result: Result<ControlResponse, ClientError>,
-        /// La phrase a été envoyée pendant l'écoute coupée.
-        muted: bool,
-    },
-    Status(Result<ControlResponse, ClientError>),
     Announcements(Result<ControlResponse, ClientError>),
+}
+
+/// Capture en cours, envoyée en flux.
+#[derive(Debug, Clone, Copy)]
+struct Current {
+    utterance: u32,
+    muted: bool,
+}
+
+/// Phrase finie dont la réponse est attendue.
+#[derive(Debug, Clone, Copy)]
+struct Awaited {
+    utterance: u32,
+    muted: bool,
+    since: Instant,
 }
 
 pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     listener: Listener<W, V>,
     capture: C,
-    brain: Arc<dyn Brain>,
+    link: Arc<dyn Link>,
+    events: mpsc::Receiver<LinkEvent>,
+    link_state: watch::Receiver<LinkState>,
+    /// Socket de contrôle (oreille du PC) : relève des annonces, en secours.
+    control: Option<Arc<dyn Brain>>,
     commands: mpsc::UnboundedReceiver<TrayCommand>,
     tray: watch::Sender<TrayState>,
-    status_period: Duration,
+    announce_period: Duration,
     downmixer: Option<Downmixer>,
     muted: bool,
     /// Présence = écoute coupée : survit à un redémarrage de l'oreille.
@@ -87,69 +85,80 @@ pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     /// (un micro fermé pour de bon sans que l'on s'en souvienne serait pire).
     hard_muted: bool,
     unavailable: bool,
-    capturing: bool,
-    /// La capture en cours répond à une question (sans mot d'éveil).
-    follow_up: bool,
+    current: Option<Current>,
+    batcher: AudioBatcher,
+    /// Numéro de la dernière phrase (réveil ou réponse à une question).
+    utterance: u32,
+    /// Réveil envoyé, ni `elected` ni `stop` reçu : échéance.
+    election: Option<(u32, Instant)>,
+    election_timeout: Duration,
+    awaited: Option<Awaited>,
     /// Une question attend la fin de la lecture pour écouter la réponse.
     awaiting_reply: bool,
     player: Box<dyn Player>,
     playing: watch::Receiver<bool>,
-    link: BrainLink,
+    brain: BrainLink,
     last_heard: Option<String>,
-    /// Requête `Wake` en cours : la phrase attend qu'elle soit partie.
-    pending_wake: Option<JoinHandle<()>>,
-    status_in_flight: bool,
-    /// Phrases envoyées dont la réponse n'est pas encore arrivée.
-    listens_in_flight: usize,
     /// Nom de l'oreille, pour les annonces.
     name: String,
     /// Faux si le cerveau ne connaît pas les annonces (ancienne version).
     announcements_supported: bool,
+    announcements_in_flight: bool,
     /// Annonces relevées, jouées au repos.
     announcements: Vec<Announcement>,
     /// Score de réveil minimal pendant la lecture.
     playback_wake_score: f32,
+    offline: Option<OfflinePhrase>,
     internal_tx: mpsc::UnboundedSender<Internal>,
     internal_rx: mpsc::UnboundedReceiver<Internal>,
 }
 
 impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
+    /// L'écoute passe en mode flux.
     pub fn new(
         listener: Listener<W, V>,
         capture: C,
-        brain: Arc<dyn Brain>,
+        link: Arc<dyn Link>,
+        events: mpsc::Receiver<LinkEvent>,
         commands: mpsc::UnboundedReceiver<TrayCommand>,
         tray: watch::Sender<TrayState>,
     ) -> Self {
         let (internal_tx, internal_rx) = mpsc::unbounded_channel();
         let player = SilentPlayer::new();
         let playing = player.playing();
+        let link_state = link.state();
         Self {
-            listener,
+            listener: listener.with_streaming(true),
             capture,
-            brain,
+            link,
+            events,
+            link_state,
+            control: None,
             commands,
             tray,
-            status_period: STATUS_PERIOD,
+            announce_period: ANNOUNCE_PERIOD,
             downmixer: None,
             muted: false,
             mute_file: None,
             hard_muted: false,
             unavailable: false,
-            capturing: false,
-            follow_up: false,
+            current: None,
+            batcher: AudioBatcher::new(),
+            utterance: 0,
+            election: None,
+            election_timeout: ELECTION_TIMEOUT,
+            awaited: None,
             awaiting_reply: false,
             player: Box::new(player),
             playing,
-            link: BrainLink::Unreachable,
+            brain: BrainLink::Connecting,
             last_heard: None,
-            pending_wake: None,
-            status_in_flight: false,
-            listens_in_flight: 0,
             name: DEFAULT_EAR.to_string(),
             announcements_supported: true,
+            announcements_in_flight: false,
             announcements: Vec::new(),
             playback_wake_score: RustpotterDetector::DEFAULT_THRESHOLD + PLAYBACK_WAKE_MARGIN,
+            offline: None,
             internal_tx,
             internal_rx,
         }
@@ -168,9 +177,21 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         self
     }
 
-    /// Nom de l'oreille envoyé au cerveau (défaut : `pc`).
+    /// Nom de l'oreille pour les annonces (défaut : `pc`).
     pub fn with_name(mut self, name: String) -> Self {
         self.name = name;
+        self
+    }
+
+    /// Relève des annonces par le socket de contrôle (oreille du PC).
+    pub fn with_control(mut self, control: Arc<dyn Brain>) -> Self {
+        self.control = Some(control);
+        self
+    }
+
+    /// Phrase « le PC est endormi » (sinon : bip d'échec).
+    pub fn with_offline_phrase(mut self, offline: OfflinePhrase) -> Self {
+        self.offline = Some(offline);
         self
     }
 
@@ -220,8 +241,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
     fn publish(&self) {
         let state = TrayState {
             mic: self.mic(),
-            capturing: self.capturing,
-            brain: self.link.clone(),
+            capturing: self.current.is_some(),
+            brain: self.brain.clone(),
             last_heard: self.last_heard.clone(),
         };
         self.tray.send_if_modified(|current| {
@@ -238,50 +259,116 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             tracing::warn!("micro indisponible : {e:#}");
             self.unavailable = true;
         }
+        self.on_link_state();
         self.publish();
-        let mut tick = tokio::time::interval(self.status_period);
+        let mut tick = tokio::time::interval(self.announce_period);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            let election = self.election.map(|(_, deadline)| deadline);
             tokio::select! {
                 Some(event) = cap_rx.recv() => self.on_capture(event),
                 command = self.commands.recv() => match command {
                     Some(TrayCommand::Quit) | None => break,
                     Some(command) => self.on_command(command, &cap_tx),
                 },
+                Some(event) = self.events.recv() => self.on_link_event(event),
+                Ok(()) = self.link_state.changed() => self.on_link_state(),
                 Some(internal) = self.internal_rx.recv() => self.on_internal(internal),
                 Ok(()) = self.playing.changed() => self.on_playback(),
-                _ = tick.tick() => self.poll_status(),
+                () = tokio::time::sleep_until(election.unwrap_or_else(Instant::now)),
+                    if election.is_some() => self.on_election_timeout(),
+                _ = tick.tick() => self.poll_announcements(),
             }
             self.publish();
         }
         self.capture.stop();
-        self.restore_on_quit().await;
+        self.quit().await;
         Ok(())
     }
 
-    /// Quitter pendant une capture : la musique avait été baissée au réveil. On attend le
-    /// `Wake`, puis on envoie un `Listen` vide et on attend la réponse (une tâche
-    /// détachée mourrait avec le runtime).
-    async fn restore_on_quit(&mut self) {
-        if !self.capturing {
-            return;
-        }
-        self.capturing = false;
-        if let Some(wake) = self.pending_wake.take()
-            && tokio::time::timeout(QUIT_TIMEOUT, wake).await.is_err()
+    /// Quitter pendant une capture : fin de phrase vide envoyée au mieux (le cerveau
+    /// rétablit aussi le son à la déconnexion), puis fermeture propre du lien.
+    async fn quit(&mut self) {
+        self.cancel_capture();
+        if tokio::time::timeout(QUIT_TIMEOUT, self.link.close())
+            .await
+            .is_err()
         {
-            tracing::warn!("réveil toujours en cours en quittant");
+            tracing::warn!("le lien avec le cerveau ne se ferme pas");
         }
-        let listen = ControlRequest::Listen {
-            audio: String::new(),
-            muted: self.muted,
-            follow_up: self.follow_up,
-            ear: Some(self.name.clone()),
+    }
+
+    fn on_link_state(&mut self) {
+        self.brain = match &*self.link_state.borrow_and_update() {
+            LinkState::Connected(status) => BrainLink::Connected {
+                mode: status.mode,
+                local_model: status.local_model.clone(),
+            },
+            LinkState::Connecting => BrainLink::Connecting,
+            LinkState::Unreachable => BrainLink::Unreachable,
+            LinkState::Rejected(_) => BrainLink::Refused,
         };
-        match tokio::time::timeout(QUIT_TIMEOUT, self.brain.request(listen)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => tracing::warn!("musique non rétablie en quittant : {e}"),
-            Err(_) => tracing::warn!("le cerveau ne répond pas en quittant"),
+    }
+
+    fn on_link_event(&mut self, event: LinkEvent) {
+        match event {
+            // Cerveau revenu (peut-être mis à jour) : on redemande les annonces.
+            LinkEvent::Connected(_) => self.announcements_supported = true,
+            LinkEvent::Disconnected => {
+                // La réponse attendue ne viendra plus.
+                self.awaited = None;
+                if self.current.is_some() || self.election.is_some() {
+                    tracing::warn!("connexion au cerveau perdue pendant la phrase");
+                    self.abandon();
+                }
+            }
+            LinkEvent::Message(message) => self.on_message(message),
+        }
+    }
+
+    fn on_message(&mut self, message: BrainMessage) {
+        match message {
+            BrainMessage::Elected { utterance } => {
+                if self.election.is_some_and(|(u, _)| u == utterance) {
+                    tracing::debug!("oreille élue (phrase {utterance})");
+                    self.election = None;
+                }
+            }
+            BrainMessage::Stop { utterance } => {
+                if self.election.is_some_and(|(u, _)| u == utterance) {
+                    self.election = None;
+                }
+                if self.awaited.is_some_and(|a| a.utterance == utterance) {
+                    self.awaited = None;
+                }
+                if self.current.is_some_and(|c| c.utterance == utterance) {
+                    tracing::info!("capture arrêtée par le cerveau (autre oreille ou phrase)");
+                    self.current = None;
+                    self.batcher = AudioBatcher::new();
+                    self.listener.reset();
+                }
+            }
+            BrainMessage::Response {
+                utterance: Some(utterance),
+                response,
+            } => {
+                let Some(awaited) = self.awaited.filter(|a| a.utterance == utterance) else {
+                    tracing::debug!("réponse d'une ancienne phrase ignorée");
+                    return;
+                };
+                self.awaited = None;
+                if self.election.is_some_and(|(u, _)| u == utterance) {
+                    self.election = None;
+                }
+                self.on_heard(response, awaited.muted);
+                self.play_announcements();
+            }
+            BrainMessage::Response {
+                utterance: None,
+                response: ControlResponse::Error { message },
+            } => tracing::warn!("le cerveau signale une erreur : {message}"),
+            // L'état (mode) est déjà publié par le lien.
+            _ => {}
         }
     }
 
@@ -297,11 +384,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             CaptureEvent::Unavailable => {
                 self.downmixer = None;
                 self.unavailable = true;
-                if self.capturing {
-                    // La musique avait été baissée au réveil : on la rétablit.
-                    self.send_listen(&[]);
-                }
-                self.listener.reset();
+                // La musique avait été baissée au réveil : on la rétablit.
+                self.cancel_capture();
             }
             CaptureEvent::Samples(data) => {
                 let Some(downmixer) = self.downmixer.as_mut() else {
@@ -325,64 +409,159 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
 
     fn on_listen(&mut self, event: ListenEvent) {
         match event {
-            ListenEvent::Wake { score, .. } => {
-                tracing::info!("mot d'éveil détecté (score {score:.2})");
-                // « Jarvis » coupe la parole de Jarvis, et une question en attente.
-                if self.player.is_playing() {
-                    self.player.stop();
-                }
-                self.awaiting_reply = false;
-                // Écoute coupée : pas de bip (le mot d'éveil n'est là que pour réactiver).
-                if !self.muted {
-                    let rate = self.player.sample_rate();
-                    self.player.play(sounds::wake(rate), rate);
-                }
-                self.capturing = true;
-                let brain = self.brain.clone();
-                self.pending_wake = Some(tokio::spawn(async move {
-                    if let Err(e) = brain.request(ControlRequest::Wake).await {
-                        tracing::warn!("réveil non transmis : {e}");
-                    }
-                }));
+            ListenEvent::Wake { score, level_db } => self.on_wake(score, level_db),
+            ListenEvent::Chunk(samples) => self.stream(&samples),
+            ListenEvent::Ended { cut } => {
+                self.end(cut.map(|(a, b)| (a as u32, b as u32)), false);
             }
-            ListenEvent::Utterance(samples) => self.send_listen(&samples),
-            ListenEvent::NoSpeech => self.send_listen(&[]),
-            // Mode flux pas encore branché (tâche 7).
-            ListenEvent::Chunk(_) | ListenEvent::Ended { .. } => {}
+            ListenEvent::NoSpeech => self.end(None, true),
+            // Jamais produit en flux.
+            ListenEvent::Utterance(_) => {}
         }
     }
 
-    /// Envoie la phrase (vide = rien entendu) ; la réponse revient par `Internal::Heard`.
-    fn send_listen(&mut self, samples: &[f32]) {
-        self.capturing = false;
-        let follow_up = std::mem::take(&mut self.follow_up);
-        let audio = if samples.is_empty() {
-            String::new()
-        } else {
-            let pcm: Vec<i16> = samples.iter().map(|s| f32_to_i16(*s)).collect();
-            encode_pcm(&pcm)
+    fn on_wake(&mut self, score: f32, level_db: f32) {
+        tracing::info!("mot d'éveil détecté (score {score:.2})");
+        // « Jarvis » coupe la parole de Jarvis, et une question en attente.
+        if self.player.is_playing() {
+            self.player.stop();
+        }
+        self.awaiting_reply = false;
+        // Nouvelle phrase : la réponse de la précédente n'est plus jouée.
+        self.awaited = None;
+        self.utterance = self.utterance.wrapping_add(1);
+        let utterance = self.utterance;
+        let wake = EarMessage::Wake {
+            utterance,
+            score,
+            level_db,
+            muted: self.muted,
         };
-        let muted = self.muted;
-        let wake = self.pending_wake.take();
-        let brain = self.brain.clone();
-        let tx = self.internal_tx.clone();
-        let ear = Some(self.name.clone());
-        self.listens_in_flight += 1;
-        tokio::spawn(async move {
-            // Le réveil part toujours avant la phrase.
-            if let Some(wake) = wake {
-                let _ = wake.await;
-            }
-            let result = brain
-                .request(ControlRequest::Listen {
-                    audio,
-                    muted,
-                    follow_up,
-                    ear,
-                })
-                .await;
-            let _ = tx.send(Internal::Heard { result, muted });
+        if self.link.send(wake).is_err() {
+            // Pas de capture : rien n'est envoyé ni gardé.
+            tracing::info!("cerveau injoignable : le PC est endormi");
+            self.listener.reset();
+            self.say_asleep();
+            self.link.nudge();
+            return;
+        }
+        // Écoute coupée : pas de bip (le mot d'éveil n'est là que pour réactiver).
+        if !self.muted {
+            let rate = self.player.sample_rate();
+            self.player.play(sounds::wake(rate), rate);
+        }
+        self.batcher = AudioBatcher::new();
+        self.current = Some(Current {
+            utterance,
+            muted: self.muted,
         });
+        self.election = Some((utterance, Instant::now() + self.election_timeout));
+    }
+
+    /// Envoie le son de la capture en cours, par paquets de 100 ms.
+    fn stream(&mut self, samples: &[f32]) {
+        let Some(current) = self.current else {
+            return;
+        };
+        for packet in self.batcher.push(samples) {
+            if self.link.send_audio(current.utterance, &packet).is_err() {
+                tracing::warn!("connexion au cerveau perdue pendant la capture");
+                self.abandon();
+                return;
+            }
+        }
+    }
+
+    /// Fin de la capture : reste du son, puis `listen_end`.
+    fn end(&mut self, cut: Option<(u32, u32)>, no_speech: bool) {
+        let Some(current) = self.current.take() else {
+            return;
+        };
+        let rest = std::mem::take(&mut self.batcher).flush();
+        let mut sent = match rest {
+            Some(rest) if !no_speech => self.link.send_audio(current.utterance, &rest).is_ok(),
+            _ => true,
+        };
+        sent = sent
+            && self
+                .link
+                .send(EarMessage::ListenEnd {
+                    utterance: current.utterance,
+                    muted: current.muted,
+                    no_speech,
+                    cut,
+                })
+                .is_ok();
+        if !sent {
+            tracing::warn!("fin de phrase non transmise : connexion perdue");
+            self.abandon();
+            return;
+        }
+        self.awaited = Some(Awaited {
+            utterance: current.utterance,
+            muted: current.muted,
+            since: Instant::now(),
+        });
+    }
+
+    /// Lien perdu ou pas d'élection : phrase abandonnée, « le PC est endormi ».
+    fn abandon(&mut self) {
+        self.current = None;
+        self.election = None;
+        self.awaited = None;
+        self.batcher = AudioBatcher::new();
+        self.listener.reset();
+        self.say_asleep();
+        self.link.nudge();
+    }
+
+    /// Capture interrompue ici (coupure totale, micro perdu, départ) : fin de phrase
+    /// vide envoyée au mieux, pour que le cerveau rétablisse le son.
+    fn cancel_capture(&mut self) {
+        if let Some(current) = self.current.take() {
+            let _ = self.link.send(EarMessage::ListenEnd {
+                utterance: current.utterance,
+                muted: current.muted,
+                no_speech: true,
+                cut: None,
+            });
+            if self.election.is_some_and(|(u, _)| u == current.utterance) {
+                self.election = None;
+            }
+        }
+        self.batcher = AudioBatcher::new();
+        self.listener.reset();
+    }
+
+    fn on_election_timeout(&mut self) {
+        let Some((utterance, _)) = self.election.take() else {
+            return;
+        };
+        tracing::warn!(
+            "ni élue ni arrêtée en {:?} : le PC est tenu pour endormi",
+            self.election_timeout
+        );
+        if self.current.is_some_and(|c| c.utterance == utterance)
+            || self.awaited.is_some_and(|a| a.utterance == utterance)
+        {
+            self.abandon();
+        }
+    }
+
+    /// « Le PC est endormi » (voix de Jarvis enregistrée), sinon bip d'échec. Rien en
+    /// écoute coupée : le mot d'éveil n'y sert qu'à réactiver.
+    fn say_asleep(&mut self) {
+        if self.muted {
+            return;
+        }
+        // À la suite du son en cours (bip de réveil) : la lecture est en file.
+        match self.offline.as_ref().and_then(|offline| offline()) {
+            Some(audio) => self.play_voice(&audio),
+            None => {
+                let rate = self.player.sample_rate();
+                self.player.play(sounds::failure(rate), rate);
+            }
+        }
     }
 
     fn on_command(&mut self, command: TrayCommand, cap_tx: &mpsc::Sender<CaptureEvent>) {
@@ -393,12 +572,9 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                 self.capture.stop();
                 self.hard_muted = true;
                 self.downmixer = None;
-                if self.capturing {
-                    // La musique avait été baissée au réveil : on la rétablit.
-                    self.send_listen(&[]);
-                }
-                // Plus de capture en cours : pas de `Listen` orphelin à la réouverture.
-                self.listener.reset();
+                // La musique avait été baissée au réveil : on la rétablit ; plus de
+                // capture en cours, donc pas de fin orpheline à la réouverture.
+                self.cancel_capture();
             }
             TrayCommand::Reopen if self.hard_muted => {
                 self.hard_muted = false;
@@ -409,19 +585,23 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                 }
             }
             TrayCommand::SetMode(mode) => {
-                let brain = self.brain.clone();
-                let tx = self.internal_tx.clone();
-                self.status_in_flight = true;
-                tokio::spawn(async move {
-                    if let Err(e) = brain.request(ControlRequest::SetMode { mode }).await {
-                        tracing::warn!("changement de mode refusé : {e}");
-                    }
-                    let _ = tx.send(Internal::Status(
-                        brain.request(ControlRequest::Status).await,
-                    ));
-                });
+                // Le cerveau diffuse ensuite le nouvel état.
+                if let Err(e) = self.link.send(EarMessage::SetMode { mode }) {
+                    tracing::warn!("changement de mode impossible : {e}");
+                }
             }
             _ => {}
+        }
+    }
+
+    fn play_voice(&mut self, audio: &SpeechAudio) {
+        match decode_pcm(&audio.pcm) {
+            Ok(pcm) if audio.sample_rate > 0 => {
+                let samples = pcm.into_iter().map(i16_to_f32).collect();
+                self.player.play(samples, audio.sample_rate);
+            }
+            Ok(_) => tracing::warn!("voix de Jarvis sans fréquence : ignorée"),
+            Err(e) => tracing::warn!("voix de Jarvis illisible : {e}"),
         }
     }
 
@@ -429,7 +609,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
     /// déjà en cours de capture : la réponse précédente n'est alors pas jouée (le micro
     /// capterait la voix de Jarvis).
     fn play_reply(&mut self, sound: Option<Sound>, audio: Option<SpeechAudio>) -> bool {
-        if self.capturing {
+        if self.current.is_some() {
             tracing::debug!("réponse non jouée : nouvelle phrase en cours");
             return false;
         }
@@ -440,14 +620,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             None => {}
         }
         if let Some(audio) = audio {
-            match decode_pcm(&audio.pcm) {
-                Ok(pcm) if audio.sample_rate > 0 => {
-                    let samples = pcm.into_iter().map(i16_to_f32).collect();
-                    self.player.play(samples, audio.sample_rate);
-                }
-                Ok(_) => tracing::warn!("voix de Jarvis sans fréquence : ignorée"),
-                Err(e) => tracing::warn!("voix de Jarvis illisible : {e}"),
-            }
+            self.play_voice(&audio);
         }
         true
     }
@@ -465,7 +638,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             return;
         }
         self.awaiting_reply = false;
-        if self.capturing
+        if self.current.is_some()
             || self.muted
             || self.hard_muted
             || self.unavailable
@@ -474,19 +647,36 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             tracing::debug!("réponse non écoutée : écoute coupée, micro occupé ou fermé");
             return;
         }
+        self.utterance = self.utterance.wrapping_add(1);
+        let utterance = self.utterance;
+        if self
+            .link
+            .send(EarMessage::ListenStart { utterance })
+            .is_err()
+        {
+            tracing::info!("cerveau injoignable : réponse non écoutée");
+            self.say_asleep();
+            self.link.nudge();
+            return;
+        }
         tracing::info!("écoute de la réponse");
         self.listener.listen_now(REPLY_WAIT);
-        self.capturing = true;
-        self.follow_up = true;
+        self.batcher = AudioBatcher::new();
+        self.current = Some(Current {
+            utterance,
+            muted: false,
+        });
     }
 
-    /// Au repos : ni capture, ni lecture, ni réponse attendue, ni réveil en cours.
+    /// Au repos : ni capture, ni lecture, ni réponse attendue, ni élection en cours.
     fn idle(&self) -> bool {
-        !self.capturing
+        self.current.is_none()
             && !self.player.is_playing()
             && !self.awaiting_reply
-            && self.listens_in_flight == 0
-            && self.pending_wake.is_none()
+            && self.election.is_none()
+            && self
+                .awaited
+                .is_none_or(|a| a.since.elapsed() >= RESPONSE_TIMEOUT)
     }
 
     /// Joue les annonces en file si l'oreille est au repos, même écoute coupée
@@ -502,58 +692,32 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         }
     }
 
-    /// Relève les annonces (après un statut réussi), sous le même drapeau que le statut.
+    /// Relève les annonces par le socket de contrôle (le protocole réseau ne les porte
+    /// pas encore), seulement lien établi.
     fn poll_announcements(&mut self) {
-        if !self.announcements_supported || self.status_in_flight {
+        let Some(control) = self.control.clone() else {
+            return;
+        };
+        if !self.announcements_supported
+            || self.announcements_in_flight
+            || !matches!(self.brain, BrainLink::Connected { .. })
+        {
             return;
         }
-        self.status_in_flight = true;
-        let brain = self.brain.clone();
+        self.announcements_in_flight = true;
         let tx = self.internal_tx.clone();
         let ear = Some(self.name.clone());
         tokio::spawn(async move {
             let _ = tx.send(Internal::Announcements(
-                brain.request(ControlRequest::Announcements { ear }).await,
-            ));
-        });
-    }
-
-    fn poll_status(&mut self) {
-        if self.status_in_flight {
-            return;
-        }
-        self.status_in_flight = true;
-        let brain = self.brain.clone();
-        let tx = self.internal_tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(Internal::Status(
-                brain.request(ControlRequest::Status).await,
+                control.request(ControlRequest::Announcements { ear }).await,
             ));
         });
     }
 
     fn on_internal(&mut self, internal: Internal) {
         match internal {
-            Internal::Status(result) => {
-                self.status_in_flight = false;
-                let was_connected = matches!(self.link, BrainLink::Connected { .. });
-                self.link = match result {
-                    Ok(ControlResponse::Status {
-                        mode, local_model, ..
-                    }) => BrainLink::Connected { mode, local_model },
-                    Ok(_) => return,
-                    Err(_) => BrainLink::Unreachable,
-                };
-                if matches!(self.link, BrainLink::Connected { .. }) {
-                    // Cerveau revenu (peut-être mis à jour) : on redemande les annonces.
-                    if !was_connected {
-                        self.announcements_supported = true;
-                    }
-                    self.poll_announcements();
-                }
-            }
             Internal::Announcements(result) => {
-                self.status_in_flight = false;
+                self.announcements_in_flight = false;
                 match result {
                     Ok(ControlResponse::Announcements { items }) => {
                         self.announcements.extend(items);
@@ -570,23 +734,18 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     Err(e) => tracing::debug!("annonces non relevées : {e}"),
                 }
             }
-            Internal::Heard { result, muted } => {
-                self.listens_in_flight = self.listens_in_flight.saturating_sub(1);
-                self.on_heard(result, muted);
-                self.play_announcements();
-            }
         }
     }
 
-    fn on_heard(&mut self, result: Result<ControlResponse, ClientError>, muted: bool) {
-        match result {
-            Ok(ControlResponse::Heard {
+    fn on_heard(&mut self, response: ControlResponse, muted: bool) {
+        match response {
+            ControlResponse::Heard {
                 text,
                 speech,
                 ear_action,
                 audio,
                 sound,
-            }) => {
+            } => {
                 if !speech.is_empty() {
                     tracing::debug!("Jarvis : {speech}");
                 }
@@ -610,12 +769,10 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     Some(EarAction::AwaitReply) | None => {}
                 }
             }
-            Ok(ControlResponse::Error { message }) => {
+            ControlResponse::Error { message } => {
                 tracing::warn!("le cerveau signale une erreur : {message}");
             }
-            Ok(_) => {}
-            Err(ClientError::BrainUnreachable) => self.link = BrainLink::Unreachable,
-            Err(e) => tracing::warn!("phrase non transmise : {e}"),
+            _ => {}
         }
     }
 }
@@ -624,9 +781,13 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
 mod tests {
     use super::*;
     use crate::capture::Samples;
-    use jarvis_protocol::Mode;
+    use jarvis_ear_core::net::LinkDown;
+    use jarvis_protocol::ear::{RejectReason, StatusInfo};
+    use jarvis_protocol::{Mode, encode_pcm};
+    use std::collections::HashSet;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use tokio::task::JoinHandle;
 
     /// Détecteur de mot d'éveil qui se déclenche toutes les `every` trames de 160 échantillons.
     struct FakeWake {
@@ -715,6 +876,20 @@ mod tests {
         }
     }
 
+    fn success_beep() -> Played {
+        Played::Sound {
+            len: sounds::success(OUT_RATE).len(),
+            rate: OUT_RATE,
+        }
+    }
+
+    fn failure_beep() -> Played {
+        Played::Sound {
+            len: sounds::failure(OUT_RATE).len(),
+            rate: OUT_RATE,
+        }
+    }
+
     #[derive(Default)]
     struct CaptureShared {
         tx: Mutex<Option<mpsc::Sender<CaptureEvent>>>,
@@ -740,8 +915,116 @@ mod tests {
         }
     }
 
+    /// Ce que le faux lien a accepté.
+    #[derive(Debug, Clone, PartialEq)]
+    enum Sent {
+        Msg(EarMessage),
+        Audio { utterance: u32, len: usize },
+    }
+
+    /// Réponse du faux cerveau à une phrase finie ; `follow_up` : réponse à une question.
+    type Answer = dyn Fn(bool) -> Option<ControlResponse> + Send + Sync;
+
+    /// Faux lien : hors connexion, tout échoue (rien n'est gardé, mais chaque essai est
+    /// compté) ; connecté, le faux cerveau élit l'oreille et répond.
+    struct FakeLink {
+        connected: AtomicBool,
+        /// Le faux cerveau répond `elected` au réveil.
+        elect: AtomicBool,
+        /// Le faux cerveau répond `stop` au réveil.
+        stop: AtomicBool,
+        sent: Mutex<Vec<Sent>>,
+        attempts: AtomicUsize,
+        nudges: AtomicUsize,
+        closed: AtomicBool,
+        follow_ups: Mutex<HashSet<u32>>,
+        state: watch::Sender<LinkState>,
+        events: mpsc::Sender<LinkEvent>,
+        answer: Box<Answer>,
+    }
+
+    impl FakeLink {
+        fn reply(&self, message: BrainMessage) {
+            self.events
+                .try_send(LinkEvent::Message(message))
+                .expect("événement transmis");
+        }
+
+        fn disconnect(&self) {
+            self.connected.store(false, Ordering::SeqCst);
+            self.state.send_replace(LinkState::Connecting);
+            self.events.try_send(LinkEvent::Disconnected).unwrap();
+        }
+
+        fn reconnect(&self) {
+            self.connected.store(true, Ordering::SeqCst);
+            self.state
+                .send_replace(LinkState::Connected(status(Mode::Local)));
+            self.events
+                .try_send(LinkEvent::Connected(status(Mode::Local)))
+                .unwrap();
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Link for FakeLink {
+        fn send(&self, message: EarMessage) -> Result<(), LinkDown> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if !self.connected.load(Ordering::SeqCst) {
+                return Err(LinkDown);
+            }
+            self.sent.lock().unwrap().push(Sent::Msg(message.clone()));
+            match message {
+                EarMessage::Wake { utterance, .. } => {
+                    if self.stop.load(Ordering::SeqCst) {
+                        self.reply(BrainMessage::Stop { utterance });
+                    } else if self.elect.load(Ordering::SeqCst) {
+                        self.reply(BrainMessage::Elected { utterance });
+                    }
+                }
+                EarMessage::ListenStart { utterance } => {
+                    self.follow_ups.lock().unwrap().insert(utterance);
+                }
+                EarMessage::ListenEnd { utterance, .. } => {
+                    let follow_up = self.follow_ups.lock().unwrap().contains(&utterance);
+                    if let Some(response) = (self.answer)(follow_up) {
+                        self.reply(BrainMessage::Response {
+                            utterance: Some(utterance),
+                            response,
+                        });
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+        fn send_audio(&self, utterance: u32, samples: &[i16]) -> Result<(), LinkDown> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if !self.connected.load(Ordering::SeqCst) {
+                return Err(LinkDown);
+            }
+            if !samples.is_empty() {
+                self.sent.lock().unwrap().push(Sent::Audio {
+                    utterance,
+                    len: samples.len(),
+                });
+            }
+            Ok(())
+        }
+        fn nudge(&self) {
+            self.nudges.fetch_add(1, Ordering::SeqCst);
+        }
+        fn state(&self) -> watch::Receiver<LinkState> {
+            self.state.subscribe()
+        }
+        async fn close(&self) {
+            self.closed.store(true, Ordering::SeqCst);
+        }
+    }
+
     type Responder = dyn Fn(&ControlRequest) -> Result<ControlResponse, ClientError> + Send + Sync;
 
+    /// Faux socket de contrôle (annonces).
     struct FakeBrain {
         requests: Mutex<Vec<ControlRequest>>,
         responder: Box<Responder>,
@@ -755,150 +1038,148 @@ mod tests {
         }
     }
 
+    fn status(mode: Mode) -> StatusInfo {
+        StatusInfo {
+            mode,
+            version: "test".into(),
+            local_model: "llama3.2:3b".into(),
+            ears: vec![],
+        }
+    }
+
+    /// Réglages du banc d'essai.
+    struct Setup {
+        answer: Box<Answer>,
+        capture_fails: bool,
+        speech_frames: usize,
+        wakes: usize,
+        mute_file: Option<PathBuf>,
+        wake_score: f32,
+        announce_period: Duration,
+        name: Option<&'static str>,
+        control: Option<Arc<FakeBrain>>,
+        offline: Option<SpeechAudio>,
+        connected: bool,
+        elect: bool,
+    }
+
+    impl Default for Setup {
+        fn default() -> Self {
+            Setup {
+                answer: Box::new(|_| Some(silent())),
+                capture_fails: false,
+                speech_frames: 0,
+                wakes: usize::MAX,
+                mute_file: None,
+                wake_score: 0.9,
+                announce_period: ANNOUNCE_PERIOD,
+                name: None,
+                control: None,
+                offline: None,
+                connected: true,
+                elect: true,
+            }
+        }
+    }
+
     struct Harness {
         capture: Arc<CaptureShared>,
-        brain: Arc<FakeBrain>,
+        link: Arc<FakeLink>,
+        control: Option<Arc<FakeBrain>>,
         player: Arc<PlayerShared>,
         commands: mpsc::UnboundedSender<TrayCommand>,
         tray: watch::Receiver<TrayState>,
-        /// Injection directe d'événements internes (réponse tardive du cerveau).
-        internal: mpsc::UnboundedSender<Internal>,
         task: JoinHandle<anyhow::Result<()>>,
     }
 
-    fn status_ok() -> Result<ControlResponse, ClientError> {
-        Ok(ControlResponse::Status {
-            mode: Mode::Local,
-            version: "test".into(),
-            local_model: "llama3.2:3b".into(),
-        })
-    }
+    impl Setup {
+        fn answer(
+            mut self,
+            answer: impl Fn(bool) -> Option<ControlResponse> + Send + Sync + 'static,
+        ) -> Self {
+            self.answer = Box::new(answer);
+            self
+        }
 
-    fn harness_speech(speech_frames: usize) -> Harness {
-        build_harness(|_| status_ok(), false, speech_frames, usize::MAX, None)
-    }
-
-    /// Un seul réveil possible : une capture « orpheline » serait visible.
-    fn harness_one_wake() -> Harness {
-        build_harness(|_| status_ok(), false, 0, 1, None)
-    }
-
-    fn harness(
-        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
-        + Send
-        + Sync
-        + 'static,
-        capture_fails: bool,
-    ) -> Harness {
-        build_harness(responder, capture_fails, 0, usize::MAX, None)
-    }
-
-    fn build_harness(
-        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
-        + Send
-        + Sync
-        + 'static,
-        capture_fails: bool,
-        speech_frames: usize,
-        wakes: usize,
-        mute_file: Option<PathBuf>,
-    ) -> Harness {
-        build_harness_scored(
-            responder,
-            capture_fails,
-            speech_frames,
-            wakes,
-            mute_file,
-            0.9,
-        )
-    }
-
-    fn build_harness_scored(
-        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
-        + Send
-        + Sync
-        + 'static,
-        capture_fails: bool,
-        speech_frames: usize,
-        wakes: usize,
-        mute_file: Option<PathBuf>,
-        wake_score: f32,
-    ) -> Harness {
-        build_harness_full(
-            responder,
-            capture_fails,
-            speech_frames,
-            wakes,
-            mute_file,
-            wake_score,
-            STATUS_PERIOD,
-            None,
-        )
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn build_harness_full(
-        responder: impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError>
-        + Send
-        + Sync
-        + 'static,
-        capture_fails: bool,
-        speech_frames: usize,
-        wakes: usize,
-        mute_file: Option<PathBuf>,
-        wake_score: f32,
-        status_period: Duration,
-        name: Option<&str>,
-    ) -> Harness {
-        let shared = Arc::new(CaptureShared::default());
-        let brain = Arc::new(FakeBrain {
-            requests: Mutex::new(Vec::new()),
-            responder: Box::new(responder),
-        });
-        let (commands, commands_rx) = mpsc::unbounded_channel();
-        let (tray_tx, tray) = watch::channel(TrayState {
-            mic: MicState::Open,
-            capturing: false,
-            brain: BrainLink::Unreachable,
-            last_heard: None,
-        });
-        let listener = Listener::new(
-            FakeWake {
-                every: 10,
-                frame: 0,
-                left: wakes,
-                score: wake_score,
-            },
-            FakeVad {
-                speech_frames,
-                frame: 0,
-            },
-        );
-        let capture = FakeCapture {
-            shared: shared.clone(),
-            fail: capture_fails,
-        };
-        let player = Arc::new(PlayerShared {
-            calls: Mutex::new(Vec::new()),
-            playing: watch::channel(false).0,
-        });
-        let mut app = App::new(listener, capture, brain.clone(), commands_rx, tray_tx)
+        fn start(self) -> Harness {
+            let shared = Arc::new(CaptureShared::default());
+            let (events_tx, events) = mpsc::channel(1_024);
+            let initial = if self.connected {
+                LinkState::Connected(status(Mode::Local))
+            } else {
+                LinkState::Unreachable
+            };
+            let link = Arc::new(FakeLink {
+                connected: AtomicBool::new(self.connected),
+                elect: AtomicBool::new(self.elect),
+                stop: AtomicBool::new(false),
+                sent: Mutex::new(Vec::new()),
+                attempts: AtomicUsize::new(0),
+                nudges: AtomicUsize::new(0),
+                closed: AtomicBool::new(false),
+                follow_ups: Mutex::new(HashSet::new()),
+                state: watch::channel(initial).0,
+                events: events_tx,
+                answer: self.answer,
+            });
+            let (commands, commands_rx) = mpsc::unbounded_channel();
+            let (tray_tx, tray) = watch::channel(TrayState {
+                mic: MicState::Open,
+                capturing: false,
+                brain: BrainLink::Connecting,
+                last_heard: None,
+            });
+            let listener = Listener::new(
+                FakeWake {
+                    every: 10,
+                    frame: 0,
+                    left: self.wakes,
+                    score: self.wake_score,
+                },
+                FakeVad {
+                    speech_frames: self.speech_frames,
+                    frame: 0,
+                },
+            );
+            let capture = FakeCapture {
+                shared: shared.clone(),
+                fail: self.capture_fails,
+            };
+            let player = Arc::new(PlayerShared {
+                calls: Mutex::new(Vec::new()),
+                playing: watch::channel(false).0,
+            });
+            let mut app = App::new(
+                listener,
+                capture,
+                link.clone(),
+                events,
+                commands_rx,
+                tray_tx,
+            )
             .with_player(Box::new(FakePlayer(player.clone())));
-        if let Some(path) = mute_file {
-            app = app.with_mute_file(path);
-        }
-        if let Some(name) = name {
-            app = app.with_name(name.to_string());
-        }
-        app.status_period = status_period;
-        Harness {
-            capture: shared,
-            brain,
-            player,
-            commands,
-            tray,
-            internal: app.internal_tx.clone(),
-            task: tokio::spawn(app.run()),
+            if let Some(path) = self.mute_file {
+                app = app.with_mute_file(path);
+            }
+            if let Some(name) = self.name {
+                app = app.with_name(name.to_string());
+            }
+            if let Some(control) = &self.control {
+                app = app.with_control(control.clone());
+            }
+            if let Some(audio) = self.offline {
+                app = app.with_offline_phrase(Arc::new(move || Some(audio.clone())));
+            }
+            app.announce_period = self.announce_period;
+            Harness {
+                capture: shared,
+                link,
+                control: self.control,
+                player,
+                commands,
+                tray,
+                task: tokio::spawn(app.run()),
+            }
         }
     }
 
@@ -911,6 +1192,11 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             panic!("délai dépassé : {what}");
+        }
+
+        async fn started(&self) {
+            self.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+                .await;
         }
 
         async fn feed(&self, samples: Vec<f32>) {
@@ -934,39 +1220,92 @@ mod tests {
             }
         }
 
-        fn requests(&self) -> Vec<ControlRequest> {
-            self.brain.requests.lock().unwrap().clone()
+        fn sent(&self) -> Vec<Sent> {
+            self.link.sent.lock().unwrap().clone()
+        }
+
+        fn messages(&self) -> Vec<EarMessage> {
+            self.sent()
+                .into_iter()
+                .filter_map(|s| match s {
+                    Sent::Msg(m) => Some(m),
+                    Sent::Audio { .. } => None,
+                })
+                .collect()
+        }
+
+        fn audio_of(&self, utterance: u32) -> usize {
+            self.sent()
+                .iter()
+                .map(|s| match s {
+                    Sent::Audio { utterance: u, len } if *u == utterance => *len,
+                    _ => 0,
+                })
+                .sum()
         }
 
         fn played(&self) -> Vec<Played> {
             self.player.calls.lock().unwrap().clone()
         }
 
-        /// Les `Listen` envoyés : (audio, follow_up).
-        fn follow_ups(&self) -> Vec<(String, bool)> {
-            self.requests()
+        fn nudges(&self) -> usize {
+            self.link.nudges.load(Ordering::SeqCst)
+        }
+
+        fn wakes(&self) -> usize {
+            self.messages()
+                .iter()
+                .filter(|m| matches!(m, EarMessage::Wake { .. }))
+                .count()
+        }
+
+        /// `muted` de chaque fin de phrase.
+        fn listens(&self) -> Vec<bool> {
+            self.messages()
                 .into_iter()
-                .filter_map(|r| match r {
-                    ControlRequest::Listen {
-                        audio, follow_up, ..
-                    } => Some((audio, follow_up)),
+                .filter_map(|m| match m {
+                    EarMessage::ListenEnd { muted, .. } => Some(muted),
                     _ => None,
                 })
                 .collect()
         }
 
-        fn wakes(&self) -> usize {
-            self.requests()
-                .iter()
-                .filter(|r| **r == ControlRequest::Wake)
-                .count()
+        /// Chaque fin de phrase : (parole envoyée, réponse à une question).
+        fn follow_ups(&self) -> Vec<(bool, bool)> {
+            let starts: Vec<u32> = self
+                .messages()
+                .into_iter()
+                .filter_map(|m| match m {
+                    EarMessage::ListenStart { utterance } => Some(utterance),
+                    _ => None,
+                })
+                .collect();
+            self.messages()
+                .into_iter()
+                .filter_map(|m| match m {
+                    EarMessage::ListenEnd {
+                        utterance,
+                        no_speech,
+                        ..
+                    } => Some((
+                        !no_speech && self.audio_of(utterance) > 0,
+                        starts.contains(&utterance),
+                    )),
+                    _ => None,
+                })
+                .collect()
         }
 
-        fn listens(&self) -> Vec<bool> {
-            self.requests()
-                .into_iter()
+        fn announcement_requests(&self) -> Vec<Option<String>> {
+            self.control
+                .as_ref()
+                .expect("socket de contrôle")
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
                 .filter_map(|r| match r {
-                    ControlRequest::Listen { muted, .. } => Some(muted),
+                    ControlRequest::Announcements { ear } => Some(ear.clone()),
                     _ => None,
                 })
                 .collect()
@@ -978,32 +1317,131 @@ mod tests {
         vec![0.0; 65_900]
     }
 
-    #[tokio::test]
-    async fn cerveau_absent_icone_injoignable() {
-        let h = harness(|_| Err(ClientError::BrainUnreachable), false);
-        h.wait_for("statut interrogé", |h| {
-            h.requests().contains(&ControlRequest::Status)
+    /// Réveil, « suivant » (parole pendant les 20 premières trames du VAD), puis silence.
+    fn wake_then_speech() -> Vec<f32> {
+        vec![0.1; 1_600 + 30_000]
+    }
+
+    /// Rien entendu : réponse vide, sans son.
+    fn silent() -> ControlResponse {
+        ControlResponse::Heard {
+            text: String::new(),
+            speech: String::new(),
+            ear_action: None,
+            audio: None,
+            sound: None,
+        }
+    }
+
+    /// Voix de Jarvis : 2 205 échantillons à 22,05 kHz (0,1 s).
+    fn voice() -> Option<SpeechAudio> {
+        Some(SpeechAudio {
+            pcm: encode_pcm(&[1_000; 2_205]),
+            sample_rate: 22_050,
         })
-        .await;
+    }
+
+    fn voice_played() -> Played {
+        Played::Sound {
+            len: 2_205,
+            rate: 22_050,
+        }
+    }
+
+    /// « Le PC est endormi » : 1 600 échantillons à 16 kHz.
+    fn asleep() -> SpeechAudio {
+        SpeechAudio {
+            pcm: encode_pcm(&[500; 1_600]),
+            sample_rate: 16_000,
+        }
+    }
+
+    fn asleep_played() -> Played {
+        Played::Sound {
+            len: 1_600,
+            rate: 16_000,
+        }
+    }
+
+    fn heard(text: &str, ear_action: Option<EarAction>, sound: Option<Sound>) -> ControlResponse {
+        ControlResponse::Heard {
+            text: text.into(),
+            speech: "Bien.".into(),
+            ear_action,
+            audio: voice(),
+            sound,
+        }
+    }
+
+    #[tokio::test]
+    async fn icone_pc_injoignable() {
+        let h = Setup {
+            connected: false,
+            ..Setup::default()
+        }
+        .start();
         h.wait_for("icône injoignable", |h| {
             h.tray.borrow().brain == BrainLink::Unreachable
         })
         .await;
         assert_eq!(h.tray.borrow().mic, MicState::Open);
+        h.link
+            .state
+            .send_replace(LinkState::Rejected(RejectReason::BadToken));
+        h.wait_for("appairage refusé", |h| {
+            h.tray.borrow().brain == BrainLink::Refused
+        })
+        .await;
+        h.link.state.send_replace(LinkState::Connecting);
+        h.wait_for("connexion", |h| {
+            h.tray.borrow().brain == BrainLink::Connecting
+        })
+        .await;
     }
 
     #[tokio::test]
-    async fn cerveau_joignable_affiche_le_mode() {
-        let h = harness(|_| status_ok(), false);
+    async fn etat_pousse_par_le_cerveau_affiche_le_mode() {
+        let h = Setup::default().start();
         h.wait_for("lien établi", |h| {
-            matches!(h.tray.borrow().brain, BrainLink::Connected { .. })
+            h.tray.borrow().brain
+                == BrainLink::Connected {
+                    mode: Mode::Local,
+                    local_model: "llama3.2:3b".into(),
+                }
+        })
+        .await;
+        h.link
+            .state
+            .send_replace(LinkState::Connected(status(Mode::Online)));
+        h.wait_for("mode en ligne", |h| {
+            matches!(
+                h.tray.borrow().brain,
+                BrainLink::Connected {
+                    mode: Mode::Online,
+                    ..
+                }
+            )
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn mode_change_par_le_lien() {
+        let h = Setup::default().start();
+        h.commands.send(TrayCommand::SetMode(Mode::Online)).unwrap();
+        h.wait_for("mode demandé", |h| {
+            h.messages() == vec![EarMessage::SetMode { mode: Mode::Online }]
         })
         .await;
     }
 
     #[tokio::test]
     async fn capture_absente_etat_indisponible() {
-        let h = harness(|_| status_ok(), true);
+        let h = Setup {
+            capture_fails: true,
+            ..Setup::default()
+        }
+        .start();
         h.wait_for("micro indisponible", |h| {
             h.tray.borrow().mic == MicState::Unavailable
         })
@@ -1012,9 +1450,8 @@ mod tests {
 
     #[tokio::test]
     async fn perte_du_micro_puis_retour() {
-        let h = harness(|_| status_ok(), false);
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup::default().start();
+        h.started().await;
         let tx = h.capture.tx.lock().unwrap().clone().unwrap();
         tx.send(CaptureEvent::Unavailable).await.unwrap();
         h.wait_for("indisponible", |h| {
@@ -1031,62 +1468,265 @@ mod tests {
             .await;
     }
 
-    /// Relève périodique (statut, annonces).
-    fn is_poll(r: &ControlRequest) -> bool {
-        matches!(
-            r,
-            ControlRequest::Status | ControlRequest::Announcements { .. }
-        )
+    #[tokio::test]
+    async fn reveil_envoie_wake_puis_le_flux() {
+        let h = Setup {
+            speech_frames: 20,
+            wakes: 1,
+            ..Setup::default()
+        }
+        .answer(|_| Some(heard("suivant", None, None)))
+        .start();
+        h.started().await;
+        h.feed(wake_then_speech()).await;
+        h.wait_for("phrase entendue", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("suivant")
+        })
+        .await;
+        let sent = h.sent();
+        assert!(
+            matches!(
+                &sent[0],
+                Sent::Msg(EarMessage::Wake { utterance: 1, score, muted: false, .. })
+                    if (*score - 0.9).abs() < 1e-6
+            ),
+            "{:?}",
+            sent[0]
+        );
+        // Le son suit le réveil, par paquets d'au plus 100 ms, avant la fin de phrase.
+        let audio: Vec<usize> = sent[1..sent.len() - 1]
+            .iter()
+            .map(|s| match s {
+                Sent::Audio { utterance: 1, len } => *len,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(audio.len() > 5, "{audio:?}");
+        assert!(audio.iter().all(|len| *len <= 1_600));
+        assert!(matches!(
+            sent.last().unwrap(),
+            Sent::Msg(EarMessage::ListenEnd {
+                utterance: 1,
+                muted: false,
+                no_speech: false,
+                ..
+            })
+        ));
+        assert!(!h.tray.borrow().capturing);
     }
 
     #[tokio::test]
-    async fn reveil_envoie_wake_puis_listen() {
-        let h = harness(
-            |r| match r {
-                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
-                    text: "quelle heure est-il".into(),
-                    speech: "Il est midi.".into(),
-                    ear_action: None,
-                    audio: None,
-                    sound: None,
-                }),
-                _ => status_ok(),
-            },
-            false,
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+    async fn stop_abandonne_la_capture_sans_reponse() {
+        let h = Setup {
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .start();
+        h.link.stop.store(true, Ordering::SeqCst);
+        h.started().await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
+        h.wait_for("capture arrêtée", |h| !h.tray.borrow().capturing)
             .await;
+        let before = h.sent().len();
+        // La suite du son n'est plus envoyée, et aucune fin de phrase.
+        h.feed(vec![0.0; 70_000]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(h.sent().len(), before, "{:?}", h.sent());
+        assert!(h.listens().is_empty());
+        assert_eq!(h.played(), vec![wake_beep()], "rien d'autre n'est joué");
+        // Ni « PC endormi » à l'échéance de l'élection.
+        tokio::time::sleep(ELECTION_TIMEOUT).await;
+        assert_eq!(h.played(), vec![wake_beep()]);
+    }
+
+    #[tokio::test]
+    async fn reponse_d_une_ancienne_phrase_ignoree() {
+        let h = Setup {
+            wakes: 2,
+            ..Setup::default()
+        }
+        // Le cerveau tarde : pas de réponse tout de suite.
+        .answer(|_| None)
+        .start();
+        h.started().await;
         h.feed(wake_then_silence()).await;
-        h.wait_for("phrase entendue", |h| {
-            h.tray.borrow().last_heard.as_deref() == Some("quelle heure est-il")
+        h.wait_for("première phrase", |h| h.listens().len() == 1)
+            .await;
+        // Seconde phrase en cours.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("second réveil", |h| h.wakes() == 2).await;
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("ancienne", None, Some(Sound::Success)),
+        });
+        // Fin de la seconde phrase, puis une réponse sans numéro : ignorée aussi.
+        h.feed(vec![0.0; 70_000]).await;
+        h.wait_for("seconde fin", |h| h.listens().len() == 2).await;
+        h.link.reply(BrainMessage::Response {
+            utterance: None,
+            response: heard("sans numéro", None, Some(Sound::Success)),
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Le second réveil coupe le premier bip (le faux lecteur ne finit jamais seul).
+        assert_eq!(h.played(), vec![wake_beep(), Played::Stop, wake_beep()]);
+        assert_eq!(h.tray.borrow().last_heard, None);
+        // La réponse de la dernière phrase est jouée.
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(2),
+            response: heard("dernière", None, None),
+        });
+        h.wait_for("dernière jouée", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("dernière")
         })
         .await;
-        let sent: Vec<ControlRequest> = h.requests().into_iter().filter(|r| !is_poll(r)).collect();
-        assert_eq!(sent.len(), 2, "{sent:?}");
-        assert_eq!(sent[0], ControlRequest::Wake);
-        assert!(matches!(
-            &sent[1],
-            ControlRequest::Listen { muted: false, audio, .. } if audio.is_empty()
-        ));
+    }
+
+    #[tokio::test]
+    async fn cerveau_injoignable_dit_pc_endormi() {
+        let h = Setup {
+            connected: false,
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("phrase hors ligne", |h| h.played() == vec![asleep_played()])
+            .await;
+        assert!(h.nudges() >= 1);
+        assert!(!h.tray.borrow().capturing, "pas de capture");
+    }
+
+    #[tokio::test]
+    async fn sans_phrase_enregistree_bip_d_echec() {
+        let h = Setup {
+            connected: false,
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("bip d'échec", |h| h.played() == vec![failure_beep()])
+            .await;
+        assert!(h.nudges() >= 1);
+    }
+
+    #[tokio::test]
+    async fn rien_n_est_envoye_ni_garde_hors_connexion() {
+        let h = Setup {
+            connected: false,
+            wakes: 1,
+            speech_frames: 20,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
+        // « Jarvis, suivant » pendant que le PC dort.
+        h.feed(wake_then_speech()).await;
+        h.wait_for("bip d'échec", |h| h.played() == vec![failure_beep()])
+            .await;
+        // Un seul essai : le réveil. Aucun son tenté, rien de capté.
+        assert_eq!(h.link.attempts.load(Ordering::SeqCst), 1);
+        assert!(!h.tray.borrow().capturing);
+        // Le PC revient : rien n'est rattrapé.
+        h.link.reconnect();
+        h.wait_for("lien établi", |h| {
+            matches!(h.tray.borrow().brain, BrainLink::Connected { .. })
+        })
+        .await;
+        h.feed(vec![0.1; 30_000]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(h.sent().is_empty(), "{:?}", h.sent());
+        assert_eq!(h.link.attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn pas_d_election_en_deux_secondes_pc_endormi() {
+        assert_eq!(ELECTION_TIMEOUT, Duration::from_secs(2));
+        // Connexion apparemment ouverte, mais le cerveau ne répond plus.
+        let h = Setup {
+            elect: false,
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
+        let start = std::time::Instant::now();
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
+        assert!(h.tray.borrow().capturing);
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), asleep_played()]
+        })
+        .await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(1_900), "{elapsed:?}");
+        assert!(elapsed < Duration::from_millis(2_500), "{elapsed:?}");
+        assert!(!h.tray.borrow().capturing, "capture abandonnée");
+        assert!(h.nudges() >= 1);
+        // Plus rien n'est envoyé pour cette phrase.
+        let before = h.sent().len();
+        h.feed(vec![0.0; 16_000]).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.sent().len(), before);
+    }
+
+    #[tokio::test]
+    async fn election_recue_la_capture_continue() {
+        let h = Setup {
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
+        tokio::time::sleep(ELECTION_TIMEOUT + Duration::from_millis(200)).await;
+        assert!(h.tray.borrow().capturing);
+        assert_eq!(h.played(), vec![wake_beep()]);
+    }
+
+    #[tokio::test]
+    async fn coupure_pendant_la_capture() {
+        let h = Setup {
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("capture en cours", |h| h.tray.borrow().capturing)
+            .await;
+        h.link.disconnect();
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), asleep_played()]
+        })
+        .await;
+        assert!(!h.tray.borrow().capturing);
+        assert!(h.nudges() >= 1);
+        // La suite n'est ni tentée ni gardée, même après la reconnexion.
+        let attempts = h.link.attempts.load(Ordering::SeqCst);
+        h.link.reconnect();
+        h.feed(vec![0.0; 70_000]).await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(h.link.attempts.load(Ordering::SeqCst), attempts);
+        assert!(h.listens().is_empty());
+        assert_eq!(h.played().len(), 2, "phrase dite une seule fois");
     }
 
     #[tokio::test]
     async fn action_mute_appliquee() {
-        let h = harness(
-            |r| match r {
-                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
-                    text: "coupe l'écoute".into(),
-                    speech: "D'accord.".into(),
-                    ear_action: Some(EarAction::Mute),
-                    audio: None,
-                    sound: None,
-                }),
-                _ => status_ok(),
-            },
-            false,
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup::default()
+            .answer(|_| Some(heard("coupe l'écoute", Some(EarAction::Mute), None)))
+            .start();
+        h.started().await;
         h.feed(wake_then_silence()).await;
         h.wait_for("écoute coupée", |h| {
             h.tray.borrow().mic == MicState::Muted
@@ -1097,6 +1737,14 @@ mod tests {
         h.wait_for("deuxième phrase", |h| h.listens().len() == 2)
             .await;
         assert_eq!(h.listens(), vec![false, true]);
+        assert!(h.messages().iter().any(|m| matches!(
+            m,
+            EarMessage::Wake {
+                utterance: 2,
+                muted: true,
+                ..
+            }
+        )));
         assert_eq!(
             h.tray.borrow().last_heard.as_deref(),
             Some("coupe l'écoute")
@@ -1105,24 +1753,21 @@ mod tests {
 
     #[tokio::test]
     async fn pas_de_derniere_phrase_pendant_l_ecoute_coupee() {
-        let h = harness(
-            |r| match r {
-                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
+        let h = Setup::default()
+            .answer(|_| {
+                Some(ControlResponse::Heard {
                     text: "secret".into(),
                     speech: String::new(),
                     ear_action: None,
                     audio: None,
                     sound: None,
-                }),
-                _ => status_ok(),
-            },
-            false,
-        );
+                })
+            })
+            .start();
         h.commands.send(TrayCommand::Mute).unwrap();
         h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        h.started().await;
         h.feed(wake_then_silence()).await;
         h.wait_for("phrase envoyée", |h| h.listens() == vec![true])
             .await;
@@ -1132,7 +1777,7 @@ mod tests {
 
     #[tokio::test]
     async fn coupure_totale_arrete_la_capture() {
-        let h = harness(|_| status_ok(), false);
+        let h = Setup::default().start();
         h.wait_for("capture démarrée", |h| {
             h.capture.starts.load(Ordering::SeqCst) == 1
         })
@@ -1156,25 +1801,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn coupure_totale_pendant_la_capture_puis_reouverture_sans_listen_orphelin() {
-        let h = harness_one_wake();
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+    async fn coupure_totale_pendant_la_capture_puis_reouverture_sans_fin_orpheline() {
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         // Réveil seul : la capture est en cours (aucune parole, pas encore d'abandon).
         h.feed(vec![0.0; 3_200]).await;
-        h.wait_for("réveil", |h| h.requests().contains(&ControlRequest::Wake))
-            .await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
         h.commands.send(TrayCommand::HardMute).unwrap();
-        // Un `Listen` vide rétablit la musique.
-        h.wait_for("listen vide", |h| h.listens() == vec![false])
-            .await;
+        // Une fin de phrase vide rétablit la musique.
+        h.wait_for("fin vide", |h| h.listens() == vec![false]).await;
+        assert!(matches!(
+            h.messages().last(),
+            Some(EarMessage::ListenEnd {
+                no_speech: true,
+                ..
+            })
+        ));
         h.commands.send(TrayCommand::Reopen).unwrap();
         h.wait_for("flux rouvert", |h| {
             h.capture.starts.load(Ordering::SeqCst) == 2
         })
         .await;
-        // Plus de 4 s de silence : sans réinitialisation, l'ancienne capture enverrait un
-        // second `Listen` (abandon faute de parole).
+        // Plus de 4 s de silence : sans réinitialisation, l'ancienne capture enverrait
+        // une seconde fin (abandon faute de parole).
         h.feed(vec![0.0; 70_000]).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(h.listens(), vec![false]);
@@ -1182,21 +1835,22 @@ mod tests {
 
     #[tokio::test]
     async fn perte_du_micro_pendant_la_capture_retablit_la_musique() {
-        let h = harness_one_wake();
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         h.feed(vec![0.0; 3_200]).await;
-        h.wait_for("réveil", |h| h.requests().contains(&ControlRequest::Wake))
-            .await;
+        h.wait_for("réveil", |h| h.wakes() == 1).await;
         let tx = h.capture.tx.lock().unwrap().clone().unwrap();
         tx.send(CaptureEvent::Unavailable).await.unwrap();
-        h.wait_for("listen vide", |h| h.listens() == vec![false])
-            .await;
+        h.wait_for("fin vide", |h| h.listens() == vec![false]).await;
         h.wait_for("indisponible", |h| {
             h.tray.borrow().mic == MicState::Unavailable
         })
         .await;
-        // Micro de retour : pas de second `Listen` issu de l'ancienne capture.
+        // Micro de retour : pas de seconde fin issue de l'ancienne capture.
         h.feed(vec![0.0; 70_000]).await;
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(h.listens(), vec![false]);
@@ -1204,66 +1858,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn quitter_pendant_la_capture_retablit_la_musique() {
-        let h = harness_one_wake();
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+    async fn quitter_pendant_la_capture_previent_le_cerveau() {
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         // Réveil seul : la capture est en cours.
         h.feed(vec![0.0; 3_200]).await;
         h.wait_for("capture en cours", |h| h.tray.borrow().capturing)
             .await;
         h.commands.send(TrayCommand::Quit).unwrap();
-        let brain = h.brain.clone();
+        let link = h.link.clone();
         h.task.await.unwrap().unwrap();
-        // Le `Listen` vide est parti avant la fin de `run`, pas dans une tâche détachée.
-        let sent: Vec<ControlRequest> = brain
-            .requests
+        // La fin vide est partie avant la fermeture du lien, pas dans une tâche détachée.
+        let messages: Vec<EarMessage> = link
+            .sent
             .lock()
             .unwrap()
-            .clone()
-            .into_iter()
-            .filter(|r| !is_poll(r))
+            .iter()
+            .filter_map(|s| match s {
+                Sent::Msg(m) => Some(m.clone()),
+                Sent::Audio { .. } => None,
+            })
             .collect();
-        assert_eq!(sent.len(), 2, "{sent:?}");
-        assert_eq!(sent[0], ControlRequest::Wake);
-        assert!(matches!(
-            &sent[1],
-            ControlRequest::Listen { muted: false, audio, .. } if audio.is_empty()
-        ));
+        assert_eq!(messages.len(), 2, "{messages:?}");
+        assert!(matches!(messages[0], EarMessage::Wake { utterance: 1, .. }));
+        assert_eq!(
+            messages[1],
+            EarMessage::ListenEnd {
+                utterance: 1,
+                muted: false,
+                no_speech: true,
+                cut: None,
+            }
+        );
+        assert!(link.closed.load(Ordering::SeqCst));
     }
 
     #[tokio::test]
-    async fn quitter_hors_capture_n_envoie_pas_de_listen() {
-        let h = harness_one_wake();
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+    async fn quitter_hors_capture_ferme_le_lien_sans_fin_de_phrase() {
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         h.commands.send(TrayCommand::Quit).unwrap();
-        let brain = h.brain.clone();
+        let link = h.link.clone();
         h.task.await.unwrap().unwrap();
-        let requests = brain.requests.lock().unwrap().clone();
-        assert!(
-            !requests
-                .iter()
-                .any(|r| matches!(r, ControlRequest::Listen { .. })),
-            "{requests:?}"
-        );
+        assert!(link.sent.lock().unwrap().is_empty());
+        assert!(link.closed.load(Ordering::SeqCst));
     }
 
-    fn harness_mute_file(path: &std::path::Path) -> Harness {
-        build_harness(
-            |_| status_ok(),
-            false,
-            0,
-            usize::MAX,
-            Some(path.to_path_buf()),
-        )
+    fn mute_file_setup(path: &std::path::Path) -> Harness {
+        Setup {
+            mute_file: Some(path.to_path_buf()),
+            ..Setup::default()
+        }
+        .start()
     }
 
     #[tokio::test]
     async fn ecoute_coupee_retrouvee_au_redemarrage() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("jarvis/ear-muted");
-        let h = harness_mute_file(&path);
+        let h = mute_file_setup(&path);
         h.wait_for("ouverte", |h| h.tray.borrow().mic == MicState::Open)
             .await;
         h.commands.send(TrayCommand::Mute).unwrap();
@@ -1274,7 +1935,7 @@ mod tests {
         h.task.await.unwrap().unwrap();
 
         // Redémarrage : toujours coupée.
-        let h = harness_mute_file(&path);
+        let h = mute_file_setup(&path);
         h.wait_for("coupée au démarrage", |h| {
             h.tray.borrow().mic == MicState::Muted
         })
@@ -1289,24 +1950,13 @@ mod tests {
     async fn coupure_par_la_voix_aussi_retenue() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ear-muted");
-        let h = build_harness(
-            |r| match r {
-                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
-                    text: "coupe l'écoute".into(),
-                    speech: "D'accord.".into(),
-                    ear_action: Some(EarAction::Mute),
-                    audio: None,
-                    sound: None,
-                }),
-                _ => status_ok(),
-            },
-            false,
-            0,
-            usize::MAX,
-            Some(path.clone()),
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            mute_file: Some(path.clone()),
+            ..Setup::default()
+        }
+        .answer(|_| Some(heard("coupe l'écoute", Some(EarAction::Mute), None)))
+        .start();
+        h.started().await;
         h.feed(wake_then_silence()).await;
         h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
@@ -1317,7 +1967,7 @@ mod tests {
     async fn coupure_totale_non_retenue() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("ear-muted");
-        let h = harness_mute_file(&path);
+        let h = mute_file_setup(&path);
         h.commands.send(TrayCommand::HardMute).unwrap();
         h.wait_for("coupure totale", |h| {
             h.tray.borrow().mic == MicState::HardMuted
@@ -1327,64 +1977,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn listen_muet_porte_l_audio_de_la_phrase() {
+    async fn phrase_en_ecoute_coupee_porte_le_son() {
         // Parole pendant 20 trames de VAD après le réveil, puis silence.
-        let h = harness_speech(20);
+        let h = Setup {
+            speech_frames: 20,
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
         h.commands.send(TrayCommand::Mute).unwrap();
         h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+        h.started().await;
+        h.feed(wake_then_speech()).await;
+        h.wait_for("phrase envoyée", |h| h.listens() == vec![true])
             .await;
-        h.feed(vec![0.1; 1_600 + 30_000]).await;
-        h.wait_for("phrase envoyée", |h| !h.listens().is_empty())
-            .await;
-        let audio = h
-            .requests()
-            .into_iter()
-            .find_map(|r| match r {
-                ControlRequest::Listen {
-                    audio, muted: true, ..
-                } => Some(audio),
-                _ => None,
-            })
-            .expect("Listen muted");
-        assert!(!audio.is_empty());
-    }
-
-    /// Voix de Jarvis : 2 205 échantillons à 22,05 kHz (0,1 s).
-    fn voice() -> Option<SpeechAudio> {
-        Some(SpeechAudio {
-            pcm: encode_pcm(&[1_000; 2_205]),
-            sample_rate: 22_050,
-        })
-    }
-
-    fn voice_played() -> Played {
-        Played::Sound {
-            len: 2_205,
-            rate: 22_050,
-        }
-    }
-
-    fn heard(
-        text: &str,
-        ear_action: Option<EarAction>,
-        sound: Option<Sound>,
-    ) -> Result<ControlResponse, ClientError> {
-        Ok(ControlResponse::Heard {
-            text: text.into(),
-            speech: "Bien.".into(),
-            ear_action,
-            audio: voice(),
-            sound,
-        })
+        assert_eq!(h.follow_ups(), vec![(true, false)]);
     }
 
     #[tokio::test]
     async fn reveil_joue_le_bip() {
-        let h = harness_one_wake();
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         h.feed(vec![0.0; 3_200]).await;
         h.wait_for("bip", |h| h.played() == vec![wake_beep()]).await;
         assert!(h.tray.borrow().capturing);
@@ -1392,51 +2010,62 @@ mod tests {
 
     #[tokio::test]
     async fn ecoute_coupee_sans_bip_de_reveil() {
-        let h = harness_one_wake();
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
         h.commands.send(TrayCommand::Mute).unwrap();
         h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        h.started().await;
         h.feed(vec![0.0; 3_200]).await;
         h.wait_for("réveil", |h| h.tray.borrow().capturing).await;
         assert!(h.played().is_empty(), "{:?}", h.played());
     }
 
     #[tokio::test]
-    async fn reponse_jouee_apres_le_bip() {
-        let h = harness(
-            |r| match r {
-                ControlRequest::Listen { .. } => heard("suivant", None, Some(Sound::Success)),
-                _ => status_ok(),
-            },
-            false,
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+    async fn ecoute_coupee_hors_connexion_reste_muette() {
+        let h = Setup {
+            connected: false,
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .start();
+        h.commands.send(TrayCommand::Mute).unwrap();
+        h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
+        h.started().await;
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("relance", |h| h.nudges() >= 1).await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(h.played().is_empty(), "{:?}", h.played());
+    }
+
+    #[tokio::test]
+    async fn reponse_jouee_apres_le_bip() {
+        let h = Setup::default()
+            .answer(|_| Some(heard("suivant", None, Some(Sound::Success))))
+            .start();
+        h.started().await;
         h.feed(wake_then_silence()).await;
-        let success = Played::Sound {
-            len: sounds::success(OUT_RATE).len(),
-            rate: OUT_RATE,
-        };
         h.wait_for("réponse jouée", |h| h.played().len() == 3).await;
-        assert_eq!(h.played(), vec![wake_beep(), success, voice_played()]);
+        assert_eq!(
+            h.played(),
+            vec![wake_beep(), success_beep(), voice_played()]
+        );
     }
 
     #[tokio::test]
     async fn reveil_coupe_la_lecture() {
-        let h = build_harness(
-            |r| match r {
-                ControlRequest::Listen { .. } => heard("quelle heure est-il", None, None),
-                _ => status_ok(),
-            },
-            false,
-            0,
-            2,
-            None,
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            wakes: 2,
+            ..Setup::default()
+        }
+        .answer(|_| Some(heard("quelle heure est-il", None, None)))
+        .start();
+        h.started().await;
         h.feed(wake_then_silence()).await;
         h.wait_for("voix jouée", |h| {
             h.played() == vec![wake_beep(), voice_played()]
@@ -1454,32 +2083,30 @@ mod tests {
     }
 
     /// Première phrase : le cerveau pose une question ; réponse « oui » ensuite.
-    fn harness_question() -> Harness {
-        build_harness(
-            |r| match r {
-                ControlRequest::Listen {
-                    follow_up: false, ..
-                } => heard("mets le PC en veille", Some(EarAction::AwaitReply), None),
-                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
+    fn question() -> Harness {
+        Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .answer(|follow_up| {
+            Some(if follow_up {
+                ControlResponse::Heard {
                     text: "oui".into(),
                     speech: String::new(),
                     ear_action: None,
                     audio: None,
                     sound: None,
-                }),
-                _ => status_ok(),
-            },
-            false,
-            0,
-            1,
-            None,
-        )
+                }
+            } else {
+                heard("mets le PC en veille", Some(EarAction::AwaitReply), None)
+            })
+        })
+        .start()
     }
 
     /// Question posée et lue ; la lecture n'est pas encore finie.
     async fn ask(h: &Harness) {
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        h.started().await;
         h.feed(wake_then_silence()).await;
         h.wait_for("question lue", |h| {
             h.played() == vec![wake_beep(), voice_played()]
@@ -1493,25 +2120,30 @@ mod tests {
             .await;
     }
 
-    #[tokio::test]
-    async fn attente_de_reponse_capture_sans_mot_d_eveil() {
-        let h = harness_question();
-        ask(&h).await;
-        // Garde du début d'écoute, « oui » (20 trames de parole), puis le silence qui
-        // clôt la phrase.
+    /// Garde du début d'écoute, « oui » (20 trames de parole), puis le silence qui clôt
+    /// la phrase.
+    fn yes() -> Vec<f32> {
         let mut reply = vec![0.0; 256 * 20];
         reply.extend(vec![0.9; 256 * 20]);
         reply.extend(vec![0.0; 256 * 60]);
-        h.feed(reply).await;
+        reply
+    }
+
+    #[tokio::test]
+    async fn attente_de_reponse_ouvre_un_flux_follow_up() {
+        let h = question();
+        ask(&h).await;
+        assert!(
+            h.messages()
+                .contains(&EarMessage::ListenStart { utterance: 2 })
+        );
+        h.feed(yes()).await;
         h.wait_for("réponse entendue", |h| {
             h.tray.borrow().last_heard.as_deref() == Some("oui")
         })
         .await;
-        let listens = h.follow_ups();
-        assert_eq!(listens.len(), 2, "{listens:?}");
-        assert!(!listens[0].1);
-        assert!(listens[1].1, "réponse marquée follow_up");
-        assert!(!listens[1].0.is_empty());
+        assert_eq!(h.follow_ups(), vec![(false, false), (true, true)]);
+        assert!(h.audio_of(2) > 0);
         // Aucun réveil (donc aucun son baissé) pour la réponse.
         assert_eq!(h.wakes(), 1);
         assert!(!h.tray.borrow().capturing);
@@ -1519,17 +2151,17 @@ mod tests {
 
     #[tokio::test]
     async fn attente_sans_parole_abandonnee() {
-        let h = harness_question();
+        let h = question();
         ask(&h).await;
         // 5 s de silence : on attend toujours (le délai est de 8 s, pas 4).
         h.feed(vec![0.0; 5 * 16_000]).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(h.follow_ups().len(), 1);
         assert!(h.tray.borrow().capturing);
-        // Au-delà de 8 s : abandon, signalé par une réponse vide.
+        // Au-delà de 8 s : abandon, signalé par une fin sans parole.
         h.feed(vec![0.0; 3 * 16_000 + 1_000]).await;
         h.wait_for("abandon", |h| h.follow_ups().len() == 2).await;
-        assert_eq!(h.follow_ups()[1], (String::new(), true));
+        assert_eq!(h.follow_ups()[1], (false, true));
         h.wait_for("fin de capture", |h| !h.tray.borrow().capturing)
             .await;
         assert_eq!(h.wakes(), 1);
@@ -1537,12 +2169,11 @@ mod tests {
 
     #[tokio::test]
     async fn question_pendant_l_ecoute_coupee_pas_d_ecoute_de_reponse() {
-        let h = harness_question();
+        let h = question();
         h.commands.send(TrayCommand::Mute).unwrap();
         h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        h.started().await;
         h.feed(wake_then_silence()).await;
         // Pas de bip de réveil en écoute coupée : seule la voix est lue.
         h.wait_for("question lue", |h| h.played() == vec![voice_played()])
@@ -1555,24 +2186,18 @@ mod tests {
 
     #[tokio::test]
     async fn reponse_tardive_pendant_l_ecoute_de_la_reponse_ignoree() {
-        let h = harness_question();
+        let h = question();
         ask(&h).await;
         let before = h.played();
-        // Réponse d'une phrase précédente qui arrive pendant l'écoute de la réponse.
-        h.internal
-            .send(Internal::Heard {
-                result: heard("autre", Some(EarAction::AwaitReply), Some(Sound::Success)),
-                muted: false,
-            })
-            .unwrap();
+        // Réponse de la phrase précédente qui arrive pendant l'écoute de la réponse.
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("autre", Some(EarAction::AwaitReply), Some(Sound::Success)),
+        });
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(h.played(), before, "rien n'est joué");
         assert!(h.tray.borrow().capturing, "capture intacte");
-        // La réponse est toujours entendue, marquée follow_up.
-        let mut reply = vec![0.0; 256 * 20];
-        reply.extend(vec![0.9; 256 * 20]);
-        reply.extend(vec![0.0; 256 * 60]);
-        h.feed(reply).await;
+        h.feed(yes()).await;
         h.wait_for("réponse entendue", |h| {
             h.tray.borrow().last_heard.as_deref() == Some("oui")
         })
@@ -1583,11 +2208,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn question_hors_connexion_pc_endormi() {
+        let h = question();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("question lue", |h| {
+            h.played() == vec![wake_beep(), voice_played()]
+        })
+        .await;
+        h.link.disconnect();
+        h.player.finish();
+        h.wait_for("bip d'échec", |h| {
+            h.played() == vec![wake_beep(), voice_played(), failure_beep()]
+        })
+        .await;
+        assert!(!h.tray.borrow().capturing);
+    }
+
+    #[tokio::test]
     async fn reveil_faible_ignore_pendant_que_jarvis_parle() {
         // Score au-dessus du seuil normal (0,5), sous le seuil de lecture.
-        let h = build_harness_scored(|_| status_ok(), false, 0, usize::MAX, None, 0.55);
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            wake_score: 0.55,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         // Jarvis parle : sa propre voix dit « Jarvis ».
         h.player.playing.send_replace(true);
         h.feed(vec![0.0; 3_200]).await;
@@ -1607,9 +2253,12 @@ mod tests {
 
     #[tokio::test]
     async fn reveil_franc_coupe_toujours_la_lecture() {
-        let h = build_harness_scored(|_| status_ok(), false, 0, 1, None, 0.9);
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .start();
+        h.started().await;
         h.player.playing.send_replace(true);
         h.feed(vec![0.0; 3_200]).await;
         h.wait_for("réveil", |h| h.wakes() == 1).await;
@@ -1618,26 +2267,21 @@ mod tests {
 
     #[tokio::test]
     async fn question_sans_lecture_ecoute_tout_de_suite() {
-        let h = build_harness(
-            |r| match r {
-                ControlRequest::Listen {
-                    follow_up: false, ..
-                } => Ok(ControlResponse::Heard {
-                    text: "mets le PC en veille".into(),
-                    speech: "Je mets le PC en veille ?".into(),
-                    ear_action: Some(EarAction::AwaitReply),
-                    audio: None,
-                    sound: None,
-                }),
-                _ => status_ok(),
-            },
-            false,
-            0,
-            1,
-            None,
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let h = Setup {
+            wakes: 1,
+            ..Setup::default()
+        }
+        .answer(|follow_up| {
+            (!follow_up).then(|| ControlResponse::Heard {
+                text: "mets le PC en veille".into(),
+                speech: "Je mets le PC en veille ?".into(),
+                ear_action: Some(EarAction::AwaitReply),
+                audio: None,
+                sound: None,
+            })
+        })
+        .start();
+        h.started().await;
         h.feed(wake_then_silence()).await;
         h.wait_for("bip lu", |h| h.played() == vec![wake_beep()])
             .await;
@@ -1647,51 +2291,43 @@ mod tests {
             .await;
     }
 
-    /// Cerveau qui donne une annonce (bip de réussite et voix) une seule fois, dès que
-    /// `ready` est levé ; `delivered` est levé quand elle est partie.
-    struct AnnouncingBrain {
-        ready: Arc<std::sync::atomic::AtomicBool>,
-        delivered: Arc<std::sync::atomic::AtomicBool>,
+    /// Socket de contrôle qui donne une annonce (bip de réussite et voix) une seule fois,
+    /// dès que `ready` est levé ; `delivered` est levé quand elle est partie.
+    struct Announcing {
+        ready: Arc<AtomicBool>,
+        delivered: Arc<AtomicBool>,
     }
 
-    impl AnnouncingBrain {
+    impl Announcing {
         fn new(ready: bool) -> Self {
             Self {
-                ready: Arc::new(std::sync::atomic::AtomicBool::new(ready)),
-                delivered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                ready: Arc::new(AtomicBool::new(ready)),
+                delivered: Arc::new(AtomicBool::new(false)),
             }
         }
 
-        fn responder(
-            &self,
-        ) -> impl Fn(&ControlRequest) -> Result<ControlResponse, ClientError> + Send + Sync + 'static
-        {
+        fn control(&self) -> Arc<FakeBrain> {
             let (ready, delivered) = (self.ready.clone(), self.delivered.clone());
-            move |r| match r {
-                ControlRequest::Announcements { .. } => {
-                    let items = if ready.load(Ordering::SeqCst)
-                        && !delivered.swap(true, Ordering::SeqCst)
-                    {
-                        vec![jarvis_protocol::Announcement {
-                            speech: "La tâche est finie.".into(),
-                            audio: voice(),
-                            sound: Some(Sound::Success),
-                        }]
-                    } else {
-                        vec![]
-                    };
-                    Ok(ControlResponse::Announcements { items })
-                }
-                // Rien entendu : réponse vide, sans son.
-                ControlRequest::Listen { .. } => Ok(ControlResponse::Heard {
-                    text: String::new(),
-                    speech: String::new(),
-                    ear_action: None,
-                    audio: None,
-                    sound: None,
+            Arc::new(FakeBrain {
+                requests: Mutex::new(Vec::new()),
+                responder: Box::new(move |r| match r {
+                    ControlRequest::Announcements { .. } => {
+                        let items = if ready.load(Ordering::SeqCst)
+                            && !delivered.swap(true, Ordering::SeqCst)
+                        {
+                            vec![Announcement {
+                                speech: "La tâche est finie.".into(),
+                                audio: voice(),
+                                sound: Some(Sound::Success),
+                            }]
+                        } else {
+                            vec![]
+                        };
+                        Ok(ControlResponse::Announcements { items })
+                    }
+                    other => panic!("requête inattendue : {other:?}"),
                 }),
-                _ => status_ok(),
-            }
+            })
         }
 
         fn ready(&self) {
@@ -1704,51 +2340,29 @@ mod tests {
     }
 
     /// Relève rapide (20 ms), `wakes` réveils au plus.
-    fn harness_announcing(brain: &AnnouncingBrain, wakes: usize) -> Harness {
-        build_harness_full(
-            brain.responder(),
-            false,
-            0,
+    fn announcing(control: Arc<FakeBrain>, wakes: usize) -> Harness {
+        Setup {
             wakes,
-            None,
-            0.9,
-            Duration::from_millis(20),
-            None,
-        )
-    }
-
-    fn success_beep() -> Played {
-        Played::Sound {
-            len: sounds::success(OUT_RATE).len(),
-            rate: OUT_RATE,
+            control: Some(control),
+            announce_period: Duration::from_millis(20),
+            ..Setup::default()
         }
-    }
-
-    fn announcement_requests(h: &Harness) -> Vec<Option<String>> {
-        h.requests()
-            .into_iter()
-            .filter_map(|r| match r {
-                ControlRequest::Announcements { ear } => Some(ear),
-                _ => None,
-            })
-            .collect()
+        .start()
     }
 
     #[tokio::test]
     async fn annonce_jouee_au_repos() {
-        let brain = AnnouncingBrain::new(true);
-        let h = harness_announcing(&brain, 0);
+        let brain = Announcing::new(true);
+        let h = announcing(brain.control(), 0);
         h.wait_for("annonce jouée", |h| {
             h.played() == vec![success_beep(), voice_played()]
         })
         .await;
-        // Relevée après un statut réussi, sous le nom par défaut.
-        let requests = h.requests();
-        assert_eq!(requests[0], ControlRequest::Status);
-        assert_eq!(announcement_requests(&h)[0].as_deref(), Some("pc"));
+        // Relevée sous le nom par défaut.
+        assert_eq!(h.announcement_requests()[0].as_deref(), Some("pc"));
         // Livrée une fois : jouée une fois.
         h.wait_for("relèves suivantes", |h| {
-            announcement_requests(h).len() >= 3
+            h.announcement_requests().len() >= 3
         })
         .await;
         assert_eq!(h.played().len(), 2);
@@ -1756,8 +2370,8 @@ mod tests {
 
     #[tokio::test]
     async fn annonce_jouee_ecoute_coupee() {
-        let brain = AnnouncingBrain::new(false);
-        let h = harness_announcing(&brain, 0);
+        let brain = Announcing::new(false);
+        let h = announcing(brain.control(), 0);
         h.commands.send(TrayCommand::Mute).unwrap();
         h.wait_for("coupée", |h| h.tray.borrow().mic == MicState::Muted)
             .await;
@@ -1770,10 +2384,9 @@ mod tests {
 
     #[tokio::test]
     async fn annonce_attend_la_fin_de_la_capture() {
-        let brain = AnnouncingBrain::new(false);
-        let h = harness_announcing(&brain, 1);
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        let brain = Announcing::new(false);
+        let h = announcing(brain.control(), 1);
+        h.started().await;
         // Réveil seul : la capture est en cours.
         h.feed(vec![0.0; 3_200]).await;
         h.wait_for("capture en cours", |h| h.tray.borrow().capturing)
@@ -1794,12 +2407,8 @@ mod tests {
 
     #[tokio::test]
     async fn annonce_attend_la_fin_de_la_lecture() {
-        let brain = AnnouncingBrain::new(false);
-        let h = harness_announcing(&brain, 0);
-        h.wait_for("lien établi", |h| {
-            matches!(h.tray.borrow().brain, BrainLink::Connected { .. })
-        })
-        .await;
+        let brain = Announcing::new(false);
+        let h = announcing(brain.control(), 0);
         // Jarvis parle déjà.
         h.player.playing.send_replace(true);
         brain.ready();
@@ -1815,14 +2424,13 @@ mod tests {
 
     #[tokio::test]
     async fn reveil_coupe_l_annonce() {
-        let brain = AnnouncingBrain::new(true);
-        let h = harness_announcing(&brain, 1);
+        let brain = Announcing::new(true);
+        let h = announcing(brain.control(), 1);
         h.wait_for("annonce jouée", |h| {
             h.played() == vec![success_beep(), voice_played()]
         })
         .await;
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
-            .await;
+        h.started().await;
         // « Jarvis » pendant l'annonce : coupure, bip, capture.
         h.feed(vec![0.0; 3_200]).await;
         h.wait_for("réveil", |h| h.wakes() == 1).await;
@@ -1834,105 +2442,87 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ancien_cerveau_sans_annonces_ignore() {
-        let h = build_harness_full(
-            |r| match r {
-                ControlRequest::Announcements { .. } => Ok(ControlResponse::Error {
-                    message: "requête invalide".into(),
-                }),
-                _ => status_ok(),
-            },
-            false,
-            0,
-            0,
-            None,
-            0.9,
-            Duration::from_millis(20),
-            None,
-        );
-        h.wait_for("plusieurs statuts", |h| {
-            h.requests()
-                .iter()
-                .filter(|r| **r == ControlRequest::Status)
-                .count()
-                >= 4
+    async fn pas_de_releve_hors_connexion() {
+        let brain = Announcing::new(true);
+        let h = Setup {
+            connected: false,
+            control: Some(brain.control()),
+            announce_period: Duration::from_millis(20),
+            ..Setup::default()
+        }
+        .start();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert!(h.announcement_requests().is_empty());
+        h.link.reconnect();
+        h.wait_for("annonce jouée", |h| {
+            h.played() == vec![success_beep(), voice_played()]
         })
         .await;
-        assert_eq!(announcement_requests(&h).len(), 1, "plus de relève");
+    }
+
+    /// 0 : ancien cerveau (annonces inconnues) ; ensuite : nouveau cerveau.
+    fn old_brain(phase: Arc<AtomicUsize>) -> Arc<FakeBrain> {
+        Arc::new(FakeBrain {
+            requests: Mutex::new(Vec::new()),
+            responder: Box::new(move |_| {
+                if phase.load(Ordering::SeqCst) == 0 {
+                    Ok(ControlResponse::Error {
+                        message: "requête invalide".into(),
+                    })
+                } else {
+                    Ok(ControlResponse::Announcements { items: vec![] })
+                }
+            }),
+        })
+    }
+
+    #[tokio::test]
+    async fn ancien_cerveau_sans_annonces_ignore() {
+        let h = announcing(old_brain(Arc::new(AtomicUsize::new(0))), 0);
+        h.wait_for("première relève", |h| {
+            h.announcement_requests().len() == 1
+        })
+        .await;
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(h.announcement_requests().len(), 1, "plus de relève");
         assert!(matches!(h.tray.borrow().brain, BrainLink::Connected { .. }));
     }
 
     #[tokio::test]
     async fn cerveau_revenu_annonces_redemandees() {
-        // 0 : ancien cerveau ; 1 : arrêté ; 2 : nouveau cerveau, avec les annonces.
-        let phase = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let p = phase.clone();
-        let h = build_harness_full(
-            move |r| match (p.load(Ordering::SeqCst), r) {
-                (1, _) => Err(ClientError::BrainUnreachable),
-                (0, ControlRequest::Announcements { .. }) => Ok(ControlResponse::Error {
-                    message: "requête invalide".into(),
-                }),
-                (_, ControlRequest::Announcements { .. }) => {
-                    Ok(ControlResponse::Announcements { items: vec![] })
-                }
-                _ => status_ok(),
-            },
-            false,
-            0,
-            0,
-            None,
-            0.9,
-            Duration::from_millis(20),
-            None,
-        );
-        let statuses = |h: &Harness| {
-            h.requests()
-                .iter()
-                .filter(|r| **r == ControlRequest::Status)
-                .count()
-        };
-        h.wait_for("relève abandonnée", |h| statuses(h) >= 3).await;
-        assert_eq!(announcement_requests(&h).len(), 1);
-        phase.store(1, Ordering::SeqCst);
-        h.wait_for("cerveau injoignable", |h| {
-            h.tray.borrow().brain == BrainLink::Unreachable
+        let phase = Arc::new(AtomicUsize::new(0));
+        let h = announcing(old_brain(phase.clone()), 0);
+        h.wait_for("première relève", |h| {
+            h.announcement_requests().len() == 1
         })
         .await;
-        phase.store(2, Ordering::SeqCst);
-        h.wait_for("relève reprise", |h| announcement_requests(h).len() >= 3)
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.announcement_requests().len(), 1);
+        h.link.disconnect();
+        h.wait_for("connexion perdue", |h| {
+            h.tray.borrow().brain == BrainLink::Connecting
+        })
+        .await;
+        phase.store(1, Ordering::SeqCst);
+        h.link.reconnect();
+        h.wait_for("relève reprise", |h| h.announcement_requests().len() >= 3)
             .await;
     }
 
     #[tokio::test]
-    async fn listen_envoie_le_nom_de_l_oreille() {
-        let brain = AnnouncingBrain::new(false);
-        let h = build_harness_full(
-            brain.responder(),
-            false,
-            0,
-            1,
-            None,
-            0.9,
-            Duration::from_millis(20),
-            Some("salon"),
-        );
-        h.wait_for("capture", |h| h.capture.tx.lock().unwrap().is_some())
+    async fn annonces_relevees_sous_le_nom_de_l_oreille() {
+        let brain = Announcing::new(false);
+        let h = Setup {
+            name: Some("salon"),
+            control: Some(brain.control()),
+            announce_period: Duration::from_millis(20),
+            ..Setup::default()
+        }
+        .start();
+        h.wait_for("relèves", |h| h.announcement_requests().len() >= 2)
             .await;
-        h.feed(wake_then_silence()).await;
-        h.wait_for("phrase envoyée", |h| h.listens().len() == 1)
-            .await;
-        let ears: Vec<Option<String>> = h
-            .requests()
-            .into_iter()
-            .filter_map(|r| match r {
-                ControlRequest::Listen { ear, .. } => Some(ear),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(ears, [Some("salon".to_string())]);
         assert!(
-            announcement_requests(&h)
+            h.announcement_requests()
                 .iter()
                 .all(|e| e.as_deref() == Some("salon"))
         );

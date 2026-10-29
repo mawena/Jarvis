@@ -5,11 +5,18 @@ use jarvis_protocol::Mode;
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem};
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Liaison avec le cerveau.
+/// Liaison avec le cerveau (poussée par le lien réseau).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrainLink {
-    Connected { mode: Mode, local_model: String },
+    Connected {
+        mode: Mode,
+        local_model: String,
+    },
+    /// Première tentative, ou reconnexion après une coupure.
+    Connecting,
     Unreachable,
+    /// Jeton ou oreille refusés (ou version incompatible) : il faut réappairer.
+    Refused,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -46,7 +53,13 @@ fn mode_for_index(index: usize) -> Mode {
 }
 
 fn brain_unreachable(state: &TrayState) -> bool {
-    state.brain == BrainLink::Unreachable
+    !matches!(state.brain, BrainLink::Connected { .. })
+}
+
+/// À signaler : PC injoignable ou appairage refusé (pas pendant une connexion).
+fn needs_attention(state: &TrayState) -> bool {
+    matches!(state.brain, BrainLink::Unreachable | BrainLink::Refused)
+        || state.mic == MicState::Unavailable
 }
 
 pub fn icon_for(state: &TrayState) -> &'static str {
@@ -69,8 +82,13 @@ pub fn summary(state: &TrayState) -> String {
     if state.mic == MicState::HardMuted {
         return "Jarvis — micro coupé".into();
     }
-    if brain_unreachable(state) {
-        return "Jarvis — cerveau injoignable".into();
+    match state.brain {
+        BrainLink::Unreachable => return "Jarvis — PC injoignable".into(),
+        BrainLink::Connecting => return "Jarvis — connexion au PC…".into(),
+        BrainLink::Refused => {
+            return "Jarvis — appairage refusé : relancez jarvis-ear pair".into();
+        }
+        BrainLink::Connected { .. } => {}
     }
     match state.mic {
         MicState::Unavailable => "Jarvis — micro indisponible".into(),
@@ -171,7 +189,7 @@ impl ksni::Tray for JarvisTray {
     }
 
     fn status(&self) -> ksni::Status {
-        if brain_unreachable(&self.state) || self.state.mic == MicState::Unavailable {
+        if needs_attention(&self.state) {
             ksni::Status::NeedsAttention
         } else {
             ksni::Status::Active
@@ -206,7 +224,7 @@ impl ksni::Tray for JarvisTray {
             BrainLink::Connected {
                 mode: Mode::Online, ..
             } => (1, true),
-            BrainLink::Unreachable => (0, false),
+            _ => (0, false),
         };
         let radio = |label: &str| RadioItem {
             label: label.into(),
@@ -315,7 +333,7 @@ mod tests {
         let mut s = connected(MicState::Muted, true);
         s.brain = BrainLink::Unreachable;
         assert_eq!(icon_for(&s), "network-offline");
-        assert_eq!(summary(&s), "Jarvis — cerveau injoignable");
+        assert_eq!(summary(&s), "Jarvis — PC injoignable");
         let (tray, _rx) = tray_of(s.clone());
         assert!(matches!(
             ksni::Tray::status(&tray),
@@ -323,6 +341,30 @@ mod tests {
         ));
         s.mic = MicState::HardMuted;
         assert_eq!(icon_for(&s), "microphone-disabled-symbolic");
+    }
+
+    #[test]
+    fn icone_pc_injoignable() {
+        let mut s = connected(MicState::Open, false);
+        for (link, text, attention) in [
+            (BrainLink::Unreachable, "Jarvis — PC injoignable", true),
+            (BrainLink::Connecting, "Jarvis — connexion au PC…", false),
+            (
+                BrainLink::Refused,
+                "Jarvis — appairage refusé : relancez jarvis-ear pair",
+                true,
+            ),
+        ] {
+            s.brain = link;
+            assert_eq!(icon_for(&s), "network-offline");
+            assert_eq!(summary(&s), text);
+            let (tray, _rx) = tray_of(s.clone());
+            assert_eq!(
+                matches!(ksni::Tray::status(&tray), ksni::Status::NeedsAttention),
+                attention,
+                "{text}"
+            );
+        }
     }
 
     #[test]
