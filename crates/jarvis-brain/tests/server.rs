@@ -190,6 +190,7 @@ async fn server_listen_et_status_local_model() {
         .send(ControlRequest::Listen {
             audio: encode_pcm(&[1, 2, 3]),
             muted: false,
+            follow_up: false,
         })
         .await;
     assert_eq!(
@@ -197,13 +198,16 @@ async fn server_listen_et_status_local_model() {
         ControlResponse::Heard {
             text: "suivant".into(),
             speech: "ok".into(),
-            ear_action: None
+            ear_action: None,
+            audio: None,
+            sound: None,
         }
     );
     let r = c
         .send(ControlRequest::Listen {
             audio: "!!".into(),
             muted: false,
+            follow_up: false,
         })
         .await;
     assert!(matches!(r, ControlResponse::Error { .. }));
@@ -320,4 +324,56 @@ async fn enroll_voice_par_le_socket() {
         .send(ControlRequest::EnrollVoice { samples: vec![] })
         .await;
     assert!(matches!(r, ControlResponse::Error { .. }));
+}
+
+#[tokio::test]
+async fn ecoute_renvoie_la_voix() {
+    use jarvis_brain::server::{SpeakerState, serve_with_voice};
+    use jarvis_brain::testing::FakeSynthesizer;
+    use jarvis_brain::tts::{Speech, Voice};
+    use jarvis_protocol::SpeechAudio;
+    let dir = tempfile::tempdir().unwrap();
+    let socket = dir.path().join("run/brain.sock");
+    let b = brain(dir.path());
+    let l = listen(&b);
+    let voice = Voice::new(Arc::new(FakeSynthesizer::new(Speech {
+        samples: vec![7, -7],
+        sample_rate: 22_050,
+    })));
+    let s = socket.clone();
+    tokio::spawn(async move { serve_with_voice(b, l, SpeakerState::Disabled, voice, &s).await });
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let mut c = Client::connect(&socket).await;
+    let r = c
+        .send(ControlRequest::Listen {
+            audio: encode_pcm(&[1, 2, 3]),
+            muted: false,
+            follow_up: false,
+        })
+        .await;
+    assert_eq!(
+        r,
+        ControlResponse::Heard {
+            text: "suivant".into(),
+            speech: "ok".into(),
+            ear_action: None,
+            audio: Some(SpeechAudio {
+                pcm: encode_pcm(&[7, -7]),
+                sample_rate: 22_050,
+            }),
+            sound: None,
+        }
+    );
+    // « dis » passe par Say : texte seul, sans voix.
+    assert_eq!(
+        c.raw(r#"{"type":"say","text":"suivant"}"#).await,
+        ControlResponse::Reply {
+            speech: "ok".into()
+        }
+    );
 }

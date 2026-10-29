@@ -64,6 +64,10 @@ pub enum ControlRequest {
     Listen {
         audio: String,
         muted: bool,
+        /// Réponse à une question du cerveau (`EarAction::AwaitReply`), captée sans
+        /// mot d'éveil.
+        #[serde(default)]
+        follow_up: bool,
     },
     /// Enregistre l'empreinte vocale : chaque élément est un échantillon audio
     /// (même format que `Listen.audio`).
@@ -78,6 +82,24 @@ pub enum ControlRequest {
 pub enum EarAction {
     Mute,
     Unmute,
+    /// Le cerveau attend une réponse (oui / non) : après la lecture de `speech`,
+    /// l'oreille écoute sans mot d'éveil, 8 s au plus pour commencer à parler.
+    AwaitReply,
+}
+
+/// Bip joué par l'oreille avant la réponse. Le bip de réveil, lui, est local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Sound {
+    Success,
+    Failure,
+}
+
+/// Voix de Jarvis : `pcm` = i16 little-endian mono en base64 (voir [`encode_pcm`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SpeechAudio {
+    pub pcm: String,
+    pub sample_rate: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +118,11 @@ pub enum ControlResponse {
         text: String,
         speech: String,
         ear_action: Option<EarAction>,
+        /// `speech` dit par la voix de Jarvis ; absent si la voix n'est pas installée.
+        #[serde(default)]
+        audio: Option<SpeechAudio>,
+        #[serde(default)]
+        sound: Option<Sound>,
     },
     Error {
         message: String,
@@ -201,6 +228,7 @@ mod tests {
         let r = ControlRequest::Listen {
             audio: encode_pcm(&[1, 2, 3]),
             muted: true,
+            follow_up: true,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
@@ -222,10 +250,63 @@ mod tests {
             text: "coupe l'écoute".into(),
             speech: "D'accord.".into(),
             ear_action: Some(EarAction::Mute),
+            audio: None,
+            sound: None,
         };
         let json = serde_json::to_string(&r).unwrap();
         assert!(json.contains(r#""ear_action":"mute""#), "{json}");
         assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn heard_avec_voix_et_bip() {
+        let r = ControlResponse::Heard {
+            text: "mets le PC en veille".into(),
+            speech: "Je mets le PC en veille ?".into(),
+            ear_action: Some(EarAction::AwaitReply),
+            audio: Some(SpeechAudio {
+                pcm: encode_pcm(&[1, -1]),
+                sample_rate: 22_050,
+            }),
+            sound: Some(Sound::Failure),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(json.contains(r#""ear_action":"await_reply""#), "{json}");
+        assert!(json.contains(r#""sound":"failure""#), "{json}");
+        assert!(json.contains(r#""sample_rate":22050"#), "{json}");
+        assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn ancien_heard_reste_lisible() {
+        let r: ControlResponse = serde_json::from_str(
+            r#"{"type":"heard","text":"suivant","speech":"Bien.","ear_action":null}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            r,
+            ControlResponse::Heard {
+                text: "suivant".into(),
+                speech: "Bien.".into(),
+                ear_action: None,
+                audio: None,
+                sound: None,
+            }
+        );
+    }
+
+    #[test]
+    fn ancien_listen_sans_follow_up() {
+        let r: ControlRequest =
+            serde_json::from_str(r#"{"type":"listen","audio":"","muted":false}"#).unwrap();
+        assert_eq!(
+            r,
+            ControlRequest::Listen {
+                audio: String::new(),
+                muted: false,
+                follow_up: false,
+            }
+        );
     }
 
     #[test]

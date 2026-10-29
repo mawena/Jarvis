@@ -1518,6 +1518,7 @@ dependencies = [
  "jarvis-brain",
  "jarvis-protocol",
  "jarvis-skills",
+ "piper-phonemize",
  "reqwest",
  "serde",
  "serde_json",
@@ -2185,6 +2186,29 @@ name = "pin-project-lite"
 version = "0.2.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
+
+[[package]]
+name = "piper-phonemize"
+version = "1.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3fbfb5535358c1bf92e9cfe0bd88b1d0d96875e784057b77cc76506c0ad96cf"
+dependencies = [
+ "bzip2 0.4.4",
+ "piper-phonemize-sys",
+ "tar",
+ "walkdir",
+]
+
+[[package]]
+name = "piper-phonemize-sys"
+version = "1.5.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4335f5d858de8adc61756397b865fead6ed35368060bfc6778e76244834bf448"
+dependencies = [
+ "bzip2 0.4.4",
+ "tar",
+ "ureq",
+]
 
 [[package]]
 name = "pkg-config"

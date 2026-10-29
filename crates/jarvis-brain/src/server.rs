@@ -3,6 +3,7 @@
 use crate::brain::Brain;
 use crate::listen::ListenService;
 use crate::speaker::SpeakerGate;
+use crate::tts::Voice;
 use anyhow::{Context, bail};
 use jarvis_protocol::{ControlRequest, ControlResponse, decode_pcm};
 use std::io::{self, ErrorKind};
@@ -44,13 +45,25 @@ pub async fn serve_with_state(
     speaker: SpeakerState,
     socket: &Path,
 ) -> anyhow::Result<()> {
+    serve_with_voice(brain, listen, speaker, Voice::none(), socket).await
+}
+
+/// Comme [`serve_with_state`], avec la voix de Jarvis pour les réponses `Heard`.
+pub async fn serve_with_voice(
+    brain: Arc<Brain>,
+    listen: Arc<ListenService>,
+    speaker: SpeakerState,
+    voice: Voice,
+    socket: &Path,
+) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
     info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
     loop {
         let (stream, _) = listener.accept().await.context("acceptation d'un client")?;
         let (brain, listen, speaker) = (brain.clone(), listen.clone(), speaker.clone());
+        let voice = voice.clone();
         tokio::spawn(async move {
-            if let Err(e) = handle_client(brain, listen, speaker, stream).await {
+            if let Err(e) = handle_client(brain, listen, speaker, voice, stream).await {
                 debug!("connexion terminée : {e}");
             }
         });
@@ -122,6 +135,7 @@ async fn handle_client(
     brain: Arc<Brain>,
     listen: Arc<ListenService>,
     speaker: SpeakerState,
+    voice: Voice,
     stream: UnixStream,
 ) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
@@ -144,7 +158,7 @@ async fn handle_client(
                 return Ok(());
             }
             Line::Request(line) => match serde_json::from_slice::<ControlRequest>(&line) {
-                Ok(request) => respond(&brain, &listen, &speaker, request).await,
+                Ok(request) => respond(&brain, &listen, &speaker, &voice, request).await,
                 Err(_) => ControlResponse::Error {
                     message: "requête invalide".into(),
                 },
@@ -164,6 +178,7 @@ async fn respond(
     brain: &Brain,
     listen: &ListenService,
     speaker: &SpeakerState,
+    voice: &Voice,
     request: ControlRequest,
 ) -> ControlResponse {
     match request {
@@ -175,8 +190,16 @@ async fn respond(
             listen.wake().await;
             status(brain)
         }
-        ControlRequest::Listen { audio, muted } => match decode_pcm(&audio) {
-            Ok(samples) => listen.listen(&samples, muted).await,
+        ControlRequest::Listen {
+            audio,
+            muted,
+            follow_up,
+        } => match decode_pcm(&audio) {
+            Ok(samples) => {
+                voice
+                    .speak(listen.listen(&samples, muted, follow_up).await)
+                    .await
+            }
             Err(_) => ControlResponse::Error {
                 message: "audio invalide".into(),
             },

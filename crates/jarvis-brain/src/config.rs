@@ -10,11 +10,14 @@ pub struct Config {
     pub mode: Mode,
     /// Nom par lequel Jarvis s'adresse à l'utilisateur.
     pub address: String,
+    /// Une action réussie par un raccourci est confirmée par un bip, sans phrase.
+    pub sound_only_for_success: bool,
     pub local: LocalLlmConfig,
     pub online: OnlineLlmConfig,
     pub apps: AppsConfig,
     pub stt: SttConfig,
     pub speaker: SpeakerConfig,
+    pub tts: TtsConfig,
 }
 
 impl Default for Config {
@@ -22,11 +25,13 @@ impl Default for Config {
         Self {
             mode: Mode::Local,
             address: "Monsieur".to_string(),
+            sound_only_for_success: false,
             local: LocalLlmConfig::default(),
             online: OnlineLlmConfig::default(),
             apps: AppsConfig::default(),
             stt: SttConfig::default(),
             speaker: SpeakerConfig::default(),
+            tts: TtsConfig::default(),
         }
     }
 }
@@ -163,6 +168,36 @@ impl Default for SpeakerConfig {
     }
 }
 
+/// Voix de Jarvis (Piper, via sherpa-onnx).
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct TtsConfig {
+    pub enabled: bool,
+    /// Dossier de la voix : un `.onnx` et `tokens.txt` (`~/` accepté en tête de chemin).
+    pub model_dir: PathBuf,
+    /// Locuteur de la voix (1 = « pierre »).
+    pub speaker: i32,
+    /// 1.0 = vitesse normale ; plus grand = plus rapide.
+    pub speed: f32,
+    pub threads: i32,
+}
+
+impl Default for TtsConfig {
+    fn default() -> Self {
+        let model_dir = match directories::ProjectDirs::from("", "", "jarvis") {
+            Some(dirs) => dirs.data_dir().join("models/vits-piper-fr_FR-upmc-medium"),
+            None => PathBuf::from(".local/share/jarvis/models/vits-piper-fr_FR-upmc-medium"),
+        };
+        Self {
+            enabled: true,
+            model_dir,
+            speaker: 1,
+            speed: 1.0,
+            threads: 2,
+        }
+    }
+}
+
 /// Remplace un `~` en tête de chemin par `$HOME`.
 pub fn expand_home(p: &Path) -> PathBuf {
     if let Ok(rest) = p.strip_prefix("~")
@@ -199,6 +234,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::persona::Persona;
     use jarvis_protocol::Mode;
     use std::path::PathBuf;
 
@@ -274,6 +310,40 @@ mod tests {
         assert!(!c.speaker.enabled);
         assert_eq!(c.speaker.threshold, 0.5);
         assert_eq!(c.speaker.strict_threshold, 0.65);
+    }
+
+    #[test]
+    fn tts_config_defauts() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        assert!(c.tts.enabled);
+        assert_eq!(c.tts.speaker, 1);
+        assert_eq!(c.tts.speed, 1.0);
+        assert_eq!(c.tts.threads, 2);
+        assert!(
+            c.tts
+                .model_dir
+                .ends_with("jarvis/models/vits-piper-fr_FR-upmc-medium"),
+            "{}",
+            c.tts.model_dir.display()
+        );
+        let (_d, p) = write("[tts]\nenabled = false\nspeed = 1.2\n");
+        let c = Config::load(&p).unwrap();
+        assert!(!c.tts.enabled);
+        assert_eq!(c.tts.speed, 1.2);
+        assert_eq!(c.tts.speaker, 1);
+        assert_eq!(c.tts.model_dir, TtsConfig::default().model_dir);
+    }
+
+    #[test]
+    fn bip_seul_pour_reussite_desactive_par_defaut() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        assert!(!c.sound_only_for_success);
+        let (_d, p) = write("address = \"Charles\"\nsound_only_for_success = true\n");
+        let c = Config::load(&p).unwrap();
+        assert!(c.sound_only_for_success);
+        let persona = Persona::from(&c);
+        assert_eq!(persona.address, "Charles");
+        assert!(persona.sound_only_for_success);
     }
 
     #[test]

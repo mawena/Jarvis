@@ -4,6 +4,7 @@ use crate::ducking::Ducker;
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::stt::Transcriber;
+use crate::tts::{Speech, Synthesizer};
 use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -200,5 +201,98 @@ impl crate::speaker::SpeakerVerifier for FakeVerifier {
             .get(id)
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("empreinte factice inconnue"))
+    }
+}
+
+/// Voix programmée (son fixe ou échec), qui garde les phrases reçues.
+pub struct FakeSynthesizer {
+    speech: Option<Speech>,
+    texts: Mutex<Vec<String>>,
+    delay: std::time::Duration,
+    active: AtomicUsize,
+    max_active: AtomicUsize,
+}
+
+impl FakeSynthesizer {
+    /// Répond toujours `speech`.
+    pub fn new(speech: Speech) -> Self {
+        Self::with_speech(Some(speech))
+    }
+
+    /// Échoue à chaque appel.
+    pub fn failing() -> Self {
+        Self::with_speech(None)
+    }
+
+    fn with_speech(speech: Option<Speech>) -> Self {
+        Self {
+            speech,
+            texts: Mutex::new(Vec::new()),
+            delay: std::time::Duration::ZERO,
+            active: AtomicUsize::new(0),
+            max_active: AtomicUsize::new(0),
+        }
+    }
+
+    /// Synthèse lente : bloque le fil `delay` (temps réel) à chaque appel.
+    pub fn with_delay(mut self, delay: std::time::Duration) -> Self {
+        self.delay = delay;
+        self
+    }
+
+    /// Phrases reçues, dans l'ordre.
+    pub fn texts(&self) -> Vec<String> {
+        self.texts.lock().unwrap().clone()
+    }
+
+    /// Plus grand nombre de synthèses simultanées observé.
+    pub fn max_concurrent(&self) -> usize {
+        self.max_active.load(Ordering::SeqCst)
+    }
+}
+
+impl Synthesizer for FakeSynthesizer {
+    fn synthesize(&self, text: &str) -> anyhow::Result<Speech> {
+        self.texts.lock().unwrap().push(text.to_string());
+        let now = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.max_active.fetch_max(now, Ordering::SeqCst);
+        if !self.delay.is_zero() {
+            std::thread::sleep(self.delay);
+        }
+        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.speech
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("voix en panne"))
+    }
+}
+
+/// Horloge qui n'avance que sur demande.
+pub struct ManualClock {
+    start: std::time::Instant,
+    offset: Mutex<std::time::Duration>,
+}
+
+impl ManualClock {
+    pub fn new() -> Self {
+        Self {
+            start: std::time::Instant::now(),
+            offset: Mutex::new(std::time::Duration::ZERO),
+        }
+    }
+
+    pub fn advance(&self, d: std::time::Duration) {
+        *self.offset.lock().unwrap() += d;
+    }
+}
+
+impl Default for ManualClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl crate::brain::Clock for ManualClock {
+    fn now(&self) -> std::time::Instant {
+        self.start + *self.offset.lock().unwrap()
     }
 }

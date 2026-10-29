@@ -9,14 +9,14 @@ ne sont jamais enregistrées : seules les prises de « Jarvis » de l'enrôlemen
 
 ```bash
 sudo apt install libasound2-dev libclang-dev    # pour compiler
-scripts/download-models.sh all                  # modèles Whisper (small, base) et empreinte vocale
+scripts/download-models.sh all                  # Whisper (small, base), empreinte vocale, voix de Jarvis
 jarvisctl install                               # ou `jarvisctl update` ; copie aussi les bibliothèques
 ```
 
 Les modèles vont dans `~/.local/share/jarvis/models/`. Les bibliothèques de sherpa-onnx sont
 copiées dans `~/.local/lib/jarvis/`. Le script accepte aussi une seule cible : `small` (modèle
 Whisper par défaut, rapide et fiable sur ce PC), `base` (plus léger mais moins fiable en
-français, à éviter) ou `speaker` (empreinte vocale).
+français, à éviter), `speaker` (empreinte vocale) ou `voice` (voix de Jarvis).
 
 ## Premier enrôlement
 
@@ -80,10 +80,93 @@ au bout de 15 s, à l'arrêt du cerveau, ou à son redémarrage.
 
 ## Commandes vocales
 
-- « Jarvis, coupe l'écoute » (ou « coupe le micro », « arrête d'écouter »).
-- « Jarvis, réactive l'écoute » (ou « réactive le micro »).
+Commandes rapides, comprises sans IA (toujours précédées de « Jarvis ») :
 
-Pendant l'écoute coupée, les autres phrases ne sont ni exécutées ni journalisées.
+- Écoute : « coupe l'écoute » (ou « coupe le micro », « arrête d'écouter ») ; « réactive
+  l'écoute » (ou « réactive le micro »).
+- Musique et vidéo : « pause », « reprends », « suivant », « précédent », « plus fort »,
+  « moins fort », « qu'est-ce qui passe ? ».
+- Applications : « ouvre Spotify », « lance VS Code »…
+- Mode : « passe en mode local », « passe en mode en ligne », « statut ».
+- Alimentation, toujours confirmée par un « oui » : « mets le PC en veille », « redémarre le
+  PC », « éteins le PC ».
+- « annule » et « répète » (voir plus bas).
+
+Les autres phrases vont à l'IA du mode courant. Pendant l'écoute coupée, les autres phrases ne
+sont ni exécutées ni journalisées.
+
+## Voix et réponses
+
+Jarvis répond en majordome discret : une phrase brève, en te vouvoyant, et en te nommant
+de temps en temps (« Je mets le PC en veille, Monsieur ? »).
+
+**Bips** joués par l'oreille :
+
+- **réveil** (une note montante) : « Jarvis » est entendu, tu peux parler ;
+- **réussite** (deux notes montantes) : l'action est faite, avant la phrase de Jarvis ;
+- **échec** (deux notes graves descendantes) : l'action n'a pas pu se faire ; la raison est
+  toujours dite.
+
+**Veille, redémarrage et arrêt** demandent une confirmation : Jarvis pose la question (« Je mets
+le PC en veille, Monsieur ? ») et l'oreille écoute la réponse sans « Jarvis », 8 s au plus.
+Seule ta voix compte.
+
+- Oui : « oui », « ouais », « ok », « vas-y », « allez-y », « d'accord », « confirme »,
+  « fais-le ».
+- Non : « non », « annule », « laisse tomber », « surtout pas », « pas maintenant ».
+
+Toute autre phrase, le silence ou une autre voix : rien n'est fait. Après un « oui », Jarvis
+dit sa phrase, et la commande part 4 s plus tard, une fois la phrase dite.
+
+Un « oui » dure souvent moins d'une seconde, trop peu pour la vérification habituelle : sa voix
+est alors comparée à ton empreinte avec le seuil strict (il faut au moins 0,3 s de son). Si
+elle n'est pas reconnue, Jarvis ne fait rien et redemande une fois : « Je n'ai pas bien reconnu
+votre voix. Dites « oui, vas-y » pour confirmer, Monsieur. » ; un second échec annule. Une
+voix non reconnue peut toujours **annuler** (« non », « annule »), jamais confirmer ; toute
+autre phrase d'elle efface aussi la question (par prudence, une télévision peut donc annuler,
+jamais confirmer). Une phrase courte entendue plus de 3 minutes après ta dernière phrase
+reconnue est ignorée.
+
+**« Jarvis, annule »** (ou « laisse tomber ») efface la question en attente. **« Jarvis,
+répète »** (ou « tu peux répéter ? », « qu'est-ce que tu as dit ? ») redit la dernière réponse
+sans rien refaire ; si une question attend, elle est reposée et le délai de 8 s repart, y
+compris en réponse directe à la question (« répète » sans « Jarvis »). La question n'est
+reposée qu'**une fois** par action, voix mal reconnue comprise. Seule ta voix reconnue fait
+répéter : le « répète » d'une voix non reconnue est ignoré et annule la question.
+
+Avec `[speaker] enabled = false`, ou sans empreinte enregistrée, la voix n'est pas vérifiée :
+toute voix peut alors confirmer. Enregistre ton empreinte (`jarvis-ear enroll`) pour réserver
+les confirmations à ta voix.
+
+Par `jarvis-cli say`, veille, redémarrage et arrêt sont refusés (« Pour cela, demandez-le-moi
+à voix haute, Monsieur. ») : la confirmation se fait à la voix.
+
+Deux réglages dans `~/.config/jarvis/config.toml` (puis `jarvisctl restart`) :
+
+```toml
+# address = "Monsieur"            # nom par lequel Jarvis s'adresse à toi ; "" : jamais nommé
+# sound_only_for_success = false  # vrai : une commande rapide réussie n'est confirmée que par le bip
+```
+
+Avec `sound_only_for_success = true`, « Jarvis, suivant » donne le seul bip de réussite au lieu
+de « Bien. ». Un échec, une réponse de l'IA et une action confirmée par « oui » restent dits.
+
+## Voix de Jarvis
+
+Jarvis répond à voix haute avec la voix Piper « pierre » (`vits-piper-fr_FR-upmc-medium`,
+licence CC-BY-SA 4.0), calculée sur le PC par le cerveau, puis jouée par l'oreille.
+
+```bash
+scripts/download-models.sh voice    # 80 Mo, extrait dans ~/.local/share/jarvis/models/
+jarvisctl restart
+```
+
+Sans la voix (non téléchargée, désactivée ou en panne), le cerveau démarre quand même : les
+commandes s'exécutent et la réponse arrive en texte seul ; un avertissement est journalisé.
+Au premier lancement, les données d'espeak-ng (conversion du texte en sons) sont décompressées
+dans le dossier privé de la session : `/run/user/<uid>/piper-phonemize-espeak-ng-data/` (19 Mo,
+en mémoire, recréé à chaque ouverture de session). Le service du cerveau fixe pour cela
+`TMPDIR=%t` ; lancé à la main, il utilise `$TMPDIR` (par défaut `/tmp`).
 
 ## Fichiers créés
 
@@ -123,6 +206,13 @@ configuration et données, modèles compris).
 # threshold = 0.55          # phrase d'au moins 2 s
 # strict_threshold = 0.65   # phrase de 1 à 2 s
 # threads = 2
+
+[tts]
+# enabled = true
+# model_dir = "~/.local/share/jarvis/models/vits-piper-fr_FR-upmc-medium"
+# speaker = 1               # 1 = « pierre », 0 = « jessica »
+# speed = 1.0               # plus grand = plus rapide
+# threads = 2
 ```
 
 Si ta voix est refusée trop souvent, baisse `threshold` ; si d'autres voix passent, monte-le.
@@ -139,6 +229,7 @@ jarvisctl doctor
 Les lignes `!` concernent l'oreille (avertissements, pas d'échec) :
 
 - **Bibliothèques sherpa-onnx absentes** : `jarvisctl install` ou `jarvisctl update`.
+- **Voix de Jarvis absente** : `scripts/download-models.sh voice`, puis `jarvisctl restart`.
 - **Modèle Whisper ou d'empreinte absent** : `scripts/download-models.sh all`. Sans Whisper, le
   cerveau répond « La reconnaissance vocale n'est pas installée. »
 - **Mot d'éveil ou empreinte absents** : `jarvis-ear enroll`.

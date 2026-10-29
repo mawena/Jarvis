@@ -48,7 +48,7 @@ pub struct MediaSkill {
 
 const NO_PLAYER: &str = "Aucun lecteur n'est ouvert.";
 const NO_ACCESSIBLE_PLAYER: &str =
-    "Je ne vois aucun lecteur accessible. Les vidéos de Firefox (snap) ne me sont pas visibles.";
+    "Je ne vois aucun lecteur. Les vidéos de Firefox en snap me restent invisibles.";
 
 /// X11 media key GNOME handles for each command (used when no MPRIS player
 /// is reachable, e.g. a snap Firefox confined by AppArmor).
@@ -83,14 +83,14 @@ impl MediaSkill {
     fn send_media_key(&self, cmd: PlayerCommand) -> Reply {
         let args = ["key", media_key(cmd)].map(String::from);
         match self.runner.run("xdotool", &args) {
-            Ok(out) if out.success => Reply::new(""),
+            Ok(out) if out.success => Reply::done(""),
             Ok(_) => {
                 tracing::warn!("xdotool a échoué pour {}", media_key(cmd));
-                Reply::new(NO_PLAYER)
+                Reply::failed(NO_PLAYER)
             }
             Err(e) => {
                 tracing::warn!("xdotool indisponible : {e}");
-                Reply::new(NO_PLAYER)
+                Reply::failed(NO_PLAYER)
             }
         }
     }
@@ -105,7 +105,7 @@ impl MediaSkill {
             _ => false,
         };
         if already {
-            return Ok(Reply::new(""));
+            return Ok(Reply::done(""));
         }
         if let Err(e) = self.players.command(&player.bus_name, cmd).await {
             tracing::warn!(player = %player.bus_name, "commande {cmd:?} refusée : {e:#}");
@@ -116,11 +116,9 @@ impl MediaSkill {
             } else {
                 &player.identity
             };
-            return Ok(Reply::new(format!(
-                "Le lecteur {who} n'a pas accepté la commande."
-            )));
+            return Ok(Reply::failed(format!("{who} refuse la commande.")));
         }
-        Ok(Reply::new(""))
+        Ok(Reply::done(""))
     }
 
     async fn now_playing(&self) -> Result<Reply, SkillError> {
@@ -128,9 +126,9 @@ impl MediaSkill {
             return Ok(Reply::new(NO_ACCESSIBLE_PLAYER));
         };
         Ok(Reply::new(match (p.title, p.artist) {
-            (Some(title), Some(artist)) => format!("C'est {title} de {artist}."),
+            (Some(title), Some(artist)) => format!("C'est {title}, par {artist}."),
             (Some(title), None) => format!("C'est {title}."),
-            (None, _) => format!("Je ne sais pas ce qui passe sur {}.", p.identity),
+            (None, _) => format!("Je ne sais pas ce que joue {}.", p.identity),
         }))
     }
 
@@ -141,7 +139,7 @@ impl MediaSkill {
             .run("wpctl", &args)
             .map_err(|e| SkillError::Failed(format!("wpctl : {e}")))?;
         if out.success {
-            Ok(Reply::new(""))
+            Ok(Reply::done(""))
         } else {
             Err(SkillError::Failed("wpctl a échoué".into()))
         }
@@ -289,6 +287,7 @@ mod tests {
             },
         );
         let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Failed);
         assert_eq!(r.speech, "Aucun lecteur n'est ouvert.");
         assert!(p.sent.lock().unwrap().is_empty());
     }
@@ -297,6 +296,7 @@ mod tests {
     async fn volume_appelle_wpctl() {
         let (s, _, runner) = skill(vec![]);
         let r = s.call("volume_up", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Done);
         assert_eq!(r.speech, "");
         assert_eq!(
             runner.calls(),
@@ -319,7 +319,7 @@ mod tests {
             .call("media_now_playing", serde_json::json!({}))
             .await
             .unwrap();
-        assert_eq!(r.speech, "C'est Hello de Adele.");
+        assert_eq!(r.speech, "C'est Hello, par Adele.");
     }
 
     #[tokio::test]
@@ -405,7 +405,7 @@ mod tests {
         info.identity = "Firefox".into();
         let s = MediaSkill::new(Arc::new(FailingPlayers(info)), Arc::new(FakeRunner::new()));
         let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
-        assert_eq!(r.speech, "Le lecteur Firefox n'a pas accepté la commande.");
+        assert_eq!(r.speech, "Firefox refuse la commande.");
         assert!(!r.speech.contains("denied"));
     }
 
@@ -416,6 +416,6 @@ mod tests {
             .call("media_now_playing", serde_json::json!({}))
             .await
             .unwrap();
-        assert!(r.speech.starts_with("Je ne vois aucun lecteur accessible."));
+        assert!(r.speech.starts_with("Je ne vois aucun lecteur."));
     }
 }
