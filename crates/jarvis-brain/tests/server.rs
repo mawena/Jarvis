@@ -191,6 +191,7 @@ async fn server_listen_et_status_local_model() {
             audio: encode_pcm(&[1, 2, 3]),
             muted: false,
             follow_up: false,
+            ear: None,
         })
         .await;
     assert_eq!(
@@ -208,6 +209,7 @@ async fn server_listen_et_status_local_model() {
             audio: "!!".into(),
             muted: false,
             follow_up: false,
+            ear: None,
         })
         .await;
     assert!(matches!(r, ControlResponse::Error { .. }));
@@ -215,6 +217,26 @@ async fn server_listen_et_status_local_model() {
         ControlResponse::Status { local_model, .. } => assert_eq!(local_model, "qwen-test"),
         other => panic!("{other:?}"),
     }
+}
+
+#[tokio::test]
+async fn oreille_nommee_et_annonces_vides() {
+    let dir = tempfile::tempdir().unwrap();
+    let socket = start(dir.path()).await;
+    let mut c = Client::connect(&socket).await;
+    let r = c
+        .send(ControlRequest::Listen {
+            audio: encode_pcm(&[1, 2, 3]),
+            muted: false,
+            follow_up: false,
+            ear: Some("salon".into()),
+        })
+        .await;
+    assert!(matches!(r, ControlResponse::Heard { .. }), "{r:?}");
+    assert_eq!(
+        c.raw(r#"{"type":"announcements"}"#).await,
+        ControlResponse::Announcements { items: vec![] }
+    );
 }
 
 /// Une seconde d'audio (i16 16 kHz) dont le premier échantillon désigne l'empreinte factice.
@@ -354,6 +376,7 @@ async fn ecoute_renvoie_la_voix() {
             audio: encode_pcm(&[1, 2, 3]),
             muted: false,
             follow_up: false,
+            ear: None,
         })
         .await;
     assert_eq!(

@@ -256,6 +256,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             audio: String::new(),
             muted: self.muted,
             follow_up: self.follow_up,
+            ear: None,
         };
         match tokio::time::timeout(QUIT_TIMEOUT, self.brain.request(listen)).await {
             Ok(Ok(_)) => {}
@@ -353,6 +354,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     audio,
                     muted,
                     follow_up,
+                    ear: None,
                 })
                 .await;
             let _ = tx.send(Internal::Heard { result, muted });

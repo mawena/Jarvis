@@ -190,10 +190,12 @@ async fn respond(
             listen.wake().await;
             status(brain)
         }
+        // Le nom de l'oreille servira aux annonces (tâche 5).
         ControlRequest::Listen {
             audio,
             muted,
             follow_up,
+            ear: _,
         } => match decode_pcm(&audio) {
             Ok(samples) => {
                 voice
@@ -204,6 +206,10 @@ async fn respond(
                 message: "audio invalide".into(),
             },
         },
+        // Aucune annonce encore : le tableau des annonces arrive avec la tâche 5.
+        ControlRequest::Announcements { ear: _ } => {
+            ControlResponse::Announcements { items: vec![] }
+        }
         ControlRequest::EnrollVoice { samples } => enroll_voice(speaker, samples).await,
         ControlRequest::SetMode { mode } => match brain.set_mode(mode) {
             Ok(()) => status(brain),

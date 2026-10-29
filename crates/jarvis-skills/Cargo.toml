@@ -4,15 +4,17 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-test-util = []
+test-util = ["dep:tempfile"]
 
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+directories.workspace = true
 fuzzy-matcher.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tempfile = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
@@ -21,4 +23,5 @@ zbus.workspace = true
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
+toml.workspace = true
 wiremock.workspace = true

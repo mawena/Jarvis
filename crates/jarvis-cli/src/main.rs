@@ -53,6 +53,13 @@ fn main() -> ExitCode {
             }
             ExitCode::SUCCESS
         }
+        // Jamais demandées par la CLI ; dites telles quelles si elles arrivent.
+        Ok(ControlResponse::Announcements { items }) => {
+            for item in items {
+                println!("{}", item.speech);
+            }
+            ExitCode::SUCCESS
+        }
         Ok(ControlResponse::Error { message }) => fail(&message, 1),
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
             fail(NOT_RUNNING, 2)

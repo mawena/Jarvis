@@ -5,7 +5,8 @@ use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::stt::Transcriber;
 use crate::tts::{Speech, Synthesizer};
-use jarvis_skills::{Reply, Risk, Skill, SkillError, ToolSpec};
+use jarvis_skills::text::fold;
+use jarvis_skills::{Reply, Risk, Shortcut, Skill, SkillError, ToolSpec};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -102,6 +103,9 @@ pub struct FakeSkill {
     result: Mutex<Result<Reply, SkillError>>,
     delay: std::time::Duration,
     timeout: Option<std::time::Duration>,
+    /// Phrase (forme `fold`) et outil de son raccourci propre.
+    shortcut: Option<(String, Shortcut)>,
+    llm_tools: bool,
 }
 
 impl FakeSkill {
@@ -112,7 +116,28 @@ impl FakeSkill {
             result: Mutex::new(Ok(Reply::new("ok"))),
             delay: std::time::Duration::ZERO,
             timeout: None,
+            shortcut: None,
+            llm_tools: true,
         }
+    }
+
+    /// Raccourci propre (`Skill::shortcut`) : `phrase` (comparée après `fold`)
+    /// lance `tool` avec `args`.
+    pub fn with_shortcut(mut self, phrase: &str, tool: &str, args: serde_json::Value) -> Self {
+        self.shortcut = Some((
+            fold(phrase),
+            Shortcut {
+                tool: tool.to_string(),
+                args,
+            },
+        ));
+        self
+    }
+
+    /// Faux : aucun outil proposé à l'IA (`Skill::llm_tools` vide).
+    pub fn with_llm_tools(mut self, offered: bool) -> Self {
+        self.llm_tools = offered;
+        self
     }
 
     /// Délai propre à tous ses outils (`Skill::timeout`).
@@ -149,6 +174,19 @@ impl Skill for FakeSkill {
                 risk: Risk::Direct,
             })
             .collect()
+    }
+
+    fn llm_tools(&self) -> Vec<ToolSpec> {
+        if self.llm_tools {
+            self.tools()
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn shortcut(&self, text: &str) -> Option<Shortcut> {
+        let (phrase, shortcut) = self.shortcut.as_ref()?;
+        (fold(text) == *phrase).then(|| shortcut.clone())
     }
 
     fn timeout(&self, _tool: &str) -> Option<std::time::Duration> {

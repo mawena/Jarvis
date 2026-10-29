@@ -1,12 +1,18 @@
 //! Skill abstraction and command execution for Jarvis.
 
+pub mod agent;
+pub mod announce;
 pub mod apps;
 pub mod browser;
 pub mod power;
 pub mod runner;
 pub mod search;
+pub mod text;
 pub mod video;
 
+#[cfg(any(test, feature = "test-util"))]
+pub use announce::RecordingAnnouncer;
+pub use announce::{Announcer, Notice, NullAnnouncer};
 #[cfg(any(test, feature = "test-util"))]
 pub use runner::FakeRunner;
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
@@ -89,9 +95,30 @@ pub enum SkillError {
     Failed(String),
 }
 
+/// Outil choisi par le raccourci propre d'une compétence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Shortcut {
+    pub tool: String,
+    pub args: serde_json::Value,
+}
+
 #[async_trait::async_trait]
 pub trait Skill: Send + Sync {
+    /// Tous les outils, appelables par les raccourcis et l'IA.
     fn tools(&self) -> Vec<ToolSpec>;
+
+    /// Outils proposés à l'IA (par défaut : tous). Un outil absent ici n'est
+    /// lancé que par un raccourci.
+    fn llm_tools(&self) -> Vec<ToolSpec> {
+        self.tools()
+    }
+
+    /// Raccourci propre à la compétence, essayé après les raccourcis du cerveau
+    /// et avant l'IA, pour une voix vérifiée ou du texte tapé seulement. `text` est
+    /// la phrase d'origine (casse, accents) : la compétence la normalise elle-même.
+    fn shortcut(&self, _text: &str) -> Option<Shortcut> {
+        None
+    }
 
     /// Question posée avant un outil `Risky` (« Je mets le PC en veille ? »).
     /// `None` : le cerveau formule une question générale.
