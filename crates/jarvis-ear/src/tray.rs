@@ -146,6 +146,17 @@ impl ksni::Tray for JarvisTray {
         "Jarvis".into()
     }
 
+    fn watcher_online(&self) {
+        tracing::info!("zone de notification disponible : icône affichée");
+    }
+
+    /// Sans zone de notification (pas encore là au démarrage de la session, ou GNOME Shell
+    /// qui redémarre), l'oreille continue et l'icône revient quand la zone réapparaît.
+    fn watcher_offline(&self, reason: ksni::OfflineReason) -> bool {
+        tracing::warn!("zone de notification absente, icône en attente : {reason:?}");
+        true
+    }
+
     fn icon_name(&self) -> String {
         icon_for(&self.state).into()
     }

@@ -10,7 +10,8 @@ une scène d'Iron Man sur YouTube), jouée sur un autre appareil (téléphone) p
 
 **Avant de commencer :**
 
-- [ ] La [mise à jour](README.md#avant-tout-essai--mise-à-jour) est faite : `jarvis-ear` tourne.
+- [ ] La [mise à jour](README.md#avant-tout-essai--mise-à-jour) est faite : l'oreille tourne en
+  service (icône Jarvis en haut de l'écran).
 - [ ] Le journal du cerveau est ouvert, avec seulement les lignes utiles :
 
   ```bash

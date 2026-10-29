@@ -6,6 +6,7 @@ mod client;
 mod config;
 mod enroll;
 mod playback;
+mod service;
 mod sounds;
 mod tray;
 
@@ -28,6 +29,9 @@ use crate::tray::{BrainLink, JarvisTray, TrayCommand, TrayState};
 #[derive(Parser)]
 #[command(name = "jarvis-ear", version, about = "Oreille de Jarvis")]
 struct Cli {
+    /// Écoute même si le service jarvis-ear tourne déjà (deux oreilles).
+    #[arg(long)]
+    force: bool,
     #[command(subcommand)]
     command: Option<Command>,
 }
@@ -35,7 +39,11 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Écoute le micro (commande par défaut).
-    Run,
+    Run {
+        /// Écoute même si le service jarvis-ear tourne déjà (deux oreilles).
+        #[arg(long)]
+        force: bool,
+    },
     /// Enregistre le mot d'éveil, puis l'empreinte vocale.
     Enroll {
         /// Nombre de prises de « Jarvis ».
@@ -48,21 +56,42 @@ enum Command {
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().command.unwrap_or(Command::Run) {
-        Command::Run => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()?
-            .block_on(run())?,
+    let cli = Cli::parse();
+    match cli.command.unwrap_or(Command::Run { force: false }) {
+        Command::Run { force } => {
+            refuse_if_service_running(cli.force || force);
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?
+                .block_on(run())?
+        }
         Command::Enroll { count, voice_only } => enroll::run(count, voice_only)?,
     }
     Ok(())
 }
 
+/// Lancée à la main alors que le service tourne : message clair et code 1.
+fn refuse_if_service_running(force: bool) {
+    let by_systemd = service::started_by_systemd(|name| std::env::var_os(name));
+    // Le service lui-même ne s'interroge pas : il est forcément actif à son démarrage.
+    if by_systemd || force {
+        return;
+    }
+    let active = service::is_active(&service::RealSystemctl);
+    if service::refuse_second_ear(active, by_systemd, force) {
+        eprintln!("{}", service::ALREADY_RUNNING);
+        std::process::exit(1);
+    }
+}
+
 async fn run() -> anyhow::Result<()> {
+    use std::io::IsTerminal;
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()),
         )
+        // Dans le journal (service), pas de codes de couleur.
+        .with_ansi(std::io::stdout().is_terminal())
         .init();
 
     let config = EarConfig::load(&EarConfig::default_path()?)?;
@@ -85,13 +114,15 @@ async fn run() -> anyhow::Result<()> {
     });
 
     // L'icône est facultative : sans zone de notification, l'oreille fonctionne quand même.
+    // En service, l'oreille peut démarrer avant la zone de notification de GNOME (extension
+    // AppIndicator) : l'icône s'y inscrit dès qu'elle apparaît.
     let tray_handle = {
         use ksni::TrayMethods;
         let tray = JarvisTray {
             state: tray_tx.borrow().clone(),
             commands: commands.clone(),
         };
-        match tray.spawn().await {
+        match tray.assume_sni_available(true).spawn().await {
             Ok(handle) => Some(handle),
             Err(e) => {
                 tracing::warn!("icône de notification indisponible : {e}");

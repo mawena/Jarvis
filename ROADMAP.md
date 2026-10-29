@@ -115,7 +115,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 ## Phase 9 : mise en service
 - [ ] 9.1 Rédiger le plan de la phase 9
-- [ ] 9.2 Service systemd utilisateur pour l'oreille du PC (celui du cerveau est fait en phase 1, `jarvisctl` à étendre)
+- [x] 9.2 Service systemd utilisateur pour l'oreille du PC (celui du cerveau est fait en phase 1, `jarvisctl` à étendre) — fait en avance, le 2026-10-29 : `jarvis-ear.service` installé par `jarvisctl` (cibles `cerveau` / `oreille`, `logs --oreille`), pause du service pendant l'enrôlement, refus d'une deuxième oreille lancée à la main ; voir `docs/installation.md` et `docs/oreille.md`
 - [ ] 9.3 Statut détaillé dans l'icône : oreilles connectées, tâches d'agent en cours
 - [ ] 9.4 Option `inhibit_sleep_on_ac`
 - [ ] 9.5 Mesure des critères de réussite (vitesse, fausses détections, doubles exécutions)
