@@ -72,6 +72,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles) — [fiche d'essai](docs/essais/essai-3.8-voix.md)
 
 ## Phase 4 : oreilles en réseau
+*Plan : [phase 4](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md), branche `feature/oreilles-reseau` (à venir, après la phase 7)*
+
 - [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
 - [ ] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`)
 - [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau
@@ -92,9 +94,9 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 5.7 Essai de bout en bout depuis une autre pièce
 
 ## Phase 6 : recherche et vidéos
-- [x] 6.1 Rédiger le plan de la phase 6 ([plan](docs/superpowers/plans/2026-10-29-phase-6-recherche.md))
-*Plan : [phase 6](docs/superpowers/plans/2026-10-29-phase-6-recherche.md), branche `feature/recherche`*
+*Plan : [phase 6](docs/superpowers/plans/2026-10-29-phase-6-recherche.md), branche `feature/recherche` (fusionnée dans `develop`)*
 
+- [x] 6.1 Rédiger le plan de la phase 6 ([plan](docs/superpowers/plans/2026-10-29-phase-6-recherche.md))
 - [x] 6.2 SearXNG auto-hébergé dans Docker — `jarvisctl searx up|down|status`, `127.0.0.1:8888` seulement, vérifié par `doctor`
 - [x] 6.3 Compétence recherche avec résumé vocal court (IA du mode actif) — Ollama seul en mode local (repli sur un extrait au-delà de 10 s), Claude en ligne
 - [x] 6.4 « Ouvre les résultats » dans le navigateur du PC (page de résultats, ou le n-ième lien)
@@ -103,12 +105,18 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 6.7 Essai réel avec Charles (Charles) — [fiche d'essai](docs/essais/essai-6.7-recherche.md)
 
 ## Phase 7 : agent de code
+*Plan : [phase 7](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md), branche `feature/agent-de-code` (en cours)*
+
 - [x] 7.1 Rédiger le plan de la phase 7 ([plan](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md))
 - [ ] 7.2 Liste des projets connus dans la configuration
 - [ ] 7.3 Lancement de Claude Code en arrière-plan (`claude -p`), sans confirmation
 - [ ] 7.4 Garde-fous : branche `feature/*` dédiée, rien de poussé ni fusionné, refus si modifications non enregistrées
 - [ ] 7.5 Suivi (« où en est la tâche ? ») et arrêt (« arrête la tâche »)
 - [ ] 7.6 Annonce de fin sur l'oreille la plus récemment active et notification de bureau
+- [x] 7.7 Socle (tâche 1 du plan) : protocole (oreille d'origine de la phrase, annonces), réglages `[agent]`, raccourcis propres à une compétence jamais proposés à l'IA
+- [ ] 7.8 `jarvisctl` : `doctor` vérifie Claude Code et les projets, avertissement au redémarrage si une tâche tourne, `docs/agent.md`
+- [ ] 7.9 Relecture de la phase 7 et corrections
+- [ ] 7.10 Essai réel avec Charles sur un projet d'essai (Charles) — fiche d'essai à venir
 
 ## Phase 8 : personnes et rôles
 - [ ] 8.1 Rédiger le plan de la phase 8
