@@ -101,8 +101,8 @@ Démarrage : `git flow feature start agent-de-code` depuis `develop`.
   - `server.rs` : `Announcements` → `Announcements { items: vec![] }` (rempli en tâche 5) ; `Listen.ear` accepté et ignoré.
   - `testing::FakeSkill::with_shortcut(phrase, tool, args)` et `with_llm_tools(bool)`.
 
-- [ ] Tests : `listen_sans_ear_reste_lisible`, `announcements_aller_retour`, `annonce_sans_audio_lisible`, `fold_retire_accents_et_ponctuation`, `fold_garde_jarvis`, `raccourci_de_competence_apres_les_raccourcis`, `raccourci_de_competence_introuvable_sans_ia` (l'IA n'est pas appelée), `voix_non_verifiee_ignore_les_raccourcis_de_competence`, `outils_hors_ia_non_proposes`, `raccourci_de_competence_jamais_en_bip_seul`, `config_agent_defauts`, `config_projets_lus`.
-- [ ] Implémenter ; tout compile (`ear: None` partout) ; `scripts/check.sh` vert ; commit `feat: socle de l'agent de code`.
+- [x] Tests : `listen_sans_ear_reste_lisible`, `announcements_aller_retour`, `annonce_sans_audio_lisible`, `fold_retire_accents_et_ponctuation`, `fold_garde_jarvis`, `raccourci_de_competence_apres_les_raccourcis`, `raccourci_de_competence_introuvable_sans_ia` (l'IA n'est pas appelée), `voix_non_verifiee_ignore_les_raccourcis_de_competence`, `outils_hors_ia_non_proposes`, `raccourci_de_competence_jamais_en_bip_seul`, `config_agent_defauts`, `config_projets_lus`.
+- [x] Implémenter ; tout compile (`ear: None` partout) ; `scripts/check.sh` vert ; commit `feat: socle de l'agent de code`.
 
 ### Task 2 : projets connus, phrases, registre des tâches (7.2, 7.5)
 

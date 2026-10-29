@@ -1,5 +1,6 @@
 use anyhow::Context;
 use jarvis_protocol::Mode;
+use jarvis_skills::agent::AgentSettings;
 use jarvis_skills::search::SearchSettings;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
@@ -21,6 +22,8 @@ pub struct Config {
     pub tts: TtsConfig,
     /// Recherche sur internet (section `[search]`).
     pub search: SearchSettings,
+    /// Agent de code (section `[agent]`).
+    pub agent: AgentSettings,
 }
 
 impl Default for Config {
@@ -36,6 +39,7 @@ impl Default for Config {
             speaker: SpeakerConfig::default(),
             tts: TtsConfig::default(),
             search: SearchSettings::default(),
+            agent: AgentSettings::default(),
         }
     }
 }
@@ -386,6 +390,72 @@ mod tests {
         assert_eq!(c.search.language, "fr-FR");
         assert_eq!(c.search.local_summary_model, "");
         assert_eq!(c.local, LocalLlmConfig::default());
+    }
+
+    #[test]
+    fn config_agent_defauts() {
+        let c = Config::load(Path::new("/inexistant/config.toml")).unwrap();
+        let a = &c.agent;
+        assert_eq!(*a, AgentSettings::default());
+        assert!(a.enabled);
+        assert_eq!(a.claude_path, PathBuf::from("~/.local/bin/claude"));
+        assert_eq!((a.max_minutes, a.idle_minutes, a.max_tasks), (45, 30, 2));
+        assert_eq!(a.model, "");
+        assert_eq!(a.max_budget_usd, 0.0);
+        assert!(!a.pass_api_key);
+        assert!(a.commit_at_end);
+        assert_eq!(
+            a.worktree_dir,
+            PathBuf::from("~/.local/share/jarvis/worktrees")
+        );
+        assert_eq!(
+            a.cargo_target_dir,
+            PathBuf::from("~/.cache/jarvis/agent-target")
+        );
+        assert_eq!(
+            a.extra_path,
+            [PathBuf::from("~/.cargo/bin"), PathBuf::from("~/.local/bin")]
+        );
+        assert!(a.extra_allowed_tools.is_empty());
+        assert_eq!(a.projects.len(), 1);
+        assert_eq!(a.projects[0].name, "Jarvis");
+        assert_eq!(a.projects[0].aliases, ["l'assistant"]);
+        assert_eq!(a.projects[0].base, None);
+    }
+
+    #[test]
+    fn config_projets_lus() {
+        let (_d, p) = write(
+            "[agent]\nmax_tasks = 1\npass_api_key = true\n\
+             extra_allowed_tools = [\"Bash(make*)\"]\n\
+             [[agent.projects]]\nname = \"Jarvis\"\npath = \"~/Work/Mawena/Projects/Jarvis\"\n\
+             aliases = [\"l'assistant\"]\n\
+             [[agent.projects]]\nname = \"Mawena\"\npath = \"/srv/mawena\"\nbase = \"dev\"\n\
+             extra_allowed_tools = [\"Bash(npm test*)\"]\n",
+        );
+        let c = Config::load(&p).unwrap();
+        let a = &c.agent;
+        assert_eq!(a.max_tasks, 1);
+        assert!(a.pass_api_key);
+        assert_eq!(a.max_minutes, 45);
+        assert_eq!(a.extra_allowed_tools, ["Bash(make*)"]);
+        let names: Vec<&str> = a.projects.iter().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Jarvis", "Mawena"]);
+        let mawena = &a.projects[1];
+        assert_eq!(mawena.path, PathBuf::from("/srv/mawena"));
+        assert_eq!(mawena.base.as_deref(), Some("dev"));
+        assert!(mawena.aliases.is_empty());
+        assert_eq!(mawena.extra_allowed_tools, ["Bash(npm test*)"]);
+        // `~/` développé à la demande.
+        if let Some(home) = std::env::var_os("HOME") {
+            let r = a.resolved();
+            assert_eq!(
+                r.projects[0].path,
+                PathBuf::from(home).join("Work/Mawena/Projects/Jarvis")
+            );
+            assert_eq!(r.projects[1].path, PathBuf::from("/srv/mawena"));
+        }
+        assert_eq!(c.search, SearchSettings::default());
     }
 
     #[test]

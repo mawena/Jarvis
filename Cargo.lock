@@ -1596,6 +1596,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "directories",
  "fuzzy-matcher",
  "reqwest",
  "serde",
@@ -1603,6 +1604,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "toml",
  "tracing",
  "wiremock",
  "zbus 6.1.0",
@@ -1615,6 +1617,7 @@ dependencies = [
  "anyhow",
  "clap",
  "jarvis-protocol",
+ "jarvis-skills",
  "serde_json",
  "tempfile",
  "toml",

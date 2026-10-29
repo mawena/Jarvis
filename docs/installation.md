@@ -93,6 +93,18 @@ jarvisctl searx down     # arrête le conteneur, garde le cache et les réglages
 - `jarvisctl doctor` vérifie Docker, le conteneur, `/healthz`, le format JSON, le port (lié à
   `127.0.0.1` seulement), `yt-dlp` et `xdg-open`. Ce ne sont que des avertissements.
 
+## Agent de code (Claude Code)
+
+« Jarvis, finis les tests du projet Jarvis » confie la tâche à Claude Code, en arrière-plan,
+sur une branche `feature/jarvis-…` dans un worktree à part ; rien n'est poussé ni fusionné.
+Facultatif : il faut Claude Code connecté au compte (`~/.local/bin/claude`), `notify-send`
+(`sudo apt install libnotify-bin`) et les projets déclarés dans `[[agent.projects]]`.
+`jarvisctl doctor` vérifie le tout (avertissements seulement). `jarvisctl restart`, `stop` et
+`update` préviennent quand une tâche en cours sera interrompue.
+
+Configuration, phrases, garde-fous et façon de récupérer le travail :
+[docs/agent.md](agent.md).
+
 ## Clé API Claude
 
 ```bash

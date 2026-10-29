@@ -64,6 +64,16 @@ impl Paths {
         }
     }
 
+    /// Registre des tâches de l'agent de code, tenu par le cerveau : comme lui
+    /// (`ProjectDirs`), `$XDG_STATE_HOME/jarvis/tasks` si la variable est un chemin
+    /// absolu, sinon `~/.local/state/jarvis/tasks`.
+    pub fn tasks_dir(&self, xdg_state_home: Option<&str>) -> PathBuf {
+        match xdg_state_home.map(Path::new) {
+            Some(dir) if dir.is_absolute() => dir.join("jarvis/tasks"),
+            _ => self.state_dir.join("tasks"),
+        }
+    }
+
     /// Le modèle du mot d'éveil existe : la condition de démarrage de l'oreille est remplie.
     pub fn wakeword_enrolled(&self) -> bool {
         self.data_dir.join(WAKEWORD_FILE).is_file()

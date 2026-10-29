@@ -1,5 +1,6 @@
 use anyhow::Context;
-use jarvis_brain::brain::Brain;
+use jarvis_brain::announce::AnnouncementBoard;
+use jarvis_brain::brain::{Brain, SystemClock};
 use jarvis_brain::config::{Config, LocalLlmConfig};
 use jarvis_brain::ducking::{Ducker, WpctlDucker};
 use jarvis_brain::listen::{ListenService, NoTranscriber};
@@ -7,18 +8,22 @@ use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::persona::Persona;
-use jarvis_brain::server::{SpeakerState, serve_with_voice};
+use jarvis_brain::server::{SpeakerState, serve_with_board};
 use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
 use jarvis_brain::stt::{Transcriber, whisper::WhisperTranscriber};
 use jarvis_brain::summarizer::{ModeSummarizer, Rewarmer, WarmUp, separate_summary_model};
 use jarvis_brain::tts::{Voice, piper::PiperSynthesizer};
 use jarvis_protocol::Mode;
+use jarvis_skills::agent::registry::Registry;
+use jarvis_skills::agent::{AgentSkill, recover_interrupted};
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaSkill, MprisPlayers};
 use jarvis_skills::search::{SearchSkill, SearxClient};
 use jarvis_skills::video::VideoSkill;
 use jarvis_skills::{Skill, SystemRunner, ToolSpec};
+use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::signal::unix::{SignalKind, signal};
 use tracing::{info, warn};
 
@@ -40,6 +45,41 @@ async fn main() -> anyhow::Result<()> {
         )),
         Arc::new(jarvis_skills::power::PowerSkill::new(runner.clone())),
     ];
+
+    // Annonces hors réponse (fin d'une tâche d'agent) : notification tout de suite,
+    // voix relevée par l'oreille la plus récemment active.
+    let board = Arc::new(AnnouncementBoard::new(
+        runner.clone(),
+        Arc::new(SystemClock),
+    ));
+    match Registry::open(tasks_dir()) {
+        Ok(registry) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs());
+            let interrupted = recover_interrupted(&registry, board.as_ref(), now);
+            if interrupted > 0 {
+                warn!(
+                    nombre = interrupted,
+                    "tâches d'agent interrompues par le redémarrage"
+                );
+            }
+            registry.prune(50);
+            if config.agent.enabled {
+                skills.push(Arc::new(AgentSkill::new(
+                    config.agent.clone(),
+                    runner.clone(),
+                    board.clone(),
+                    registry,
+                )));
+                info!(projets = config.agent.projects.len(), "agent de code prêt");
+            }
+        }
+        Err(e) => warn!(
+            erreur = %e,
+            "registre des tâches illisible : agent de code désactivé"
+        ),
+    }
     let local = Arc::new(OllamaBackend::new(&config.local, &config.address));
     let online = Arc::new(ClaudeBackend::from_env(&config.online, &config.address));
 
@@ -178,7 +218,7 @@ async fn main() -> anyhow::Result<()> {
     let socket = jarvis_protocol::socket_path();
     let mut sigterm = signal(SignalKind::terminate()).context("signal SIGTERM")?;
     let result = tokio::select! {
-        r = serve_with_voice(brain, listen, speaker, voice, &socket) => r,
+        r = serve_with_board(brain, listen, speaker, voice, board, &socket) => r,
         _ = tokio::signal::ctrl_c() => Ok(()),
         _ = sigterm.recv() => Ok(()),
     };
@@ -190,4 +230,15 @@ async fn main() -> anyhow::Result<()> {
         info!("cerveau arrêté");
     }
     result
+}
+
+/// Registre des tâches de l'agent : `~/.local/state/jarvis/tasks`.
+fn tasks_dir() -> PathBuf {
+    match directories::ProjectDirs::from("", "", "jarvis") {
+        Some(dirs) => dirs
+            .state_dir()
+            .unwrap_or_else(|| dirs.data_local_dir())
+            .join("tasks"),
+        None => PathBuf::from(".local/state/jarvis/tasks"),
+    }
 }
