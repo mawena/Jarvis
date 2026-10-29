@@ -780,6 +780,7 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         )?;
     }
     ear_diagnostics(paths, sys, out)?;
+    crate::searx::diagnostics(paths, sys, out)?;
     Ok(if failures > 0 { 1 } else { 0 })
 }
 
@@ -930,47 +931,9 @@ pub fn set_api_key(paths: &Paths, key: &str, out: &mut dyn Write) -> Result<()> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::system::Output;
+    use crate::system::fake::Fake;
     use jarvis_protocol::Mode;
-    use std::cell::RefCell;
     use std::io;
-
-    #[derive(Default)]
-    struct Fake {
-        cmds: RefCell<Vec<String>>,
-        replies: HashMap<String, (i32, String)>,
-        http: HashMap<String, String>,
-        brain: Option<(Mode, String, String)>,
-        path: Option<String>,
-    }
-
-    impl System for Fake {
-        fn run(&self, prog: &str, args: &[&str]) -> io::Result<Output> {
-            let cmd = format!("{prog} {}", args.join(" "));
-            self.cmds.borrow_mut().push(cmd.clone());
-            let (code, stdout) = self
-                .replies
-                .get(&cmd)
-                .cloned()
-                .unwrap_or((0, String::new()));
-            Ok(Output { code, stdout })
-        }
-        fn run_inherit(&self, prog: &str, args: &[&str], _: Option<&Path>) -> io::Result<i32> {
-            self.cmds
-                .borrow_mut()
-                .push(format!("{prog} {}", args.join(" ")));
-            Ok(0)
-        }
-        fn http_get(&self, _: &str, path: &str) -> Option<String> {
-            self.http.get(path).cloned()
-        }
-        fn brain_status(&self) -> Option<(Mode, String, String)> {
-            self.brain.clone()
-        }
-        fn env_var(&self, _: &str) -> Option<String> {
-            self.path.clone()
-        }
-    }
 
     fn setup() -> (tempfile::TempDir, Paths) {
         let home = tempfile::tempdir().unwrap();

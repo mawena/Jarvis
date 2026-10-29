@@ -247,3 +247,113 @@ text = "est-ce que tu peux lancer spotify"
 tool = "app_launch"
 args = { name = "spotify" }
 fast = true
+
+# Recherche, résultats et vidéos (phase 6).
+
+[[phrase]]
+text = "cherche la météo de demain"
+tool = "web_search"
+args = { query = "la météo de demain" }
+fast = true
+
+[[phrase]]
+text = "Jarvis, cherche la météo à Lomé s'il te plaît"
+tool = "web_search"
+args = { query = "la météo à Lomé" }
+fast = true
+
+[[phrase]]
+text = "recherche sur internet les horaires du TER"
+tool = "web_search"
+args = { query = "les horaires du TER" }
+fast = true
+
+[[phrase]]
+text = "cherche le prix du cacao sur internet"
+tool = "web_search"
+args = { query = "le prix du cacao" }
+fast = true
+
+[[phrase]]
+text = "fais-moi une recherche sur Kofi Annan"
+tool = "web_search"
+args = { query = "Kofi Annan" }
+fast = true
+
+[[phrase]]
+text = "trouve-moi des infos sur la Coupe d'Afrique"
+tool = "web_search"
+args = { query = "la Coupe d'Afrique" }
+fast = true
+
+[[phrase]]
+text = "ouvre les résultats"
+tool = "open_results"
+args = {}
+fast = true
+
+[[phrase]]
+text = "montre-moi les liens"
+tool = "open_results"
+args = {}
+fast = true
+
+[[phrase]]
+text = "ouvre le deuxième résultat"
+tool = "open_results"
+args = { index = 2 }
+fast = true
+
+[[phrase]]
+text = "ouvre le résultat numéro 3"
+tool = "open_results"
+args = { index = 3 }
+fast = true
+
+[[phrase]]
+text = "lance la vidéo de Squeezie"
+tool = "play_video"
+args = { query = "Squeezie" }
+fast = true
+
+[[phrase]]
+text = "mets une vidéo de chats"
+tool = "play_video"
+args = { query = "chats" }
+fast = true
+
+[[phrase]]
+text = "lance Stromae sur YouTube"
+tool = "play_video"
+args = { query = "Stromae" }
+fast = true
+
+[[phrase]]
+text = "lance la bande-annonce de Dune"
+tool = "play_video"
+args = { query = "bande-annonce de Dune" }
+fast = true
+
+[[phrase]]
+text = "j'aimerais savoir ce qui se passe à Lomé aujourd'hui"
+tool = "web_search"
+args = { query = "ce qui se passe à Lomé aujourd'hui" }
+fast = false
+
+[[phrase]]
+text = "qu'est-ce qu'on dit sur internet du nouveau téléphone de Samsung"
+tool = "web_search"
+args = { query = "nouveau téléphone Samsung" }
+fast = false
+
+[[phrase]]
+text = "trouve-moi un tuto vidéo pour changer une roue"
+tool = "play_video"
+args = { query = "tuto changer une roue" }
+fast = false
+
+[[phrase]]
+text = "affiche-moi les liens de tout à l'heure"
+tool = "open_results"
+args = {}
+fast = false

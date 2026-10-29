@@ -1,5 +1,6 @@
 mod ops;
 mod paths;
+mod searx;
 mod system;
 
 use clap::{Parser, Subcommand};
@@ -91,6 +92,21 @@ enum Cmd {
     SetApiKey { key: Option<String> },
     /// Recompile depuis le dépôt source, réinstalle et redémarre
     Update,
+    /// Moteur de recherche SearXNG (dans Docker)
+    Searx {
+        #[command(subcommand)]
+        action: SearxCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum SearxCmd {
+    /// Écrit les fichiers, démarre le conteneur et attend qu'il réponde
+    Up,
+    /// Arrête le conteneur (garde le cache et les réglages)
+    Down,
+    /// Affiche l'état de SearXNG (code 3 s'il ne répond pas)
+    Status,
 }
 
 fn main() -> ExitCode {
@@ -173,6 +189,11 @@ fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Disable { service } => verb(&paths, &sys, "disable", service, &mut out),
         Cmd::Status { service } => ops::status(&paths, &sys, &ops::targets(service), &mut out),
         Cmd::Doctor => ops::doctor(&paths, &sys, &mut out),
+        Cmd::Searx { action } => match action {
+            SearxCmd::Up => searx::up(&paths, &sys, &mut out),
+            SearxCmd::Down => searx::down(&paths, &sys, &mut out),
+            SearxCmd::Status => searx::status(&paths, &sys, &mut out),
+        },
         Cmd::Update => {
             ops::update(&paths, &sys, &mut out)?;
             Ok(0)
@@ -244,6 +265,22 @@ mod tests {
             }
         ));
         assert!(Cli::try_parse_from(["jarvisctl", "start", "nez"]).is_err());
+    }
+
+    #[test]
+    fn sous_commandes_de_searx() {
+        for (arg, attendu) in [("up", "Up"), ("down", "Down"), ("status", "Status")] {
+            let Cmd::Searx { action } = parse(&["searx", arg]) else {
+                panic!("{arg}")
+            };
+            let nom = match action {
+                SearxCmd::Up => "Up",
+                SearxCmd::Down => "Down",
+                SearxCmd::Status => "Status",
+            };
+            assert_eq!(nom, attendu);
+        }
+        assert!(Cli::try_parse_from(["jarvisctl", "searx"]).is_err());
     }
 
     #[test]

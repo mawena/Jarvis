@@ -68,6 +68,19 @@ const COMMAND_WORDS: &[&str] = &[
     "appli",
     "calculatrice",
     "mode",
+    // Recherche et vidéos.
+    "cherche",
+    "chercher",
+    "recherche",
+    "rechercher",
+    "video",
+    "videos",
+    "youtube",
+    "internet",
+    "web",
+    "resultat",
+    "resultats",
+    "google",
 ];
 
 /// Mots qui, en tête de phrase, annoncent une question ou une demande de discussion.
@@ -196,6 +209,22 @@ mod tests {
             "est-ce que tu peux remettre la précédente ?",
             "diminue le volume",
             "joue de la musique",
+        ] {
+            assert_eq!(classify(p), Route::Command, "{p}");
+        }
+    }
+
+    #[test]
+    fn recherche_et_video_sont_des_commandes() {
+        for p in [
+            "trouve-moi une vidéo de chats",
+            "qu'est-ce qu'on dit sur internet de Rust ?",
+            "cherche la météo de demain",
+            "recherche les horaires du train",
+            "ouvre les résultats",
+            "lance une vidéo YouTube",
+            "regarde sur le web",
+            "fais une recherche Google",
         ] {
             assert_eq!(classify(p), Route::Command, "{p}");
         }

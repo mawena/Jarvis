@@ -14,6 +14,9 @@ pub struct FakeLlm {
     response: Mutex<Result<Understanding, LlmError>>,
     calls: AtomicUsize,
     tools: Mutex<Vec<String>>,
+    completion: Mutex<Result<String, LlmError>>,
+    completions: AtomicUsize,
+    prompt: Mutex<Option<(String, String)>>,
 }
 
 impl FakeLlm {
@@ -22,7 +25,28 @@ impl FakeLlm {
             response: Mutex::new(response),
             calls: AtomicUsize::new(0),
             tools: Mutex::new(Vec::new()),
+            completion: Mutex::new(Err(LlmError::BadResponse(
+                "complétion non programmée".into(),
+            ))),
+            completions: AtomicUsize::new(0),
+            prompt: Mutex::new(None),
         }
+    }
+
+    /// Réponse programmée de `complete` (résumé).
+    pub fn with_completion(self, completion: Result<String, LlmError>) -> Self {
+        *self.completion.lock().unwrap() = completion;
+        self
+    }
+
+    /// Nombre d'appels à `complete`.
+    pub fn completions(&self) -> usize {
+        self.completions.load(Ordering::SeqCst)
+    }
+
+    /// Consigne et message du dernier appel à `complete`.
+    pub fn last_prompt(&self) -> Option<(String, String)> {
+        self.prompt.lock().unwrap().clone()
     }
 
     /// Noms des outils reçus lors du dernier appel.
@@ -42,11 +66,32 @@ impl LlmBackend for FakeLlm {
         self.calls.fetch_add(1, Ordering::SeqCst);
         match &*self.response.lock().unwrap() {
             Ok(u) => Ok(u.clone()),
-            Err(LlmError::Unreachable(m)) => Err(LlmError::Unreachable(m.clone())),
-            Err(LlmError::BadResponse(m)) => Err(LlmError::BadResponse(m.clone())),
-            Err(LlmError::MissingApiKey(m)) => Err(LlmError::MissingApiKey(m.clone())),
-            Err(LlmError::Rejected(m)) => Err(LlmError::Rejected(m.clone())),
+            Err(e) => Err(copy_err(e)),
         }
+    }
+
+    async fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        _max_tokens: u32,
+    ) -> Result<String, LlmError> {
+        self.completions.fetch_add(1, Ordering::SeqCst);
+        *self.prompt.lock().unwrap() = Some((system.to_string(), user.to_string()));
+        match &*self.completion.lock().unwrap() {
+            Ok(t) => Ok(t.clone()),
+            Err(e) => Err(copy_err(e)),
+        }
+    }
+}
+
+/// `LlmError` n'est pas `Clone` : copie à la main.
+fn copy_err(e: &LlmError) -> LlmError {
+    match e {
+        LlmError::Unreachable(m) => LlmError::Unreachable(m.clone()),
+        LlmError::BadResponse(m) => LlmError::BadResponse(m.clone()),
+        LlmError::MissingApiKey(m) => LlmError::MissingApiKey(m.clone()),
+        LlmError::Rejected(m) => LlmError::Rejected(m.clone()),
     }
 }
 
@@ -56,6 +101,7 @@ pub struct FakeSkill {
     calls: Mutex<Vec<(String, serde_json::Value)>>,
     result: Mutex<Result<Reply, SkillError>>,
     delay: std::time::Duration,
+    timeout: Option<std::time::Duration>,
 }
 
 impl FakeSkill {
@@ -65,7 +111,14 @@ impl FakeSkill {
             calls: Mutex::new(Vec::new()),
             result: Mutex::new(Ok(Reply::new("ok"))),
             delay: std::time::Duration::ZERO,
+            timeout: None,
         }
+    }
+
+    /// Délai propre à tous ses outils (`Skill::timeout`).
+    pub fn with_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
     }
 
     pub fn with_result(self, result: Result<Reply, SkillError>) -> Self {
@@ -96,6 +149,10 @@ impl Skill for FakeSkill {
                 risk: Risk::Direct,
             })
             .collect()
+    }
+
+    fn timeout(&self, _tool: &str) -> Option<std::time::Duration> {
+        self.timeout
     }
 
     async fn call(&self, tool: &str, args: serde_json::Value) -> Result<Reply, SkillError> {

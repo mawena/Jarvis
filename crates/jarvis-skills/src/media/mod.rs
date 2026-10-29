@@ -99,12 +99,13 @@ impl MediaSkill {
         let Some(player) = self.target().await? else {
             return Ok(self.send_media_key(cmd));
         };
-        let already = match cmd {
-            PlayerCommand::Play => player.status == PlaybackStatus::Playing,
-            PlayerCommand::Pause => player.status != PlaybackStatus::Playing,
-            _ => false,
-        };
-        if already {
+        if cmd == PlayerCommand::Pause && player.status != PlaybackStatus::Playing {
+            // Aucun lecteur MPRIS en lecture : la touche pause atteint aussi
+            // Firefox en snap (sans effet si rien ne joue).
+            self.send_media_key(cmd);
+            return Ok(Reply::done(""));
+        }
+        if cmd == PlayerCommand::Play && player.status == PlaybackStatus::Playing {
             return Ok(Reply::done(""));
         }
         if let Err(e) = self.players.command(&player.bus_name, cmd).await {
@@ -378,13 +379,46 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deja_en_pause_pas_de_commande() {
+    async fn pause_sans_lecture_mpris_envoie_la_touche_pause() {
+        // Firefox en snap est invisible en MPRIS : la touche met sa vidéo en pause.
         for st in [PlaybackStatus::Paused, PlaybackStatus::Stopped] {
-            let (s, p, _) = skill(vec![player("vlc", st)]);
+            let (s, p, runner) = skill(vec![player("vlc", st)]);
             let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+            assert_eq!(r.outcome, crate::Outcome::Done);
             assert_eq!(r.speech, "");
             assert!(p.sent.lock().unwrap().is_empty());
+            assert_eq!(runner.calls(), vec![xdotool("XF86AudioPause")]);
         }
+        // Touche en échec : la musique est déjà en pause, pas d'erreur.
+        let (s, _, runner) = skill(vec![player("vlc", PlaybackStatus::Paused)]);
+        runner.respond(
+            "xdotool",
+            crate::CommandOutput {
+                success: false,
+                stdout: String::new(),
+            },
+        );
+        let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Done);
+        assert_eq!(r.speech, "");
+    }
+
+    #[tokio::test]
+    async fn pause_avec_lecteur_en_lecture_inchangee() {
+        let (s, p, runner) = skill(vec![
+            player("vlc", PlaybackStatus::Paused),
+            player("spotify", PlaybackStatus::Playing),
+        ]);
+        let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Done);
+        assert_eq!(
+            *p.sent.lock().unwrap(),
+            vec![(
+                "org.mpris.MediaPlayer2.spotify".to_string(),
+                PlayerCommand::Pause
+            )]
+        );
+        assert!(runner.calls().is_empty());
     }
 
     struct FailingPlayers(PlayerInfo);

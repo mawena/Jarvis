@@ -77,7 +77,7 @@ Démarrage : `git flow feature start recherche` depuis `develop`. La tâche 1 es
   - Tous `Direct`.
 - Squelettes : `SearchSkill::new(Arc<SearxClient>, Arc<dyn Summarizer>, Arc<dyn CommandRunner>, SearchSettings)` et `VideoSkill::new(Arc<SearxClient>, Arc<dyn MediaPlayers>, Arc<dyn CommandRunner>, SearchSettings)`, avec `tools()` réel et `call()` qui renvoie `SkillError::Failed("à venir")`.
 
-- [ ] Tests :
+- [x] Tests :
   - `searx_envoie_post_json_fr` (corps contient `q=`, `format=json`, `language=fr-FR` ; méthode POST) ;
   - `searx_garde_les_n_premiers_resultats`, `searx_ignore_les_liens_non_http`, `searx_dedoublonne` ;
   - `searx_lit_reponse_et_infobox`, `searx_403_json_desactive`, `searx_delai_depasse` (wiremock `set_delay`) ;
@@ -86,8 +86,8 @@ Démarrage : `git flow feature start recherche` depuis `develop`. La tâche 1 es
   - `voix_sans_markdown_ni_url`, `voix_coupee_a_la_phrase`, `voix_unites_en_toutes_lettres` ;
   - `delai_propre_a_la_competence` (tokio `start_paused` : outil à 10 s avec un délai de 6 s → réponse ; sans délai propre → « trop de temps ») ;
   - `complete_par_defaut_non_pris_en_charge`.
-- [ ] Implémenter ; tout compile (squelettes non branchés dans `main.rs`).
-- [ ] `scripts/check.sh` vert ; commit `feat: socle de la recherche (SearXNG, navigateur, résumé)`.
+- [x] Implémenter ; tout compile (squelettes non branchés dans `main.rs`).
+- [x] `scripts/check.sh` vert ; commit `feat: socle de la recherche (SearXNG, navigateur, résumé)`.
 
 ### Task 2 : compétence recherche et « ouvre les résultats » (6.3, 6.4)
 

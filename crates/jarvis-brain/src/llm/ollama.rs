@@ -122,6 +122,47 @@ impl LlmBackend for OllamaBackend {
         }
         parse(&v, tools)
     }
+
+    /// Résumé d'une recherche : aucun outil, réponse courte et peu inventive.
+    async fn complete(
+        &self,
+        system: &str,
+        user: &str,
+        max_tokens: u32,
+    ) -> Result<String, LlmError> {
+        let body = json!({
+            "model": self.model,
+            "stream": false,
+            "messages": [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            "options": {"num_predict": max_tokens, "temperature": 0.2},
+            "keep_alive": self.keep_alive,
+        });
+        let resp = self
+            .client
+            .post(format!("{}/api/chat", self.url))
+            .timeout(TIMEOUT)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| LlmError::Unreachable(e.to_string()))?;
+        check_status(resp.status())?;
+        let v: Value = resp
+            .json()
+            .await
+            .map_err(|e| LlmError::BadResponse(e.to_string()))?;
+        let text = v
+            .pointer("/message/content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if text.is_empty() {
+            return Err(LlmError::BadResponse("résumé vide".into()));
+        }
+        Ok(text.to_string())
+    }
 }
 
 fn parse_args(raw: Option<&Value>) -> Result<Value, LlmError> {
@@ -458,6 +499,66 @@ mod tests {
     async fn prechauffage_injoignable() {
         let err = backend("http://127.0.0.1:1")
             .warm_up(&[])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::Unreachable(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn ollama_complete_sans_outils() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/chat"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"message": {"role": "assistant", "content": " Il fera beau. "}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let got = backend(&server.uri())
+            .complete("consigne", "Question : météo ?", 80)
+            .await
+            .unwrap();
+        assert_eq!(got, "Il fera beau.");
+        let reqs = server.received_requests().await.unwrap();
+        let body: Value = serde_json::from_slice(&reqs[0].body).unwrap();
+        assert!(body.get("tools").is_none(), "{body}");
+        assert_eq!(body["model"], "qwen2.5:3b");
+        assert_eq!(body["stream"], false);
+        assert_eq!(
+            body["messages"][0],
+            json!({"role": "system", "content": "consigne"})
+        );
+        assert_eq!(
+            body["messages"][1],
+            json!({"role": "user", "content": "Question : météo ?"})
+        );
+        assert_eq!(body["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(body["options"]["num_predict"], 80);
+        assert_eq!(body["options"]["temperature"], 0.2);
+        assert_eq!(body["keep_alive"], "30m");
+    }
+
+    #[tokio::test]
+    async fn ollama_complete_vide_erreur() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(json!({"message": {"content": "  "}})),
+            )
+            .mount(&server)
+            .await;
+        let err = backend(&server.uri())
+            .complete("c", "q", 80)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, LlmError::BadResponse(_)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn ollama_complete_injoignable() {
+        let err = backend("http://127.0.0.1:1")
+            .complete("c", "q", 80)
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::Unreachable(_)), "{err:?}");
