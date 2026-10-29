@@ -69,7 +69,9 @@ pub enum EarMessage {
     ListenStart {
         utterance: u32,
     },
-    /// Fin de la phrase. `cut` : plage d'échantillons à retirer du flux.
+    /// Fin de la phrase. `cut` : plage d'échantillons à retirer du flux. `no_speech` :
+    /// rien à traiter (phrase vide ou abandonnée par l'oreille) ; envoyée une seconde
+    /// fois après une vraie fin, elle annule la phrase si le cerveau ne l'a pas lancée.
     ListenEnd {
         utterance: u32,
         muted: bool,

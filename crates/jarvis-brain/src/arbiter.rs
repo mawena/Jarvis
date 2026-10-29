@@ -187,6 +187,9 @@ impl Arbiter {
         actions
     }
 
+    /// Fin de la phrase `utterance` de `ear`. Une seconde fin de la même phrase (fin
+    /// vide d'une oreille qui l'abandonne) n'est plus traitée une fois la phrase lancée :
+    /// avant, la dernière fin reçue l'emporte (le hub la garde).
     pub fn ended(&mut self, ear: &EarId, utterance: u32) -> EndVerdict {
         match &mut self.state {
             State::Window { candidates, .. }
@@ -200,7 +203,7 @@ impl Arbiter {
                 ear: e,
                 utterance: u,
                 processing,
-            } if e == ear && *u == utterance => {
+            } if e == ear && *u == utterance && !*processing => {
                 *processing = true;
                 EndVerdict::Process
             }
@@ -493,6 +496,8 @@ mod tests {
         a.tick(t0 + DEFAULT_WINDOW);
         assert_eq!(a.ended(&id("b"), 1), EndVerdict::Ignore);
         assert_eq!(a.ended(&id("a"), 1), EndVerdict::Process);
+        // Seconde fin de la phrase lancée (abandon par l'oreille) : pas traitée deux fois.
+        assert_eq!(a.ended(&id("a"), 1), EndVerdict::Ignore);
         // Phrase inconnue, ou aucun groupe.
         assert_eq!(a.ended(&id("a"), 9), EndVerdict::Ignore);
         a.finished(&id("a"), 1);

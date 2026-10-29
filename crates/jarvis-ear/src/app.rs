@@ -539,9 +539,23 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             "ni élue ni arrêtée en {:?} : le PC est tenu pour endormi",
             self.election_timeout
         );
-        if self.current.is_some_and(|c| c.utterance == utterance)
-            || self.awaited.is_some_and(|a| a.utterance == utterance)
-        {
+        // Le lien peut sembler ouvert (cerveau figé, PC suspendu brutalement…) : fin de
+        // phrase vide envoyée au mieux, pour que le cerveau ne traite pas une phrase
+        // dont l'utilisateur a entendu « le PC est endormi » et rétablisse le son.
+        let capturing = self.current.is_some_and(|c| c.utterance == utterance);
+        let ended = self.awaited.filter(|a| a.utterance == utterance);
+        if capturing {
+            self.cancel_capture();
+        } else if let Some(ended) = ended {
+            // Phrase déjà finie : annulée si le cerveau ne l'a pas encore lancée.
+            let _ = self.link.send(EarMessage::ListenEnd {
+                utterance,
+                muted: ended.muted,
+                no_speech: true,
+                cut: None,
+            });
+        }
+        if capturing || ended.is_some() {
             self.abandon();
         }
     }
@@ -1651,11 +1665,65 @@ mod tests {
         assert!(elapsed < Duration::from_millis(2_500), "{elapsed:?}");
         assert!(!h.tray.borrow().capturing, "capture abandonnée");
         assert!(h.nudges() >= 1);
+        // Le cerveau en est prévenu au mieux : fin de phrase vide (son rétabli, rien
+        // de traité).
+        assert_eq!(
+            h.messages().last(),
+            Some(&EarMessage::ListenEnd {
+                utterance: 1,
+                muted: false,
+                no_speech: true,
+                cut: None,
+            })
+        );
         // Plus rien n'est envoyé pour cette phrase.
         let before = h.sent().len();
         h.feed(vec![0.0; 16_000]).await;
         tokio::time::sleep(Duration::from_millis(100)).await;
         assert_eq!(h.sent().len(), before);
+    }
+
+    #[tokio::test]
+    async fn phrase_finie_sans_election_annulee_au_mieux() {
+        let h = Setup {
+            elect: false,
+            wakes: 1,
+            offline: Some(asleep()),
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        h.started().await;
+        // Phrase courte : finie avant l'échéance de l'élection.
+        let speech = [vec![0.0; 1_600], vec![0.6; 8_000], vec![0.0; 16_000]].concat();
+        h.feed(speech).await;
+        h.wait_for("fin de phrase", |h| h.listens().len() == 1)
+            .await;
+        h.wait_for("PC endormi", |h| {
+            h.played() == vec![wake_beep(), asleep_played()]
+        })
+        .await;
+        let ends: Vec<bool> = h
+            .messages()
+            .into_iter()
+            .filter_map(|m| match m {
+                EarMessage::ListenEnd {
+                    utterance: 1,
+                    no_speech,
+                    ..
+                } => Some(no_speech),
+                _ => None,
+            })
+            .collect();
+        // La phrase, puis son annulation.
+        assert_eq!(ends, [false, true]);
+        // Réponse tardive : n'est plus jouée.
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("suivant", None, None),
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(h.played().len(), 2);
     }
 
     #[tokio::test]

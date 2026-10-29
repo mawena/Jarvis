@@ -465,6 +465,16 @@ impl Ear {
         })
     }
 
+    /// Fin de phrase vide : l'oreille abandonne la phrase (pas d'élection à temps…).
+    fn give_up(&self, utterance: u32) -> Result<(), LinkDown> {
+        self.link.send(EarMessage::ListenEnd {
+            utterance,
+            muted: false,
+            no_speech: true,
+            cut: None,
+        })
+    }
+
     fn listen_start(&self, utterance: u32) -> Result<(), LinkDown> {
         self.link.send(EarMessage::ListenStart { utterance })
     }
@@ -1075,6 +1085,40 @@ async fn fin_de_phrase_avant_l_election() {
     assert_eq!(cuisine.msg().await, BrainMessage::Elected { utterance: 8 });
     assert_eq!(salon.msg().await, BrainMessage::Stop { utterance: 5 });
     assert_eq!(heard_text(&cuisine.msg().await, 8), "suivant");
+    salon.silent(Duration::from_millis(500)).await;
+    assert_eq!(rig.fakes.stt.calls(), 1);
+    assert_eq!(rig.fakes.media.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn abandon_par_l_oreille_apres_l_election_son_retabli_rien_d_execute() {
+    // L'élection est arrivée trop tard : l'oreille a dit « le PC est endormi » et
+    // envoyé une fin de phrase vide.
+    let rig = rig().await;
+    let mut salon = ear(&rig, &rig.salon).await;
+    salon.wake(1, 0.9, -30.0).unwrap();
+    salon.speak(1, SUIVANT, 3).unwrap();
+    assert_eq!(salon.msg().await, BrainMessage::Elected { utterance: 1 });
+    salon.give_up(1).unwrap();
+    assert_eq!(heard_text(&salon.msg().await, 1), "");
+    assert_eq!(rig.ducker(), ["duck", "restore"]);
+    assert_eq!(rig.fakes.stt.calls(), 0);
+    assert!(rig.fakes.media.calls().is_empty());
+}
+
+#[tokio::test]
+async fn abandon_d_une_phrase_deja_lancee_ignore() {
+    // Phrase finie et lancée, puis abandonnée par l'oreille : elle va jusqu'au bout,
+    // une seule fois, et sa réponse reste la sienne.
+    let rig = rig_with(Duration::from_millis(500), WINDOW).await;
+    let mut salon = ear(&rig, &rig.salon).await;
+    salon.wake(1, 0.9, -30.0).unwrap();
+    assert_eq!(salon.msg().await, BrainMessage::Elected { utterance: 1 });
+    salon.speak(1, SUIVANT, 3).unwrap();
+    salon.end(1).unwrap();
+    eventually("compétence lancée", || rig.fakes.media.calls().len() == 1).await;
+    salon.give_up(1).unwrap();
+    assert_eq!(heard_text(&salon.msg().await, 1), "suivant");
     salon.silent(Duration::from_millis(500)).await;
     assert_eq!(rig.fakes.stt.calls(), 1);
     assert_eq!(rig.fakes.media.calls().len(), 1);
