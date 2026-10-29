@@ -5,6 +5,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - Conception : [docs/superpowers/specs/2026-10-28-jarvis-design.md](docs/superpowers/specs/2026-10-28-jarvis-design.md)
 - Plans détaillés : [docs/superpowers/plans/](docs/superpowers/plans/), un par groupe de phases, rédigé avant de commencer ces phases.
 - Règle : cocher une tâche **dès** qu'elle est terminée.
+- Essais à faire en vrai : [docs/essais/](docs/essais/README.md), une fiche par essai.
 
 ## Phase 0 : fondations
 *Plan : [phases 0 et 1](docs/superpowers/plans/2026-10-28-phases-0-1-fondations-comprehension.md), branche `feature/fondations`*
@@ -55,8 +56,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 2.14 Vérification du locuteur par le cerveau : une phrase dont la voix n'est pas celle de Charles est ignorée sans rien exécuter
 - [x] 2.16 Whisper accéléré : fenêtre ajustée à la phrase, attention flash, sans relances (`small` : ~6 s → ~1 s, outil `bench_stt`)
 - [x] 2.17 Relecture finale de la phase 2 et corrections : vérification du locuteur fermée en cas d'échec (empreinte abîmée, modèle absent), phrases courtes non vérifiées limitées aux raccourcis, musique rétablie (quitter, surveillance 15 s, arrêt et redémarrage du cerveau), écoute coupée retenue, prises privées, requêtes bornées, `doctor` suit la configuration
-- [ ] 2.15 Mesurer le taux de fausses détections sur une journée (Charles)
-- [ ] 2.18 Essai réel : confirmer qu'une autre voix est ignorée (phrase rejetée à 0,34 le 2026-10-28 : autre voix ou Charles ?) (Charles)
+- [ ] 2.15 Mesurer le taux de fausses détections sur une journée (Charles) — [fiche d'essai](docs/essais/essai-2.15-fausses-detections.md)
+- [ ] 2.18 Essai réel : confirmer qu'une autre voix est ignorée (phrase rejetée à 0,34 le 2026-10-28 : autre voix ou Charles ?) (Charles) — [fiche d'essai](docs/essais/essai-2.18-autre-voix.md)
 
 ## Phase 3 : voix de Jarvis
 *Plan : [phase 3](docs/superpowers/plans/2026-10-28-phase-3-voix.md), branche `feature/voix` (fusionnée dans `develop`)*
@@ -68,7 +69,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 3.5 Commandes « annule » et « répète »
 - [x] 3.6 Personnalité : réponses brèves, ton majordome, nom d'adresse configurable, option « bip seul » pour les réussites
 - [x] 3.7 Relectures et corrections : bip et écho de Jarvis ignorés par l'oreille, lecture robuste, voix bornée (400 caractères, 8 s), faille de confirmation par une voix courte inconnue corrigée, alimentation lancée 4 s après la réponse
-- [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles)
+- [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles) — [fiche d'essai](docs/essais/essai-3.8-voix.md)
 
 ## Phase 4 : oreilles en réseau
 - [ ] 4.1 Rédiger le plan de la phase 4 (en cours)
