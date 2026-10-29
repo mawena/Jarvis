@@ -74,7 +74,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles) — [fiche d'essai](docs/essais/essai-3.8-voix.md)
 
 ## Phase 4 : oreilles en réseau
-*Plan : [phase 4](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md), branche `feature/oreilles-reseau` (en cours)*
+*Plan : [phase 4](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md), branche `feature/oreilles-reseau` (fusionnée dans `develop`) — guide : [docs/reseau.md](docs/reseau.md)*
 
 - [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
 - [x] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`) — v1 : messages JSON, trames audio binaires, empreinte du certificat, adresse d'appairage ; oreille transmise dans tout le cerveau
@@ -86,8 +86,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 4.8 Réponse vocale jouée sur l'oreille gagnante
 - [x] 4.9 Reconnexion automatique et message « le PC est endormi » (sans file d'attente de son, en moins de 2 s)
 - [x] 4.10 Tests de bout en bout (tâche 8) et retrait de l'ancien chemin d'écoute, `doctor`, documentation (tâche 9)
-- [ ] 4.11 Relecture de la phase 4 et corrections
-- [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles)
+- [x] 4.11 Relecture de la phase 4 et corrections (sécurité : 9 points, justesse et docs : 9 points, 930 tests)
+- [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles, [fiche](docs/essais/essai-4.12-reseau.md))
 
 ## Phase 5 : oreille Android (Pixel 4 XL)
 - [ ] 5.1 Rédiger le plan de la phase 5

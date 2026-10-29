@@ -28,6 +28,16 @@ whisper-rs.workspace = true
 sherpa-onnx.workspace = true
 piper-phonemize.workspace = true
 base64.workspace = true
+# Phase 4 : oreilles en réseau.
+rustls.workspace = true
+tokio-rustls.workspace = true
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
+rcgen.workspace = true
+sha2.workspace = true
+getrandom.workspace = true
+subtle.workspace = true
+mdns-sd.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
@@ -35,4 +45,5 @@ jarvis-skills = { workspace = true, features = ["test-util"] }
 tempfile.workspace = true
 wiremock.workspace = true
 hound.workspace = true
+jarvis-ear-core.workspace = true
 jarvis-brain = { path = ".", features = ["test-util"] }

@@ -4,7 +4,9 @@
 pub mod sherpa;
 
 use anyhow::Context;
+use jarvis_protocol::EarId;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -19,7 +21,8 @@ const NORMAL_MIN: usize = 2 * SAMPLE_RATE;
 const STRICT_MIN: usize = SAMPLE_RATE;
 /// En dessous, même la vérification stricte d'un « oui » court n'a rien à mesurer.
 const SHORT_STRICT_MIN: usize = SAMPLE_RATE * 3 / 10;
-/// Durée pendant laquelle une phrase très courte reste acceptée après une voix reconnue.
+/// Durée pendant laquelle une phrase très courte reste acceptée après une voix reconnue
+/// sur la même oreille.
 const SESSION_WINDOW: Duration = Duration::from_secs(180);
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,7 +106,8 @@ pub struct SpeakerGate {
     print: RwLock<Option<VoicePrint>>,
     threshold: f32,
     strict_threshold: f32,
-    session: Mutex<Option<Instant>>,
+    /// Session de voix reconnue, par oreille : dernière voix reconnue.
+    session: Mutex<HashMap<EarId, Instant>>,
     path: PathBuf,
     warned: AtomicBool,
     /// Fichier présent mais illisible ou invalide : tout est refusé jusqu'au réenrôlement.
@@ -164,7 +168,7 @@ impl SpeakerGate {
             print: RwLock::new(loaded.unwrap_or(None)),
             threshold,
             strict_threshold,
-            session: Mutex::new(None),
+            session: Mutex::new(HashMap::new()),
             path,
             warned: AtomicBool::new(false),
             unreadable: AtomicBool::new(unreadable),
@@ -224,7 +228,7 @@ impl SpeakerGate {
             *stored = Some(print);
             self.unreadable.store(false, Ordering::Relaxed);
         }
-        *self.session.lock().unwrap() = None;
+        self.session.lock().unwrap().clear();
         Ok(samples.len())
     }
 
@@ -266,7 +270,9 @@ impl SpeakerGate {
         Ok(())
     }
 
-    pub fn check(&self, audio: &[f32]) -> Verdict {
+    /// `ear` : oreille qui a entendu la phrase. Une phrase courte n'est acceptée que
+    /// dans la session de cette oreille.
+    pub fn check(&self, ear: &EarId, audio: &[f32]) -> Verdict {
         // Copie de l'empreinte : le verrou n'est pas tenu pendant l'inférence.
         let (reference, unreadable) = {
             let stored = self.print.read().unwrap();
@@ -290,6 +296,7 @@ impl SpeakerGate {
                 .session
                 .lock()
                 .unwrap()
+                .get(ear)
                 .is_some_and(|t| t.elapsed() <= SESSION_WINDOW);
             return if in_session {
                 Verdict::SessionShort
@@ -310,7 +317,10 @@ impl SpeakerGate {
             }
         };
         if score >= threshold {
-            *self.session.lock().unwrap() = Some(Instant::now());
+            let mut sessions = self.session.lock().unwrap();
+            sessions.retain(|_, t| t.elapsed() <= SESSION_WINDOW);
+            sessions.insert(ear.clone(), Instant::now());
+            drop(sessions);
             info!(score = format!("{score:.2}"), "voix reconnue");
             Verdict::Match(score)
         } else {
@@ -356,6 +366,10 @@ impl SpeakerGate {
 mod tests {
     use super::*;
     use crate::testing::FakeVerifier;
+
+    fn ear() -> EarId {
+        EarId::new("test")
+    }
 
     /// Audio factice dont le premier échantillon désigne l'empreinte de `FakeVerifier`.
     fn audio(id: usize, secs: f32) -> Vec<f32> {
@@ -456,8 +470,16 @@ mod tests {
             std::fs::write(&path, contenu).unwrap();
             let g = gate(d.path(), vectors());
             assert!(!g.is_enrolled(), "{contenu}");
-            assert_eq!(g.check(&audio(0, 3.0)), Verdict::NoMatch(0.0), "{contenu}");
-            assert_eq!(g.check(&audio(0, 0.5)), Verdict::NoMatch(0.0), "{contenu}");
+            assert_eq!(
+                g.check(&ear(), &audio(0, 3.0)),
+                Verdict::NoMatch(0.0),
+                "{contenu}"
+            );
+            assert_eq!(
+                g.check(&ear(), &audio(0, 0.5)),
+                Verdict::NoMatch(0.0),
+                "{contenu}"
+            );
         }
     }
 
@@ -467,7 +489,7 @@ mod tests {
         // Un dossier à la place du fichier : lecture impossible, mais pas « absent ».
         std::fs::create_dir_all(d.path().join("voiceprint/charles.json")).unwrap();
         let g = gate(d.path(), vectors());
-        assert_eq!(g.check(&audio(0, 3.0)), Verdict::NoMatch(0.0));
+        assert_eq!(g.check(&ear(), &audio(0, 3.0)), Verdict::NoMatch(0.0));
     }
 
     #[test]
@@ -478,8 +500,11 @@ mod tests {
         std::fs::write(&path, "pas du json").unwrap();
         let g = gate(d.path(), vectors());
         g.enroll(&[audio(0, 2.0)]).unwrap();
-        assert!(matches!(g.check(&audio(3, 3.0)), Verdict::Match(_)));
-        assert!(matches!(g.check(&audio(2, 3.0)), Verdict::NoMatch(_)));
+        assert!(matches!(g.check(&ear(), &audio(3, 3.0)), Verdict::Match(_)));
+        assert!(matches!(
+            g.check(&ear(), &audio(2, 3.0)),
+            Verdict::NoMatch(_)
+        ));
     }
 
     #[test]
@@ -520,22 +545,43 @@ mod tests {
     fn voix_reconnue() {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
-        assert!(matches!(g.check(&audio(3, 3.0)), Verdict::Match(s) if s > 0.9));
+        assert!(matches!(g.check(&ear(), &audio(3, 3.0)), Verdict::Match(s) if s > 0.9));
     }
 
     #[test]
     fn voix_inconnue_rejetee() {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
-        assert!(matches!(g.check(&audio(2, 3.0)), Verdict::NoMatch(s) if s < 0.55));
+        assert!(matches!(g.check(&ear(), &audio(2, 3.0)), Verdict::NoMatch(s) if s < 0.55));
     }
 
     #[test]
     fn phrase_courte_acceptee_dans_la_session() {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
-        assert!(matches!(g.check(&audio(0, 3.0)), Verdict::Match(_)));
-        assert_eq!(g.check(&audio(2, 0.5)), Verdict::SessionShort);
+        assert!(matches!(g.check(&ear(), &audio(0, 3.0)), Verdict::Match(_)));
+        assert_eq!(g.check(&ear(), &audio(2, 0.5)), Verdict::SessionShort);
+    }
+
+    #[test]
+    fn session_vocale_propre_a_chaque_oreille() {
+        let d = tempfile::tempdir().unwrap();
+        let g = enrolled(d.path());
+        let (salon, cuisine) = (EarId::new("salon"), EarId::new("cuisine"));
+        assert!(matches!(g.check(&salon, &audio(0, 3.0)), Verdict::Match(_)));
+        // Phrase courte : acceptée sur la même oreille seulement.
+        assert_eq!(g.check(&salon, &audio(2, 0.5)), Verdict::SessionShort);
+        assert_eq!(g.check(&cuisine, &audio(2, 0.5)), Verdict::TooShort);
+        // Chaque oreille ouvre sa propre session.
+        assert!(matches!(
+            g.check(&cuisine, &audio(0, 3.0)),
+            Verdict::Match(_)
+        ));
+        assert_eq!(g.check(&cuisine, &audio(2, 0.5)), Verdict::SessionShort);
+        // Un réenrôlement les ferme toutes.
+        g.enroll(&[audio(0, 2.0)]).unwrap();
+        assert_eq!(g.check(&salon, &audio(2, 0.5)), Verdict::TooShort);
+        assert_eq!(g.check(&cuisine, &audio(2, 0.5)), Verdict::TooShort);
     }
 
     #[test]
@@ -543,19 +589,22 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
         let start = Instant::now() - SESSION_WINDOW + Duration::from_secs(5);
-        *g.session.lock().unwrap() = Some(start);
-        assert_eq!(g.check(&audio(0, 0.5)), Verdict::SessionShort);
-        assert_eq!(*g.session.lock().unwrap(), Some(start));
+        g.session.lock().unwrap().insert(ear(), start);
+        assert_eq!(g.check(&ear(), &audio(0, 0.5)), Verdict::SessionShort);
+        assert_eq!(g.session.lock().unwrap().get(&ear()), Some(&start));
     }
 
     #[test]
     fn phrase_courte_rejetee_hors_session() {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
-        assert_eq!(g.check(&audio(0, 0.5)), Verdict::TooShort);
+        assert_eq!(g.check(&ear(), &audio(0, 0.5)), Verdict::TooShort);
         // Session expirée.
-        *g.session.lock().unwrap() = Some(Instant::now() - SESSION_WINDOW - Duration::from_secs(1));
-        assert_eq!(g.check(&audio(0, 0.5)), Verdict::TooShort);
+        g.session.lock().unwrap().insert(
+            ear(),
+            Instant::now() - SESSION_WINDOW - Duration::from_secs(1),
+        );
+        assert_eq!(g.check(&ear(), &audio(0, 0.5)), Verdict::TooShort);
     }
 
     #[test]
@@ -563,9 +612,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
         // cos 0.6 : passe le seuil normal (0.55) mais pas le strict (0.65).
-        assert!(matches!(g.check(&audio(1, 3.0)), Verdict::Match(_)));
-        assert!(matches!(g.check(&audio(1, 1.5)), Verdict::NoMatch(_)));
-        assert!(matches!(g.check(&audio(3, 1.5)), Verdict::Match(_)));
+        assert!(matches!(g.check(&ear(), &audio(1, 3.0)), Verdict::Match(_)));
+        assert!(matches!(
+            g.check(&ear(), &audio(1, 1.5)),
+            Verdict::NoMatch(_)
+        ));
+        assert!(matches!(g.check(&ear(), &audio(3, 1.5)), Verdict::Match(_)));
     }
 
     #[test]
@@ -586,13 +638,13 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
         // Session ouverte : une voix inconnue reste refusée.
-        assert!(matches!(g.check(&audio(0, 3.0)), Verdict::Match(_)));
+        assert!(matches!(g.check(&ear(), &audio(0, 3.0)), Verdict::Match(_)));
         assert!(!g.check_short_strict(&audio(2, 0.5)));
         // Hors session : la voix de Charles passe quand même, et la session n'est pas
         // ouverte pour autant.
-        *g.session.lock().unwrap() = None;
+        g.session.lock().unwrap().clear();
         assert!(g.check_short_strict(&audio(3, 0.5)));
-        assert_eq!(*g.session.lock().unwrap(), None);
+        assert!(g.session.lock().unwrap().is_empty());
     }
 
     #[test]
@@ -609,8 +661,8 @@ mod tests {
     fn sans_empreinte_acceptee() {
         let d = tempfile::tempdir().unwrap();
         let g = gate(d.path(), vectors());
-        assert_eq!(g.check(&audio(2, 3.0)), Verdict::NotEnrolled);
-        assert_eq!(g.check(&audio(2, 0.2)), Verdict::NotEnrolled);
+        assert_eq!(g.check(&ear(), &audio(2, 3.0)), Verdict::NotEnrolled);
+        assert_eq!(g.check(&ear(), &audio(2, 0.2)), Verdict::NotEnrolled);
     }
 
     #[test]

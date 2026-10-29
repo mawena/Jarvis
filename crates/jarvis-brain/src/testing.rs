@@ -106,6 +106,8 @@ pub struct FakeSkill {
     /// Phrase (forme `fold`) et outil de son raccourci propre.
     shortcut: Option<(String, Shortcut)>,
     llm_tools: bool,
+    /// Appels allés jusqu'au bout (après `delay`).
+    finished: std::sync::atomic::AtomicUsize,
 }
 
 impl FakeSkill {
@@ -118,7 +120,14 @@ impl FakeSkill {
             timeout: None,
             shortcut: None,
             llm_tools: true,
+            finished: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// Appels allés jusqu'au bout : un appel abandonné en route (future lâchée) n'y
+    /// est pas.
+    pub fn finished(&self) -> usize {
+        self.finished.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Raccourci propre (`Skill::shortcut`) : `phrase` (comparée après `fold`)
@@ -198,6 +207,8 @@ impl Skill for FakeSkill {
         if !self.delay.is_zero() {
             tokio::time::sleep(self.delay).await;
         }
+        self.finished
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match &*self.result.lock().unwrap() {
             Ok(r) => Ok(r.clone()),
             Err(SkillError::UnknownTool(m)) => Err(SkillError::UnknownTool(m.clone())),
@@ -254,11 +265,19 @@ impl Transcriber for FakeTranscriber {
 #[derive(Default)]
 pub struct FakeDucker {
     events: Mutex<Vec<&'static str>>,
+    /// Durée d'une baisse (`wpctl` lent), notée à la fin.
+    duck_delay: std::time::Duration,
 }
 
 impl FakeDucker {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Baisse lente : `duck` ne la note qu'au bout de `delay`.
+    pub fn with_duck_delay(mut self, delay: std::time::Duration) -> Self {
+        self.duck_delay = delay;
+        self
     }
 
     /// Appels dans l'ordre : `"duck"` ou `"restore"`.
@@ -270,6 +289,9 @@ impl FakeDucker {
 #[async_trait::async_trait]
 impl Ducker for FakeDucker {
     async fn duck(&self) {
+        if !self.duck_delay.is_zero() {
+            tokio::time::sleep(self.duck_delay).await;
+        }
         self.events.lock().unwrap().push("duck");
     }
 

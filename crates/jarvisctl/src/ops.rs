@@ -6,6 +6,7 @@ use crate::paths::{
 };
 use crate::system::{OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
+use jarvis_protocol::{ControlRequest, ControlResponse};
 use jarvis_skills::agent::AgentSettings;
 use jarvis_skills::agent::registry::Registry;
 use std::collections::HashMap;
@@ -84,6 +85,12 @@ const DEFAULT_CONFIG: &str = r#"# Configuration de Jarvis (valeurs par défaut c
 # url = "https://api.anthropic.com"
 # model = "claude-haiku-5-5"
 # api_key_env = "ANTHROPIC_API_KEY"
+
+# [network]                    # oreilles en réseau (docs/reseau.md)
+# enabled = true
+# listen = "0.0.0.0:7341"      # gardez 0.0.0.0 : l'oreille du PC passe par 127.0.0.1
+# name = ""                    # nom annoncé ; vide : nom de la machine
+# arbiter_window_ms = 300      # fenêtre de regroupement des réveils
 "#;
 
 fn systemctl(sys: &dyn System, args: &[&str]) -> Result<crate::system::Output> {
@@ -818,6 +825,7 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         )?;
     }
     ear_diagnostics(paths, sys, out)?;
+    network_diagnostics(paths, sys, out)?;
     crate::searx::diagnostics(paths, sys, out)?;
     agent_diagnostics(paths, sys, out)?;
     Ok(if failures > 0 { 1 } else { 0 })
@@ -1147,6 +1155,235 @@ fn ear_service_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write)
         warn(
             out,
             "Oreille inactive — optionnel (oreille du PC) : lancez `jarvisctl start oreille` puis `jarvisctl logs --oreille`",
+        )?;
+    }
+    Ok(())
+}
+
+/// Configuration du pare-feu ufw (lisible sans droits).
+const UFW_CONF: &str = "/etc/ufw/ufw.conf";
+
+/// Section `[network]` du cerveau : (activé, adresse d'écoute).
+fn network_settings(paths: &Paths) -> (bool, String) {
+    let section = fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        .and_then(|v| v.get("network").cloned());
+    let get = |key: &str| section.as_ref().and_then(|s| s.get(key).cloned());
+    let enabled = get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let listen = get("listen")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("0.0.0.0:{}", jarvis_protocol::ear::DEFAULT_PORT));
+    (enabled, listen)
+}
+
+/// Nombre d'oreilles du registre (`ears.toml`) ; fichier absent : 0.
+fn registry_count(path: &Path) -> Result<usize, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.to_string()),
+    };
+    let value = toml::from_str::<toml::Value>(&text).map_err(|e| e.message().to_string())?;
+    match value.get("ear") {
+        None => Ok(0),
+        Some(toml::Value::Array(ears)) if ears.iter().all(toml::Value::is_table) => Ok(ears.len()),
+        Some(_) => Err("`ear` doit être une liste de tables [[ear]]".into()),
+    }
+}
+
+/// Adresses locales (sans le port) qui écoutent sur `port`, d'après `ss -Hltn`.
+fn listening_hosts(ss: &str, port: u16) -> Vec<String> {
+    let mut hosts: Vec<String> = ss
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(3))
+        .filter_map(|local| local.rsplit_once(':'))
+        .filter(|(_, p)| p.parse() == Ok(port))
+        .map(|(host, _)| host.trim_matches(['[', ']']).to_string())
+        .collect();
+    hosts.dedup();
+    hosts
+}
+
+/// Réseau des oreilles : avertissements seulement (le cerveau tourne sans, mais
+/// l'oreille du PC passe aussi par lui).
+fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let (enabled, listen) = network_settings(paths);
+    if !enabled {
+        writeln!(
+            out,
+            "! Réseau des oreilles désactivé ([network] enabled = false) — aucune oreille, \
+             pas même celle du PC, ne peut parler au cerveau"
+        )?;
+        return Ok(());
+    }
+
+    // Identité TLS.
+    let tls = paths.data_dir.join("tls");
+    let (cert, key) = (tls.join("brain.crt.der"), tls.join("brain.key.der"));
+    match fs::read(&cert) {
+        Ok(der) => {
+            let short = jarvis_protocol::Fingerprint::of_der(&der).short();
+            writeln!(out, "✓ Certificat du cerveau (empreinte {short})")?;
+            match fs::metadata(&key) {
+                Ok(m) if m.permissions().mode() & 0o077 != 0 => writeln!(
+                    out,
+                    "! Clé privée du cerveau lisible par d'autres — lancez `chmod 600 {}`",
+                    key.display()
+                )?,
+                Ok(_) => {}
+                Err(_) => writeln!(
+                    out,
+                    "! Clé privée du cerveau absente — réseau des oreilles désactivé ; \
+                     recréer l'identité oblige à tout réappairer (voir docs/reseau.md)"
+                )?,
+            }
+        }
+        Err(_) => writeln!(
+            out,
+            "! Certificat du cerveau absent — créé au démarrage du cerveau : \
+             `jarvisctl restart cerveau`"
+        )?,
+    }
+
+    // Oreilles appairées : registre, puis connexions d'après le cerveau.
+    let registry = paths.data_dir.join("ears.toml");
+    let count = registry_count(&registry);
+    if let Err(e) = &count {
+        writeln!(
+            out,
+            "! Registre des oreilles illisible ({e}) — réseau des oreilles désactivé : \
+             corrigez ou supprimez {} (toutes les oreilles à réappairer)",
+            registry.display()
+        )?;
+    }
+    let none = "! Aucune oreille appairée — l'oreille du PC s'appaire seule à son démarrage ; \
+                une autre : `jarvis pair` (voir docs/reseau.md)";
+    match sys.brain_request(&ControlRequest::ListEars) {
+        Some(ControlResponse::Ears { ears }) if ears.is_empty() => writeln!(out, "{none}")?,
+        Some(ControlResponse::Ears { ears }) => {
+            let connected: Vec<&str> = ears
+                .iter()
+                .filter(|e| e.connected)
+                .map(|e| e.name.as_str())
+                .collect();
+            let detail = if connected.is_empty() {
+                "aucune connectée".to_string()
+            } else {
+                format!("connectées : {}", connected.join(", "))
+            };
+            writeln!(out, "✓ Oreilles appairées : {} ({detail})", ears.len())?;
+            if !ears.iter().any(|e| e.local) {
+                writeln!(
+                    out,
+                    "! Oreille du PC pas encore appairée — elle s'appaire seule à son \
+                     démarrage : `jarvisctl restart oreille`"
+                )?;
+            }
+        }
+        Some(ControlResponse::Error { message }) if message == "requête invalide" => writeln!(
+            out,
+            "! Cerveau trop ancien pour le réseau des oreilles — lancez `jarvisctl update` \
+             (cerveau et oreille ensemble)"
+        )?,
+        Some(ControlResponse::Error { .. }) => writeln!(
+            out,
+            "! Réseau des oreilles arrêté dans le cerveau — cherchez « réseau des oreilles » \
+             dans `jarvisctl logs` (identité TLS, registre, adresse ou port)"
+        )?,
+        _ => match count {
+            Ok(0) => writeln!(out, "{none}")?,
+            Ok(n) => writeln!(
+                out,
+                "✓ Oreilles appairées : {n} (cerveau injoignable : connexions inconnues)"
+            )?,
+            Err(_) => {}
+        },
+    }
+
+    // Port d'écoute.
+    let port = match listen.trim().parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr.port(),
+        Err(_) => {
+            writeln!(
+                out,
+                "! [network] listen invalide (« {listen} », attendu ip:port) — réseau des \
+                 oreilles désactivé : mettez `listen = \"0.0.0.0:{}\"`",
+                jarvis_protocol::ear::DEFAULT_PORT
+            )?;
+            jarvis_protocol::ear::DEFAULT_PORT
+        }
+    };
+    match sys.run("ss", &["-Hltn"]) {
+        Ok(o) if o.code == 0 => {
+            let hosts = listening_hosts(&o.stdout, port);
+            let wildcard = |h: &String| matches!(h.as_str(), "0.0.0.0" | "*" | "::");
+            if hosts.is_empty() {
+                writeln!(
+                    out,
+                    "! Port {port} pas en écoute — cerveau arrêté ou réseau des oreilles \
+                     désactivé : voir `jarvisctl logs`"
+                )?;
+            } else if hosts.iter().any(wildcard) {
+                writeln!(out, "✓ Port {port} en écoute sur toutes les interfaces")?;
+            } else {
+                let who = if hosts.iter().all(|h| h.starts_with("127.") || h == "::1") {
+                    "les autres machines ne peuvent pas s'y connecter"
+                } else {
+                    "l'oreille du PC (127.0.0.1) ne peut pas s'y connecter"
+                };
+                writeln!(
+                    out,
+                    "! Port {port} en écoute sur {} seulement — {who} : mettez \
+                     `listen = \"0.0.0.0:{port}\"` dans [network]",
+                    hosts.join(", ")
+                )?;
+            }
+        }
+        _ => writeln!(out, "! Port {port} non vérifié (`ss` introuvable)")?,
+    }
+
+    // Pare-feu et mDNS.
+    let ufw = sys
+        .run("cat", &[UFW_CONF])
+        .map(|o| {
+            o.code == 0
+                && o.stdout.lines().any(|l| {
+                    l.trim()
+                        .strip_prefix("ENABLED=")
+                        .is_some_and(|v| v.trim_matches(['"', '\'']) == "yes")
+                })
+        })
+        .unwrap_or(false);
+    if ufw {
+        writeln!(
+            out,
+            "! Pare-feu ufw actif — si ce n'est pas déjà fait, ouvrez aux oreilles du réseau \
+             local le port {port} et mDNS (à lancer vous-même) : \
+             `sudo ufw allow from 192.168.0.0/16 to any port {port} proto tcp` et \
+             `sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp`"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "✓ Pare-feu ufw inactif (rien à ouvrir pour les oreilles)"
+        )?;
+    }
+    let avahi = sys
+        .run("systemctl", &["is-active", "avahi-daemon"])
+        .map(|o| o.stdout.trim() == "active")
+        .unwrap_or(false);
+    if avahi {
+        writeln!(
+            out,
+            "✓ avahi-daemon actif (cohabite avec l'annonce mDNS de Jarvis)"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "! avahi-daemon inactif — information : Jarvis s'annonce seul en mDNS ; si une \
+             oreille ne trouve pas le PC, donnez-lui son adresse (`brain_address`, voir \
+             docs/reseau.md)"
         )?;
     }
     Ok(())
@@ -2401,5 +2638,211 @@ WantedBy=graphical-session.target
             "{o}"
         );
         assert!(o.contains("Mise à jour terminée"), "{o}");
+    }
+
+    /// Identité TLS du cerveau (`~/.local/share/jarvis/tls/`), clé en 0600.
+    fn brain_identity(paths: &Paths, cert: &[u8]) {
+        let dir = paths.data_dir.join("tls");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("brain.crt.der"), cert).unwrap();
+        fs::write(dir.join("brain.key.der"), b"cle").unwrap();
+        fs::set_permissions(dir.join("brain.key.der"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn doctor_affiche_l_empreinte() {
+        let (_home, paths, sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Certificat du cerveau absent"), "{o}");
+        assert!(o.contains("`jarvisctl restart cerveau`"), "{o}");
+
+        brain_identity(&paths, b"certificat");
+        let short = jarvis_protocol::Fingerprint::of_der(b"certificat").short();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(&format!("✓ Certificat du cerveau (empreinte {short})")),
+            "{o}"
+        );
+        assert!(!o.contains("Clé privée"), "{o}");
+
+        // Clé lisible par d'autres, puis absente : avertissements.
+        let key = paths.data_dir.join("tls/brain.key.der");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Clé privée du cerveau lisible par d'autres"),
+            "{o}"
+        );
+        assert!(o.contains(&format!("`chmod 600 {}`", key.display())), "{o}");
+        fs::remove_file(&key).unwrap();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Clé privée du cerveau absente"), "{o}");
+        assert!(o.contains("docs/reseau.md"), "{o}");
+        // Le réseau ne change jamais le code de sortie (ici 1 : Ollama injoignable).
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_verifie_le_port_des_oreilles() {
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Port 7341 pas en écoute"), "{o}");
+        assert!(sys.cmds.borrow().iter().any(|c| c == "ss -Hltn"));
+
+        let ss = |sys: &mut Fake, text: &str| {
+            sys.replies.insert("ss -Hltn".into(), (0, text.into()));
+        };
+        ss(
+            &mut sys,
+            "LISTEN 0 5 127.0.0.1:953 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:7341 0.0.0.0:*\n",
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Port 7341 en écoute sur toutes les interfaces"),
+            "{o}"
+        );
+
+        ss(&mut sys, "LISTEN 0 128 127.0.0.1:7341 0.0.0.0:*\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Port 7341 en écoute sur 127.0.0.1 seulement — les autres machines"),
+            "{o}"
+        );
+        ss(&mut sys, "LISTEN 0 128 192.168.1.20:7341 0.0.0.0:*\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Port 7341 en écoute sur 192.168.1.20 seulement — l'oreille du PC"),
+            "{o}"
+        );
+
+        // Port choisi dans la configuration ; IPv6 sur toutes les interfaces.
+        write_config(&paths, "[network]\nlisten = \"0.0.0.0:7400\"\n");
+        ss(&mut sys, "LISTEN 0 128 [::]:7400 [::]:*\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Port 7400 en écoute sur toutes les interfaces"),
+            "{o}"
+        );
+
+        // Adresse invalide, puis réseau désactivé : rien d'autre n'est vérifié.
+        write_config(&paths, "[network]\nlisten = \"7341\"\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! [network] listen invalide (« 7341 »"), "{o}");
+        write_config(&paths, "[network]\nenabled = false\n");
+        sys.cmds.borrow_mut().clear();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Réseau des oreilles désactivé"), "{o}");
+        assert!(!o.contains("Port "), "{o}");
+        assert!(!sys.cmds.borrow().iter().any(|c| c == "ss -Hltn"));
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_liste_les_oreilles() {
+        use jarvis_protocol::{ControlResponse, EarId, EarSummary};
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Aucune oreille appairée"), "{o}");
+        assert!(o.contains("`jarvis pair`"), "{o}");
+
+        // Cerveau injoignable : nombre lu dans le registre.
+        let ears = paths.data_dir.join("ears.toml");
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::write(
+            &ears,
+            "[[ear]]\nid = \"a1\"\nname = \"PC\"\n\n[[ear]]\nid = \"b2\"\nname = \"Salon\"\n",
+        )
+        .unwrap();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Oreilles appairées : 2 (cerveau injoignable : connexions inconnues)"),
+            "{o}"
+        );
+
+        let ear = |name: &str, connected, local| EarSummary {
+            id: EarId::new(name.to_lowercase()),
+            name: name.into(),
+            platform: "linux".into(),
+            connected,
+            local,
+        };
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![ear("PC", true, true), ear("Salon", false, false)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Oreilles appairées : 2 (connectées : PC)"),
+            "{o}"
+        );
+        assert!(!o.contains("Oreille du PC pas encore appairée"), "{o}");
+
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![ear("Salon", false, false)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Oreilles appairées : 1 (aucune connectée)"),
+            "{o}"
+        );
+        assert!(o.contains("! Oreille du PC pas encore appairée"), "{o}");
+
+        sys.ears = Some(ControlResponse::Error {
+            message: "Le réseau des oreilles est désactivé (voir les journaux du cerveau).".into(),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Réseau des oreilles arrêté dans le cerveau"),
+            "{o}"
+        );
+
+        // Cerveau d'avant le réseau : `ListEars` inconnu.
+        sys.ears = Some(ControlResponse::Error {
+            message: "requête invalide".into(),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "! Cerveau trop ancien pour le réseau des oreilles — lancez `jarvisctl update`"
+            ),
+            "{o}"
+        );
+
+        fs::write(&ears, "pas du toml [[").unwrap();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Registre des oreilles illisible"), "{o}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_signale_le_pare_feu() {
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Pare-feu ufw inactif"), "{o}");
+        assert!(o.contains("! avahi-daemon inactif"), "{o}");
+
+        sys.replies.insert(
+            "cat /etc/ufw/ufw.conf".into(),
+            (0, "# commentaire\nENABLED=yes\nLOGLEVEL=low\n".into()),
+        );
+        sys.replies.insert(
+            "systemctl is-active avahi-daemon".into(),
+            (0, "active\n".into()),
+        );
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Pare-feu ufw actif"), "{o}");
+        assert!(
+            o.contains("`sudo ufw allow from 192.168.0.0/16 to any port 7341 proto tcp`"),
+            "{o}"
+        );
+        assert!(
+            o.contains("`sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp`"),
+            "{o}"
+        );
+        assert!(o.contains("✓ avahi-daemon actif"), "{o}");
+        // Le port des oreilles suit la configuration.
+        write_config(&paths, "[network]\nlisten = \"0.0.0.0:7400\"\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("to any port 7400 proto tcp`"), "{o}");
+        assert_eq!(code, 1);
     }
 }

@@ -10,7 +10,7 @@ use jarvis_brain::server::{SpeakerState, serve_with_board};
 use jarvis_brain::speaker::{SpeakerGate, SpeakerVerifier};
 use jarvis_brain::testing::{FakeDucker, FakeLlm, FakeTranscriber};
 use jarvis_brain::tts::Voice;
-use jarvis_protocol::{ControlRequest, ControlResponse, Mode};
+use jarvis_protocol::{ControlRequest, ControlResponse, EarId, Mode};
 use jarvis_skills::agent::registry::Registry;
 use jarvis_skills::agent::testing::{fake_claude, git, result_line, shell_quote, temp_repo};
 use jarvis_skills::agent::{AgentSettings, AgentSkill, Project};
@@ -301,7 +301,10 @@ async fn heard(s: &Setup, speaker: SpeakerState) -> String {
         Arc::new(FakeDucker::new()),
     )
     .with_speaker_state(speaker);
-    match listen.listen(&[0; 3 * 16_000], false, false).await {
+    match listen
+        .listen(&EarId::new("test"), &[0; 3 * 16_000], false, false)
+        .await
+    {
         ControlResponse::Heard { speech, .. } => speech,
         other => panic!("{other:?}"),
     }
@@ -344,7 +347,10 @@ async fn verification_desactivee_ne_lance_pas_l_agent() {
         Arc::new(FakeTranscriber::new("quel temps fait-il")),
         Arc::new(FakeDucker::new()),
     );
-    match listen.listen(&[0; 3 * 16_000], false, false).await {
+    match listen
+        .listen(&EarId::new("test"), &[0; 3 * 16_000], false, false)
+        .await
+    {
         ControlResponse::Heard { speech, .. } => assert_eq!(speech, "Réponse de l'IA."),
         other => panic!("{other:?}"),
     }
@@ -387,7 +393,11 @@ async fn voix_non_verifiee_ne_lance_pas_l_agent() {
         "demande à l'agent de corriger le projet Jarvis",
         "arrête la tâche",
     ] {
-        assert_eq!(s.brain.answer_fast(phrase).await, None, "{phrase}");
+        assert_eq!(
+            s.brain.answer_fast(&EarId::new("test"), phrase).await,
+            None,
+            "{phrase}"
+        );
     }
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(!s.claude_ran());

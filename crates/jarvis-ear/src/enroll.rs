@@ -19,8 +19,7 @@ use jarvis_protocol::{ControlRequest, ControlResponse, encode_pcm};
 
 use tokio::signal::unix::{SignalKind, signal};
 
-use crate::app::{Brain, SocketBrain};
-use crate::client::ClientError;
+use crate::client::{Brain, ClientError, SocketBrain};
 use crate::service::{EarPause, RealSystemctl};
 
 /// Pause entre l'appui sur Entrée et le début de la prise (le bruit de la touche,

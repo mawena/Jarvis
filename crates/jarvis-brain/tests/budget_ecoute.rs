@@ -1,7 +1,8 @@
-//! Le pire cas d'une phrase tient dans le délai `Listen` de l'oreille.
+//! Le pire cas d'une phrase tient dans l'attente de la réponse par l'oreille.
 //!
-//! L'oreille abandonne une phrase après `LISTEN_TIMEOUT` (jarvis-ear, client.rs) :
-//! au-delà, Jarvis reste muet. Pire cas côté cerveau, mode par mode :
+//! Une fois élue, l'oreille attend la réponse à sa phrase `LISTEN_TIMEOUT`
+//! (jarvis-ear, client.rs, d'où `RESPONSE_TIMEOUT`) : au-delà, elle n'attend plus et
+//! Jarvis reste muet. Pire cas côté cerveau, mode par mode :
 //!
 //! ```text
 //!   reconnaissance vocale (marge)           2 s
@@ -18,6 +19,8 @@
 use jarvis_brain::config::Config;
 use jarvis_brain::llm::Understanding;
 use jarvis_brain::mode_store::ModeStore;
+use jarvis_brain::net::MAX_ARBITER_WINDOW;
+use jarvis_brain::net::hub::PROCESS_TIMEOUT;
 use jarvis_brain::summarizer::ModeSummarizer;
 use jarvis_brain::testing::FakeLlm;
 use jarvis_protocol::Mode;
@@ -100,6 +103,22 @@ fn pire_cas_local_tient_dans_le_delai_d_ecoute_de_l_oreille() {
     assert!(
         worst <= ear,
         "pire cas {worst:?} > délai de l'oreille {ear:?}"
+    );
+}
+
+#[test]
+fn le_cerveau_abandonne_avant_que_l_oreille_n_attende_plus() {
+    // Traitement arrêté (réponse `Error`, bip d'échec) avant que l'oreille ne cesse
+    // d'attendre, fenêtre de l'arbitre et réseau (1 s) compris ; jamais avant le pire cas.
+    let ear = const_secs(EAR_CLIENT_SRC, "LISTEN_TIMEOUT");
+    let worst = worst_case(Mode::Local).max(worst_case(Mode::Online));
+    assert!(
+        worst <= PROCESS_TIMEOUT,
+        "pire cas {worst:?} > {PROCESS_TIMEOUT:?}"
+    );
+    assert!(
+        PROCESS_TIMEOUT + MAX_ARBITER_WINDOW + Duration::from_secs(1) <= ear,
+        "{PROCESS_TIMEOUT:?} trop proche du délai de l'oreille {ear:?}"
     );
 }
 

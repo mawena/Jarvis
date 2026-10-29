@@ -1,13 +1,18 @@
 //! Serveur du socket de contrôle : une ligne JSON par requête, une par réponse.
+//!
+//! Le socket sert au CLI, à l'enrôlement vocal, à l'appairage (`jarvis pair`, oreille
+//! du PC) et aux annonces. Aucune phrase n'y passe : elles arrivent toutes par le
+//! réseau des oreilles ([`crate::net`]), où l'arbitre n'en retient qu'une.
 
 use crate::announce::AnnouncementBoard;
 use crate::brain::{Brain, SystemClock};
 use crate::listen::ListenService;
+use crate::net::{Hub, PairOutcome};
 use crate::speaker::SpeakerGate;
 use crate::tts::Voice;
 use anyhow::{Context, bail};
 use jarvis_protocol::{
-    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm,
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm, pairing_ended,
 };
 use jarvis_skills::{Outcome, SystemRunner};
 use std::io::{self, ErrorKind};
@@ -78,14 +83,31 @@ pub async fn serve_with_board(
     board: Arc<AnnouncementBoard>,
     socket: &Path,
 ) -> anyhow::Result<()> {
+    serve_with_hub(brain, listen, speaker, voice, board, None, socket).await
+}
+
+/// Comme [`serve_with_board`], avec le hub des oreilles en réseau (appairage,
+/// liste et retrait des oreilles). Sans hub : ces requêtes rendent une erreur.
+///
+/// `_listen` ne sert plus ici (les phrases passent par le hub) ; gardé pour ne pas
+/// changer la signature des appelants.
+pub async fn serve_with_hub(
+    brain: Arc<Brain>,
+    _listen: Arc<ListenService>,
+    speaker: SpeakerState,
+    voice: Voice,
+    board: Arc<AnnouncementBoard>,
+    hub: Option<Hub>,
+    socket: &Path,
+) -> anyhow::Result<()> {
     let listener = bind(socket).await?;
     info!(socket = %socket.display(), mode = %brain.mode(), "cerveau prêt");
     let shared = Arc::new(Shared {
         brain,
-        listen,
         speaker,
         voice,
         board,
+        hub,
     });
     loop {
         let (stream, _) = listener.accept().await.context("acceptation d'un client")?;
@@ -162,11 +184,14 @@ async fn read_request<R: AsyncBufRead + Unpin>(reader: &mut R, max: usize) -> io
 /// Ce que partagent tous les clients.
 struct Shared {
     brain: Arc<Brain>,
-    listen: Arc<ListenService>,
     speaker: SpeakerState,
     voice: Voice,
     board: Arc<AnnouncementBoard>,
+    hub: Option<Hub>,
 }
+
+/// Réseau des oreilles absent.
+const NO_NETWORK: &str = "Le réseau des oreilles est désactivé (voir les journaux du cerveau).";
 
 async fn handle_client(shared: Arc<Shared>, stream: UnixStream) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
@@ -189,6 +214,17 @@ async fn handle_client(shared: Arc<Shared>, stream: UnixStream) -> io::Result<()
                 return Ok(());
             }
             Line::Request(line) => match serde_json::from_slice::<ControlRequest>(&line) {
+                Ok(ControlRequest::PairStart) => match &shared.hub {
+                    Some(hub) => {
+                        if pair(hub, &mut reader, &mut write).await? {
+                            continue;
+                        }
+                        return Ok(());
+                    }
+                    None => ControlResponse::Error {
+                        message: NO_NETWORK.into(),
+                    },
+                },
                 Ok(request) => respond(&shared, request).await,
                 Err(_) => ControlResponse::Error {
                     message: "requête invalide".into(),
@@ -197,6 +233,58 @@ async fn handle_client(shared: Arc<Shared>, stream: UnixStream) -> io::Result<()
         };
         send(&mut write, &response).await?;
     }
+}
+
+/// Marge au-delà de la fenêtre : le hub la ferme lui-même à l'échéance.
+const PAIR_GRACE: Duration = Duration::from_secs(5);
+
+/// `PairStart` : `Pairing`, puis `PairingDone` ou `PairingEnded` sur la même
+/// connexion. Client parti (ou qui écrit) : fenêtre fermée, `false`.
+async fn pair<R, W>(hub: &Hub, reader: &mut R, write: &mut W) -> io::Result<bool>
+where
+    R: AsyncBufRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
+    let ticket = match hub.pair_start().await {
+        Ok(ticket) => ticket,
+        Err(message) => {
+            send(write, &ControlResponse::Error { message }).await?;
+            return Ok(true);
+        }
+    };
+    let id = ticket.id;
+    let opened = ControlResponse::Pairing {
+        code: ticket.code,
+        uri: ticket.uri,
+        fingerprint_short: ticket.fingerprint_short,
+        expires_in_secs: ticket.expires_in_secs,
+    };
+    if let Err(e) = send(write, &opened).await {
+        hub.pair_cancel(id).await;
+        return Err(e);
+    }
+    let guard = Duration::from_secs(ticket.expires_in_secs) + PAIR_GRACE;
+    let ended = |reason: &str| ControlResponse::PairingEnded {
+        reason: reason.into(),
+    };
+    let last = tokio::select! {
+        outcome = ticket.outcome => match outcome {
+            Ok(PairOutcome::Done { name }) => ControlResponse::PairingDone { name },
+            Ok(PairOutcome::Ended { reason }) => ended(&reason),
+            Err(_) => ended(pairing_ended::BRAIN_STOPPING),
+        },
+        _ = reader.fill_buf() => {
+            // Ctrl-C de `jarvis pair` : connexion fermée.
+            hub.pair_cancel(id).await;
+            return Ok(false);
+        }
+        () = tokio::time::sleep(guard) => {
+            hub.pair_cancel(id).await;
+            ended(pairing_ended::TIMED_OUT)
+        }
+    };
+    send(write, &last).await?;
+    Ok(true)
 }
 
 async fn send<W: AsyncWrite + Unpin>(write: &mut W, response: &ControlResponse) -> io::Result<()> {
@@ -208,36 +296,16 @@ async fn send<W: AsyncWrite + Unpin>(write: &mut W, response: &ControlResponse) 
 async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
     let Shared {
         brain,
-        listen,
         speaker,
         voice,
         board,
+        hub,
     } = shared;
     match request {
         ControlRequest::Say { text } => ControlResponse::Reply {
             speech: brain.handle_text(&text).await.speech,
         },
         ControlRequest::Status => status(brain),
-        ControlRequest::Wake => {
-            listen.wake().await;
-            status(brain)
-        }
-        ControlRequest::Listen {
-            audio,
-            muted,
-            follow_up,
-            ear,
-        } => match decode_pcm(&audio) {
-            Ok(samples) => {
-                board.touch(ear.as_deref().unwrap_or(DEFAULT_EAR));
-                voice
-                    .speak(listen.listen(&samples, muted, follow_up).await)
-                    .await
-            }
-            Err(_) => ControlResponse::Error {
-                message: "audio invalide".into(),
-            },
-        },
         ControlRequest::Announcements { ear } => {
             announcements(board, voice, ear.as_deref().unwrap_or(DEFAULT_EAR)).await
         }
@@ -248,6 +316,24 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
                 message: format!("Impossible d'enregistrer le mode : {e}."),
             },
         },
+        // Traité par `handle_client` (réponse en deux temps).
+        ControlRequest::PairStart => ControlResponse::Error {
+            message: "requête invalide".into(),
+        },
+        ControlRequest::PairLocal { name } => match hub {
+            Some(hub) => hub.pair_local(name).await,
+            None => no_network(),
+        },
+        ControlRequest::ListEars => match hub {
+            Some(hub) => ControlResponse::Ears {
+                ears: hub.list_ears().await,
+            },
+            None => no_network(),
+        },
+        ControlRequest::Unpair { ear } => match hub {
+            Some(hub) => hub.unpair(ear).await,
+            None => no_network(),
+        },
     }
 }
 
@@ -255,11 +341,24 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
 /// requête à 30 s. Au-delà, les annonces restantes partent sans voix.
 const ANNOUNCE_SYNTH_BUDGET: Duration = Duration::from_secs(20);
 
+fn no_network() -> ControlResponse {
+    ControlResponse::Error {
+        message: NO_NETWORK.into(),
+    }
+}
+
 /// Annonces de l'oreille `ear`, avec voix et bip.
 async fn announcements(board: &AnnouncementBoard, voice: &Voice, ear: &str) -> ControlResponse {
+    ControlResponse::Announcements {
+        items: voiced(voice, board.take_for(ear)).await,
+    }
+}
+
+/// Voix et bip des annonces relevées (synthèse bornée à 20 s en tout).
+pub(crate) async fn voiced(voice: &Voice, taken: Vec<(String, Outcome)>) -> Vec<Announcement> {
     let deadline = tokio::time::Instant::now() + ANNOUNCE_SYNTH_BUDGET;
     let mut items = Vec::new();
-    for (speech, outcome) in board.take_for(ear) {
+    for (speech, outcome) in taken {
         let audio = tokio::time::timeout_at(deadline, voice.audio_for(&speech))
             .await
             .ok()
@@ -275,7 +374,7 @@ async fn announcements(board: &AnnouncementBoard, voice: &Voice, ear: &str) -> C
             sound,
         });
     }
-    ControlResponse::Announcements { items }
+    items
 }
 
 fn status(brain: &Brain) -> ControlResponse {

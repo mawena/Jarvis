@@ -24,6 +24,32 @@ pub struct Config {
     pub search: SearchSettings,
     /// Agent de code (section `[agent]`).
     pub agent: AgentSettings,
+    /// Oreilles en réseau (section `[network]`).
+    pub network: NetworkConfig,
+}
+
+/// Serveur des oreilles (WebSocket sur TLS) et annonce mDNS.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct NetworkConfig {
+    pub enabled: bool,
+    /// Adresse d'écoute `ip:port` (toutes les interfaces par défaut).
+    pub listen: String,
+    /// Nom annoncé ; vide : nom de la machine.
+    pub name: String,
+    /// Fenêtre de regroupement des réveils, en millisecondes.
+    pub arbiter_window_ms: u64,
+}
+
+impl Default for NetworkConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            listen: format!("0.0.0.0:{}", jarvis_protocol::ear::DEFAULT_PORT),
+            name: String::new(),
+            arbiter_window_ms: 300,
+        }
+    }
 }
 
 impl Default for Config {
@@ -40,6 +66,7 @@ impl Default for Config {
             tts: TtsConfig::default(),
             search: SearchSettings::default(),
             agent: AgentSettings::default(),
+            network: NetworkConfig::default(),
         }
     }
 }
@@ -456,6 +483,21 @@ mod tests {
             assert_eq!(r.projects[1].path, PathBuf::from("/srv/mawena"));
         }
         assert_eq!(c.search, SearchSettings::default());
+    }
+
+    #[test]
+    fn config_network_defauts_et_partielle() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = Config::load(&dir.path().join("absent.toml")).unwrap();
+        assert!(c.network.enabled);
+        assert_eq!(c.network.listen, "0.0.0.0:7341");
+        assert_eq!(c.network.name, "");
+        assert_eq!(c.network.arbiter_window_ms, 300);
+        let (_d, p) = write("[network]\nenabled = false\nname = \"Bureau\"\n");
+        let c = Config::load(&p).unwrap();
+        assert!(!c.network.enabled);
+        assert_eq!(c.network.name, "Bureau");
+        assert_eq!(c.network.listen, "0.0.0.0:7341");
     }
 
     #[test]

@@ -43,7 +43,9 @@ Garde-fous :
 
 - **L'oreille** écoute en permanence, mais n'envoie rien avant d'avoir entendu « Jarvis ». Elle
   joue les bips et la voix de Jarvis, et affiche une icône avec un menu (couper l'écoute, mode,
-  statut). Aujourd'hui sur le PC ; téléphone Android et iPhone prévus.
+  statut). Sur le PC, et sur toute machine Linux de la maison appairée par `jarvis pair`
+  (réseau local, TLS) ; téléphone Android et iPhone prévus. Si plusieurs oreilles entendent
+  « Jarvis », une seule répond.
 - **Le cerveau** transcrit la phrase (Whisper), vérifie la voix (CAM++), comprend la demande
   et exécute la bonne compétence. Il répond avec une voix française (Piper).
 - **Aucun son n'est enregistré sur le disque** : seule une empreinte de la voix est gardée,
@@ -85,6 +87,7 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 | « Jarvis, … » | parler à Jarvis (l'oreille tourne en service) |
 | `jarvis say "lance VS Code"` | même chose, par écrit |
 | `jarvis mode local` / `jarvis mode en-ligne` | choisir l'IA |
+| `jarvis pair` / `jarvis ears` / `jarvis unpair <nom ou id>` | appairer, lister, retirer une oreille |
 | `jarvisctl status` | état du cerveau, de l'oreille, du mode, d'Ollama |
 | `jarvisctl logs [-f] [--oreille]` | journaux |
 | `jarvisctl start` / `stop` / `restart` `[cerveau\|oreille]` | piloter les services |
@@ -97,7 +100,7 @@ Les réglages sont dans `~/.config/jarvis/config.toml` (cerveau) et `~/.config/j
 
 | | Mode local | Mode en ligne |
 | --- | --- | --- |
-| Son du micro | jamais | jamais |
+| Son du micro | jamais (une autre oreille l'envoie au PC après « Jarvis », chiffré, sur le réseau local) | pareil |
 | Texte des phrases | reste sur le PC | phrases non reconnues par les raccourcis → Claude |
 | Recherche | SearXNG local, qui relaie la requête aux moteurs | pareil, résumé par Claude |
 
@@ -110,6 +113,7 @@ Le détail est dans [docs/recherche.md](docs/recherche.md) et
   désinstallation.
 - [docs/oreille.md](docs/oreille.md) : l'oreille du PC, enrôlement, icône, commandes vocales,
   voix, réglages, dépannage (dont les mots mal compris).
+- [docs/reseau.md](docs/reseau.md) : oreilles en réseau, appairage, pare-feu, certificat.
 - [docs/recherche.md](docs/recherche.md) : recherche sur internet et vidéos.
 - [docs/ia-locale.md](docs/ia-locale.md) : choix du modèle local et de Whisper, mesures.
 - [docs/essais/](docs/essais/README.md) : fiches d'essai en conditions réelles.
@@ -125,7 +129,7 @@ Espace de travail Cargo (Rust, édition 2024) :
 | `jarvis-protocol` | messages échangés entre oreilles, outils et cerveau |
 | `jarvis-skills` | compétences : médias (MPRIS, PipeWire), applications, recherche, vidéos, alimentation… |
 | `jarvis-brain` | le cerveau : service, compréhension, IA, Whisper, empreinte vocale, voix |
-| `jarvis-ear-core` | cœur commun des oreilles : mot d'éveil, fin de phrase |
+| `jarvis-ear-core` | cœur commun des oreilles : mot d'éveil, fin de phrase, réseau (connexion, appairage, découverte) |
 | `jarvis-ear` | l'oreille du PC : micro, haut-parleur, icône |
 | `jarvis-cli` | l'outil `jarvis` |
 | `jarvisctl` | installation, services, diagnostic, mises à jour |

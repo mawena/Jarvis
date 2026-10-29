@@ -1,17 +1,20 @@
-//! Client du socket de contrôle du cerveau : une connexion par requête.
+//! Client du socket de contrôle du cerveau (une connexion par requête). L'oreille ne
+//! s'en sert plus que pour l'appairage local (`PairLocal`) et l'enrôlement vocal
+//! (`EnrollVoice`) ; les phrases et les annonces passent par le réseau (voir
+//! [`crate::link`]).
 
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use jarvis_protocol::{ControlRequest, ControlResponse};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-/// Délai maximal d'une requête (sauf `Listen`).
+/// Délai maximal d'une requête.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Délai maximal d'une phrase (`Listen`) : le pire cas du cerveau, plus une marge.
+/// Attente maximale de la réponse à une phrase : le pire cas du cerveau, plus une marge.
 ///
 /// ```text
 ///   reconnaissance vocale (marge)           2 s
@@ -21,16 +24,11 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// = 45 s, arrondi à 50 s
 /// ```
 ///
-/// Vérifié côté cerveau par le test `budget_ecoute` de jarvis-brain.
+/// Vérifié côté cerveau par le test `budget_ecoute` de jarvis-brain (qui lit cette ligne).
 const LISTEN_TIMEOUT: Duration = Duration::from_secs(50);
 
-/// Délai accordé à `req`.
-fn timeout_for(req: &ControlRequest) -> Duration {
-    match req {
-        ControlRequest::Listen { .. } => LISTEN_TIMEOUT,
-        _ => REQUEST_TIMEOUT,
-    }
-}
+/// Au-delà, la réponse attendue n'est plus attendue (les annonces peuvent passer).
+pub const RESPONSE_TIMEOUT: Duration = LISTEN_TIMEOUT;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -44,14 +42,39 @@ pub enum ClientError {
     Protocol(String),
 }
 
+/// Socket de contrôle du cerveau (remplaçable dans les tests).
+#[async_trait::async_trait]
+pub trait Brain: Send + Sync + 'static {
+    async fn request(&self, req: ControlRequest) -> Result<ControlResponse, ClientError>;
+}
+
+/// Cerveau joint par son socket de contrôle.
+pub struct SocketBrain {
+    pub socket: PathBuf,
+}
+
+#[async_trait::async_trait]
+impl Brain for SocketBrain {
+    async fn request(&self, req: ControlRequest) -> Result<ControlResponse, ClientError> {
+        request(&self.socket, &req).await
+    }
+}
+
 /// Envoie `req` au cerveau et lit la réponse.
 pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlResponse, ClientError> {
-    tokio::time::timeout(timeout_for(req), exchange(socket, req))
+    tokio::time::timeout(REQUEST_TIMEOUT, exchange(socket, req))
         .await
         .map_err(|_| ClientError::Timeout)?
 }
 
 async fn exchange(socket: &Path, req: &ControlRequest) -> Result<ControlResponse, ClientError> {
+    // Dossier à soi et fermé aux autres : sinon, ce qui répond pourrait ne pas être le
+    // cerveau (et l'appairage local lui ferait confiance).
+    match jarvis_protocol::check_socket_dir(socket) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Err(ClientError::BrainUnreachable),
+        Err(e) => return Err(e.into()),
+    }
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
@@ -68,45 +91,32 @@ async fn exchange(socket: &Path, req: &ControlRequest) -> Result<ControlResponse
         .next_line()
         .await?
         .ok_or_else(|| ClientError::Protocol("connexion fermée sans réponse".into()))?;
-    serde_json::from_str(&answer).map_err(|e| ClientError::Protocol(e.to_string()))
+    // Pas le texte dans l'erreur : il peut contenir un jeton (`PairedLocal`).
+    serde_json::from_str(&answer).map_err(|e| ClientError::Protocol(format!("{:?}", e.classify())))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 
-    fn listen() -> ControlRequest {
-        ControlRequest::Listen {
-            audio: String::new(),
-            muted: false,
-            follow_up: false,
-            ear: None,
-        }
+    /// Dossier fermé aux autres, comme celui du vrai cerveau.
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
     }
 
     #[test]
-    fn ecoute_a_son_propre_delai_plus_long() {
-        assert_eq!(timeout_for(&listen()), LISTEN_TIMEOUT);
-        assert_eq!(LISTEN_TIMEOUT, Duration::from_secs(50));
-        assert!(LISTEN_TIMEOUT > REQUEST_TIMEOUT);
-    }
-
-    #[test]
-    fn autres_requetes_gardent_trente_secondes() {
-        for req in [
-            ControlRequest::Status,
-            ControlRequest::Wake,
-            ControlRequest::Say { text: "x".into() },
-            ControlRequest::EnrollVoice { samples: vec![] },
-        ] {
-            assert_eq!(timeout_for(&req), Duration::from_secs(30), "{req:?}");
-        }
+    fn attente_de_la_reponse_cinquante_secondes() {
+        assert_eq!(RESPONSE_TIMEOUT, Duration::from_secs(50));
+        assert!(RESPONSE_TIMEOUT > REQUEST_TIMEOUT);
     }
 
     #[tokio::test]
     async fn socket_absent_cerveau_injoignable() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_dir();
         let err = request(&dir.path().join("absent.sock"), &ControlRequest::Status)
             .await
             .unwrap_err();
@@ -114,8 +124,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dossier_du_socket_ouvert_aux_autres_refuse() {
+        let dir = private_dir();
+        let path = dir.path().join("b.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = request(&path, &ControlRequest::PairLocal { name: "PC".into() })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ClientError::Io(e) if e.kind() == ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("peu sûr"), "{err}");
+    }
+
+    #[tokio::test]
     async fn aller_retour_sur_un_faux_serveur() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_dir();
         let path = dir.path().join("b.sock");
         let listener = UnixListener::bind(&path).unwrap();
         tokio::spawn(async move {
@@ -127,12 +153,14 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
-            assert_eq!(line, r#"{"type":"wake"}"#);
+            assert_eq!(line, r#"{"type":"pair_local","name":"PC"}"#);
             w.write_all(b"{\"type\":\"reply\",\"speech\":\"ok\"}\n")
                 .await
                 .unwrap();
         });
-        let resp = request(&path, &ControlRequest::Wake).await.unwrap();
+        let resp = request(&path, &ControlRequest::PairLocal { name: "PC".into() })
+            .await
+            .unwrap();
         assert_eq!(
             resp,
             ControlResponse::Reply {

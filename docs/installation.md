@@ -30,7 +30,11 @@ Si un ancien `jarvis-brain` existe dans `~/.cargo/bin` : `cargo uninstall jarvis
 - **Le cerveau** (`jarvis-brain.service`) et **l'oreille du PC** (`jarvis-ear.service`)
   démarrent seuls à l'ouverture de la session graphique et s'arrêtent avec elle.
 - L'oreille démarre après le cerveau, mais n'en dépend pas : sans cerveau, elle tourne quand
-  même et son icône affiche « cerveau injoignable ».
+  même. Son icône affiche « connexion au PC… » tant qu'elle n'a pas encore pu s'appairer
+  (premier démarrage), puis « PC injoignable » ou « connexion au PC… » une fois appairée.
+- L'oreille du PC parle au cerveau par le réseau des oreilles (TLS sur `127.0.0.1`, port
+  7341), comme toute autre oreille, et s'appaire seule à son premier démarrage. Le socket
+  Unix reste pour `jarvis`, `jarvisctl`, l'enrôlement et l'appairage.
 - Tant que le mot d'éveil n'est pas enregistré (`jarvis-ear enroll`), le service de l'oreille
   est **sauté** (ni démarré ni en échec). Le premier enrôlement le démarre à la fin. Ce test
   porte sur le chemin par défaut `~/.local/share/jarvis/wakeword/jarvis.rpw`.
@@ -65,6 +69,17 @@ Les journaux sont aussi lisibles directement : `journalctl --user -u jarvis-brai
 Une installation antérieure à l'oreille en service n'a que l'unité du cerveau :
 `jarvisctl update` ajoute et active celle de l'oreille. Quitte d'abord une oreille lancée à la
 main dans un terminal, sinon deux oreilles tourneraient.
+
+Le cerveau et l'oreille se mettent toujours à jour **ensemble** (`jarvisctl update` le fait) :
+depuis les oreilles en réseau, une oreille trop ancienne est refusée par le cerveau
+(« requête invalide »), et une oreille récente ne sait pas parler à un cerveau ancien.
+
+## Oreilles en réseau
+
+Une autre machine (ou plus tard un téléphone) peut servir d'oreille : `jarvis pair` sur le PC,
+`jarvis-ear pair …` sur l'oreille ; `jarvis ears` les liste, `jarvis unpair <nom>` en retire
+une. Si le pare-feu `ufw` est actif, ouvrez le port 7341/tcp et mDNS (5353/udp) au réseau
+local ; `jarvisctl doctor` donne les commandes. Tout est dans [reseau.md](reseau.md).
 
 ## Recherche (SearXNG)
 

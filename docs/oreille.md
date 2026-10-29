@@ -5,6 +5,10 @@
 ta voix tournent sur la machine. Rien ne quitte l'oreille avant le mot d'éveil, et les phrases
 ne sont jamais enregistrées : seules les prises de « Jarvis » de l'enrôlement restent sur disque.
 
+L'oreille parle au cerveau par le même protocole que les autres oreilles (WebSocket sur TLS,
+ici sur `127.0.0.1`) et s'appaire seule au premier démarrage. Autres oreilles, appairage,
+pare-feu : [reseau.md](reseau.md).
+
 ## Prérequis
 
 ```bash
@@ -77,7 +81,8 @@ jarvisctl disable oreille         # ne plus la démarrer avec la session (enable
   `~/.local/share/jarvis/wakeword/jarvis.rpw` ; avec un autre `wakeword_path` dans `ear.toml`,
   garde aussi un fichier à ce chemin.
 - L'oreille démarre après le cerveau mais ne dépend pas de lui : sans cerveau, l'icône affiche
-  « cerveau injoignable ».
+  « PC injoignable », l'oreille se reconnecte seule, et si on lui parle entre-temps elle répond
+  « le PC est endormi ».
 - Si la zone de notification n'est pas encore prête à l'ouverture de la session, l'oreille
   écoute quand même et l'icône apparaît dès que la zone est là.
 
@@ -104,8 +109,9 @@ Si le service tourne, `jarvis-ear` refuse de démarrer (code 1) et l'explique ; 
 - **Quitter l'oreille**. Si une phrase était en cours, la musique est d'abord remise à son
   volume. Le service reste arrêté jusqu'à la prochaine session ou `jarvisctl start oreille`.
 
-La première ligne du menu résume l'état : écoute, micro coupé, cerveau injoignable, mode et
-modèle.
+La première ligne du menu résume l'état : écoute (avec le mode et le modèle), écoute coupée,
+micro coupé, « PC injoignable », « connexion au PC… » ou « appairage refusé : relancez
+jarvis-ear pair ». Elle suit la connexion au cerveau en direct.
 
 L'écoute coupée est retenue au redémarrage de l'oreille, du service comme de la session
 (fichier `~/.local/state/jarvis/ear-muted`).
@@ -214,6 +220,8 @@ en mémoire, recréé à chaque ouverture de session). Le service du cerveau fix
 | `~/.local/share/jarvis/wakeword/jarvis.rpw` | le modèle du mot d'éveil |
 | `~/.local/share/jarvis/voiceprint/charles.json` | l'empreinte vocale : un vecteur de nombres, sans son (droits 0600) |
 | `~/.config/jarvis/ear.toml` | réglages de l'oreille (optionnel) |
+| `~/.local/share/jarvis/ear/pairing.toml` | appairage : jeton et empreinte du cerveau (droits 0600) |
+| `~/.local/share/jarvis/ear/offline-phrase.bin` (et `.id`) | « le PC est endormi », voix de Jarvis reçue du cerveau |
 | `~/.local/state/jarvis/ear-muted` | présent tant que l'écoute est coupée |
 | `$XDG_RUNTIME_DIR/jarvis/ducked-volume` | volume d'origine, le temps d'une phrase |
 
@@ -229,7 +237,15 @@ configuration et données, modèles compris).
 # wakeword_path = "~/.local/share/jarvis/wakeword/jarvis.rpw"
 # threshold = 0.5          # seuil de détection du mot d'éveil (plus haut = moins de fausses détections)
 # device = "nom du micro"  # micro par défaut sinon
+# name = "Salon"           # nom donné par jarvis-ear pair (défaut : nom de la machine)
+# brain_address = "192.168.1.20"   # adresse du cerveau (hôte[:port]) si mDNS ne le trouve pas
 ```
+
+`name` ne sert qu'à l'appairage par code (`jarvis-ear pair`) : l'oreille du PC, appairée
+d'office par le socket, s'appelle toujours « PC » et l'ignore. Les annonces des agents vont à
+l'oreille de la dernière phrase, reconnue par son identifiant, pas par son nom.
+
+Le cerveau et ses fichiers réseau (certificat, registre des oreilles) : [reseau.md](reseau.md).
 
 `~/.config/jarvis/config.toml`, côté cerveau (puis `jarvisctl restart`) :
 
@@ -292,7 +308,8 @@ Commence par :
 jarvisctl doctor
 ```
 
-Les lignes `!` concernent l'oreille (avertissements, pas d'échec) :
+Les lignes `!` concernent l'oreille et le réseau des oreilles (avertissements, pas d'échec ;
+celles du réseau sont détaillées dans [reseau.md](reseau.md#dépannage)) :
 
 - **Bibliothèques sherpa-onnx absentes** : `jarvisctl install` ou `jarvisctl update`.
 - **Voix de Jarvis absente** : `scripts/download-models.sh voice`, puis `jarvisctl restart`.
@@ -304,6 +321,11 @@ Les lignes `!` concernent l'oreille (avertissements, pas d'échec) :
 - **Oreille non démarrée : pas de mot d'éveil enregistré** : `jarvis-ear enroll`.
 - **Oreille inactive** (après « Quitter l'oreille » ou une panne répétée) :
   `jarvisctl start oreille`, puis `jarvisctl logs --oreille`.
+- **« PC injoignable » qui dure** : `jarvisctl status` (cerveau actif ?), puis les lignes
+  réseau de `jarvisctl doctor` (certificat, port 7341, oreilles appairées) ; si le port du
+  cerveau a changé, voir [reseau.md](reseau.md#si-le-pc-change-dadresse-ou-de-port).
+- **« Appairage refusé »** : l'oreille du PC se réappaire seule ; une autre oreille : `jarvis
+  pair` sur le PC puis `jarvis-ear pair …` (voir [reseau.md](reseau.md)).
 - **Pas d'icône** : `jarvisctl status oreille`. Si l'oreille est active, cherche « zone de
   notification » dans `jarvisctl logs --oreille`.
 - **Jarvis ne réagit pas** : `jarvisctl logs --oreille -f` (ce que l'oreille entend) et
