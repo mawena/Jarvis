@@ -69,21 +69,9 @@ pub enum ControlRequest {
     SetMode {
         mode: Mode,
     },
-    /// « Jarvis » entendu : le cerveau baisse le son.
-    Wake,
-    /// Phrase captée : `audio` = i16 little-endian 16 kHz mono en base64 (vide si rien
-    /// n'a été dit). Rétablit toujours le son.
-    Listen {
-        audio: String,
-        muted: bool,
-        /// Réponse à une question du cerveau (`EarAction::AwaitReply`), captée sans
-        /// mot d'éveil.
-        #[serde(default)]
-        follow_up: bool,
-        /// Nom de l'oreille ; absent : [`DEFAULT_EAR`].
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        ear: Option<String>,
-    },
+    // Pas de `wake` ni de `listen` : une phrase n'arrive que par le réseau des oreilles
+    // (`ear`), où l'arbitre choisit une seule oreille. Une oreille trop ancienne reçoit
+    // « requête invalide ».
     /// Annonces en attente pour cette oreille (fin d'une tâche d'agent…) ;
     /// oreille absente : [`DEFAULT_EAR`].
     Announcements {
@@ -91,7 +79,7 @@ pub enum ControlRequest {
         ear: Option<String>,
     },
     /// Enregistre l'empreinte vocale : chaque élément est un échantillon audio
-    /// (même format que `Listen.audio`).
+    /// (i16 little-endian 16 kHz mono en base64, voir [`encode_pcm`]).
     EnrollVoice {
         samples: Vec<String>,
     },
@@ -373,24 +361,6 @@ mod tests {
     }
 
     #[test]
-    fn wake_serialise() {
-        let json = serde_json::to_string(&ControlRequest::Wake).unwrap();
-        assert_eq!(json, r#"{"type":"wake"}"#);
-    }
-
-    #[test]
-    fn listen_aller_retour() {
-        let r = ControlRequest::Listen {
-            audio: encode_pcm(&[1, 2, 3]),
-            muted: true,
-            follow_up: true,
-            ear: Some("salon".into()),
-        };
-        let json = serde_json::to_string(&r).unwrap();
-        assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
-    }
-
-    #[test]
     fn enroll_voice_aller_retour() {
         let r = ControlRequest::EnrollVoice {
             samples: vec![encode_pcm(&[1, 2]), encode_pcm(&[3])],
@@ -452,37 +422,23 @@ mod tests {
     }
 
     #[test]
-    fn ancien_listen_sans_follow_up() {
-        let r: ControlRequest =
-            serde_json::from_str(r#"{"type":"listen","audio":"","muted":false}"#).unwrap();
-        assert_eq!(
-            r,
-            ControlRequest::Listen {
-                audio: String::new(),
-                muted: false,
-                follow_up: false,
-                ear: None,
-            }
-        );
+    fn ancienne_requete_listen_refusee() {
+        // Une oreille d'avant le réseau : refusée (« requête invalide » côté cerveau),
+        // aucune phrase n'échappe à l'arbitre.
+        for line in [
+            r#"{"type":"wake"}"#,
+            r#"{"type":"listen","audio":"","muted":false}"#,
+            r#"{"type":"listen","audio":"","muted":true,"follow_up":true,"ear":"salon"}"#,
+        ] {
+            assert!(
+                serde_json::from_str::<ControlRequest>(line).is_err(),
+                "{line}"
+            );
+        }
     }
 
     #[test]
-    fn listen_sans_ear_reste_lisible() {
-        let r: ControlRequest =
-            serde_json::from_str(r#"{"type":"listen","audio":"","muted":true,"follow_up":true}"#)
-                .unwrap();
-        assert_eq!(
-            r,
-            ControlRequest::Listen {
-                audio: String::new(),
-                muted: true,
-                follow_up: true,
-                ear: None,
-            }
-        );
-        // Sans oreille, rien n'est envoyé : un ancien cerveau lit la même ligne.
-        let json = serde_json::to_string(&r).unwrap();
-        assert!(!json.contains("ear"), "{json}");
+    fn annonces_sans_ear_restent_lisibles() {
         let r: ControlRequest = serde_json::from_str(r#"{"type":"announcements"}"#).unwrap();
         assert_eq!(r, ControlRequest::Announcements { ear: None });
         assert_eq!(DEFAULT_EAR, "pc");

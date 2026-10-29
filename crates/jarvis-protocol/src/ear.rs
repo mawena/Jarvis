@@ -6,7 +6,7 @@
 //! inconnus sont lus comme `Unknown` (à ignorer). Tout changement incompatible fait
 //! passer [`PROTOCOL_VERSION`] à 2.
 
-use crate::{ControlResponse, DEFAULT_EAR, Mode, SpeechAudio};
+use crate::{ControlResponse, Mode, SpeechAudio};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -29,13 +29,6 @@ impl EarId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-
-    /// Provisoire (retiré en tâche 9) : oreille passée par le socket Unix
-    /// (`Listen`), nommée par son champ `ear` (absent : [`DEFAULT_EAR`]).
-    /// Le préfixe évite toute confusion avec une oreille appairée.
-    pub fn unix_socket(name: Option<&str>) -> Self {
-        EarId(format!("unix-socket:{}", name.unwrap_or(DEFAULT_EAR)))
     }
 }
 
@@ -351,9 +344,6 @@ mod tests {
         assert_eq!(id.as_str(), "ab12");
         assert_eq!(id.to_string(), "ab12");
         assert_eq!(serde_json::to_string(&id).unwrap(), r#""ab12""#);
-        assert_eq!(EarId::unix_socket(None), EarId::unix_socket(Some("pc")));
-        assert_eq!(EarId::unix_socket(None).as_str(), "unix-socket:pc");
-        assert_ne!(EarId::unix_socket(Some("salon")), EarId::unix_socket(None));
     }
 
     #[test]
