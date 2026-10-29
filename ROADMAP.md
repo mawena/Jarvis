@@ -77,7 +77,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 *Plan : [phase 4](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md), branche `feature/oreilles-reseau` (en cours)*
 
 - [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
-- [ ] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`)
+- [x] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`) — v1 : messages JSON, trames audio binaires, empreinte du certificat, adresse d'appairage ; oreille transmise dans tout le cerveau
 - [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau
 - [ ] 4.4 Serveur WebSocket + TLS avec certificat épinglé
 - [ ] 4.5 Découverte du cerveau par mDNS, adresse manuelle en secours
