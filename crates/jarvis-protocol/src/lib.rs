@@ -10,6 +10,21 @@ pub mod pairing_uri;
 pub use ear::{EarId, EarSummary};
 pub use fingerprint::Fingerprint;
 
+/// Raisons de `ControlResponse::PairingEnded` : en minuscule, sans point final
+/// (`jarvis pair` affiche « Fenêtre d'appairage fermée : <raison>. »).
+pub mod pairing_ended {
+    pub const TIMED_OUT: &str = "délai écoulé";
+    pub const CANCELLED: &str = "annulée";
+    pub const TOO_MANY_ATTEMPTS: &str = "trop d'essais";
+    pub const REPLACED: &str = "une autre fenêtre d'appairage a été ouverte";
+    pub const BRAIN_STOPPING: &str = "le cerveau s'arrête";
+
+    /// Registre des oreilles impossible à écrire.
+    pub fn not_saved(error: &str) -> String {
+        format!("enregistrement impossible ({error})")
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fmt;

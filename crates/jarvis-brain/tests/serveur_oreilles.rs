@@ -582,7 +582,7 @@ async fn vingt_codes_faux_ferment_la_fenetre() {
     assert_eq!(
         cli.read().await,
         ControlResponse::PairingEnded {
-            reason: "Trop d'essais.".into()
+            reason: jarvis_protocol::pairing_ended::TOO_MANY_ATTEMPTS.into()
         }
     );
     let stream = stream_to(rig.addr, &rig.fingerprint).await;

@@ -1,7 +1,7 @@
 mod pair;
 
 use clap::{Parser, Subcommand};
-use jarvis_protocol::{ControlRequest, ControlResponse, Mode};
+use jarvis_protocol::{ControlRequest, ControlResponse, Mode, pairing_ended};
 use std::io::{BufRead, BufReader, ErrorKind, IsTerminal, Write};
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
@@ -123,9 +123,10 @@ fn wait_pairing(mut conn: BufReader<UnixStream>, expires_in_secs: u64) -> ExitCo
         }
         Ok(ControlResponse::Error { message }) => fail(&message, 1),
         Ok(_) => fail("Réponse inattendue du cerveau.", 1),
-        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
-            fail("Fenêtre d'appairage fermée : délai écoulé.", 1)
-        }
+        Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => fail(
+            &format!("Fenêtre d'appairage fermée : {}.", pairing_ended::TIMED_OUT),
+            1,
+        ),
         Err(e) => fail(&format!("Échec de la communication : {e}."), 1),
     }
 }

@@ -10,6 +10,7 @@ use crate::listen::ListenService;
 use crate::pairing::{PairAttempt, PairingWindow};
 use crate::tts::Voice;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
+use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
 use sha2::{Digest, Sha256};
@@ -498,7 +499,7 @@ impl State {
                     let actions = self.arbiter.tick(Instant::now());
                     self.apply(actions);
                 }
-                () = until(expiry) => self.close_pairing("Délai écoulé."),
+                () = until(expiry) => self.close_pairing(pairing_ended::TIMED_OUT),
                 _ = tick.tick() => self.expire_captures(),
                 changed = async { modes.as_mut().expect("garde").changed().await }, if modes.is_some() => {
                     match changed {
@@ -514,7 +515,7 @@ impl State {
         }
         if let Some(open) = self.pairing.take() {
             let _ = open.waiter.send(PairOutcome::Ended {
-                reason: "Le cerveau s'arrête.".into(),
+                reason: pairing_ended::BRAIN_STOPPING.into(),
             });
         }
     }
@@ -576,7 +577,7 @@ impl State {
             }
             Command::PairCancel { id } => {
                 if self.pairing.as_ref().is_some_and(|p| p.id == id) {
-                    self.close_pairing("Fenêtre fermée.");
+                    self.close_pairing(pairing_ended::CANCELLED);
                 }
             }
             Command::PairLocal { name, reply } => {
@@ -1180,7 +1181,7 @@ impl State {
     fn pair_start(&mut self) -> Result<PairTicket, String> {
         if let Some(old) = self.pairing.take() {
             let _ = old.waiter.send(PairOutcome::Ended {
-                reason: "Une autre fenêtre d'appairage a été ouverte.".into(),
+                reason: pairing_ended::REPLACED.into(),
             });
         }
         let (window, code) = PairingWindow::open(Instant::now(), self.settings.pairing_ttl);
@@ -1255,7 +1256,7 @@ impl State {
                     }
                     Err(e) => {
                         warn!(erreur = %e, "registre des oreilles : écriture impossible");
-                        self.close_pairing(&format!("Enregistrement impossible : {e}."));
+                        self.close_pairing(&pairing_ended::not_saved(&e.to_string()));
                         closed
                     }
                 }
@@ -1263,7 +1264,7 @@ impl State {
             PairAttempt::WrongCode { attempts_left } => {
                 info!(%from, restants = attempts_left, "code d'appairage faux");
                 if !open.window.is_open(now) {
-                    self.close_pairing("Trop d'essais.");
+                    self.close_pairing(pairing_ended::TOO_MANY_ATTEMPTS);
                 }
                 BrainMessage::Rejected {
                     reason: RejectReason::WrongCode { attempts_left },
@@ -1276,7 +1277,7 @@ impl State {
                 }
             }
             PairAttempt::Closed => {
-                self.close_pairing("Délai écoulé.");
+                self.close_pairing(pairing_ended::TIMED_OUT);
                 closed
             }
         }
