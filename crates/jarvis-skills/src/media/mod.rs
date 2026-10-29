@@ -3,6 +3,7 @@
 pub mod mpris;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde_json::json;
 
@@ -44,6 +45,45 @@ pub trait MediaPlayers: Send + Sync {
 pub struct MediaSkill {
     players: Arc<dyn MediaPlayers>,
     runner: Arc<dyn CommandRunner>,
+    memory: Arc<PauseMemory>,
+}
+
+/// Se souvient que Jarvis a mis en pause par la touche multimédia (lecteur
+/// invisible en MPRIS, comme Firefox en snap) : « reprends » doit alors passer
+/// par la touche aussi, et non relancer un vieux lecteur MPRIS resté en pause.
+/// Partagée entre la musique et la vidéo.
+#[derive(Debug, Default)]
+pub struct PauseMemory(AtomicBool);
+
+impl PauseMemory {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
+    }
+
+    pub(crate) fn remember_key_pause(&self, by_key: bool) {
+        self.0.store(by_key, Ordering::SeqCst);
+    }
+
+    /// Vrai si la dernière pause de Jarvis est passée par la touche ; oublié ensuite.
+    pub(crate) fn take_key_pause(&self) -> bool {
+        self.0.swap(false, Ordering::SeqCst)
+    }
+}
+
+/// Envoie une touche multimédia par xdotool ; vrai si elle est partie.
+pub(crate) fn press_media_key(runner: &dyn CommandRunner, cmd: PlayerCommand) -> bool {
+    let args = ["key", media_key(cmd)].map(String::from);
+    match runner.run("xdotool", &args) {
+        Ok(out) if out.success => true,
+        Ok(_) => {
+            tracing::warn!("xdotool a échoué pour {}", media_key(cmd));
+            false
+        }
+        Err(e) => {
+            tracing::warn!("xdotool indisponible : {e}");
+            false
+        }
+    }
 }
 
 const NO_PLAYER: &str = "Aucun lecteur n'est ouvert.";
@@ -63,7 +103,17 @@ fn media_key(cmd: PlayerCommand) -> &'static str {
 
 impl MediaSkill {
     pub fn new(players: Arc<dyn MediaPlayers>, runner: Arc<dyn CommandRunner>) -> Self {
-        Self { players, runner }
+        Self {
+            players,
+            runner,
+            memory: PauseMemory::new(),
+        }
+    }
+
+    /// Partage la mémoire de la pause (avec la vidéo).
+    pub fn with_memory(mut self, memory: Arc<PauseMemory>) -> Self {
+        self.memory = memory;
+        self
     }
 
     /// First playing player, else first paused one, else the first of the list.
@@ -81,29 +131,37 @@ impl MediaSkill {
 
     /// Send the media key through xdotool; `NO_PLAYER` if that fails.
     fn send_media_key(&self, cmd: PlayerCommand) -> Reply {
-        let args = ["key", media_key(cmd)].map(String::from);
-        match self.runner.run("xdotool", &args) {
-            Ok(out) if out.success => Reply::done(""),
-            Ok(_) => {
-                tracing::warn!("xdotool a échoué pour {}", media_key(cmd));
-                Reply::failed(NO_PLAYER)
-            }
-            Err(e) => {
-                tracing::warn!("xdotool indisponible : {e}");
-                Reply::failed(NO_PLAYER)
-            }
+        if press_media_key(self.runner.as_ref(), cmd) {
+            Reply::done("")
+        } else {
+            Reply::failed(NO_PLAYER)
         }
     }
 
     async fn send(&self, cmd: PlayerCommand) -> Result<Reply, SkillError> {
-        let Some(player) = self.target().await? else {
+        if cmd == PlayerCommand::Play && self.memory.take_key_pause() {
+            // Mis en pause par la touche : reprendre par la touche, sans réveiller
+            // un autre lecteur resté en pause.
             return Ok(self.send_media_key(cmd));
+        }
+        let Some(player) = self.target().await? else {
+            let reply = self.send_media_key(cmd);
+            if cmd == PlayerCommand::Pause {
+                self.memory
+                    .remember_key_pause(reply.outcome == crate::Outcome::Done);
+            }
+            return Ok(reply);
         };
         if cmd == PlayerCommand::Pause && player.status != PlaybackStatus::Playing {
             // Aucun lecteur MPRIS en lecture : la touche pause atteint aussi
             // Firefox en snap (sans effet si rien ne joue).
-            self.send_media_key(cmd);
+            let reply = self.send_media_key(cmd);
+            self.memory
+                .remember_key_pause(reply.outcome == crate::Outcome::Done);
             return Ok(Reply::done(""));
+        }
+        if cmd == PlayerCommand::Pause {
+            self.memory.remember_key_pause(false);
         }
         if cmd == PlayerCommand::Play && player.status == PlaybackStatus::Playing {
             return Ok(Reply::done(""));
@@ -401,6 +459,49 @@ mod tests {
         let r = s.call("media_pause", serde_json::json!({})).await.unwrap();
         assert_eq!(r.outcome, crate::Outcome::Done);
         assert_eq!(r.speech, "");
+    }
+
+    #[tokio::test]
+    async fn reprise_apres_pause_par_la_touche_sans_reveiller_un_vieux_lecteur() {
+        // Essai 6.7 : YouTube dans Firefox (snap, invisible) joue, un VLC oublié est en
+        // pause. « pause » passe par la touche ; « reprends » ne doit pas relancer VLC.
+        let (s, p, runner) = skill(vec![player("vlc", PlaybackStatus::Paused)]);
+        s.call("media_pause", serde_json::json!({})).await.unwrap();
+        let r = s.call("media_play", serde_json::json!({})).await.unwrap();
+        assert_eq!(r.outcome, crate::Outcome::Done);
+        assert!(p.sent.lock().unwrap().is_empty(), "VLC relancé");
+        assert_eq!(
+            runner.calls(),
+            vec![xdotool("XF86AudioPause"), xdotool("XF86AudioPlay")]
+        );
+        // Une seule fois : la reprise suivante revient au lecteur MPRIS.
+        s.call("media_play", serde_json::json!({})).await.unwrap();
+        assert_eq!(
+            *p.sent.lock().unwrap(),
+            vec![(
+                "org.mpris.MediaPlayer2.vlc".to_string(),
+                PlayerCommand::Play
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn reprise_apres_pause_mpris_reste_mpris() {
+        let (s, p, runner) = skill(vec![player("spotify", PlaybackStatus::Playing)]);
+        s.call("media_pause", serde_json::json!({})).await.unwrap();
+        assert!(runner.calls().is_empty());
+        assert_eq!(p.sent.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn memoire_partagee_avec_la_video() {
+        let memory = PauseMemory::new();
+        let (s, p, runner) = skill(vec![player("vlc", PlaybackStatus::Paused)]);
+        let s = s.with_memory(memory.clone());
+        memory.remember_key_pause(true);
+        s.call("media_play", serde_json::json!({})).await.unwrap();
+        assert!(p.sent.lock().unwrap().is_empty());
+        assert_eq!(runner.calls(), vec![xdotool("XF86AudioPlay")]);
     }
 
     #[tokio::test]

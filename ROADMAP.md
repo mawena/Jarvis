@@ -104,7 +104,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 6.4 « Ouvre les résultats » dans le navigateur du PC (page de résultats, ou le n-ième lien)
 - [x] 6.5 « Lance la vidéo de… » (`yt-dlp` ou SearXNG vidéos) — dans le navigateur, musique mise en pause
 - [x] 6.6 Relecture de la phase 6 et corrections : délai d'écoute de l'oreille porté à 50 s (recherche locale de 10 s), « … sur internet » limité aux questions, préchauffage local sans ralentir la commande suivante
-- [ ] 6.7 Essai réel avec Charles (Charles) — [fiche d'essai](docs/essais/essai-6.7-recherche.md)
+- [x] 6.8 Corrections de l'essai 6.7 : la vidéo met aussi en pause YouTube dans Firefox (touche pause), « reprends » ne relance plus un vieux lecteur resté en pause, extrait de repli choisi selon les mots de la question
+- [ ] 6.7 Essai réel avec Charles (Charles) — fait en partie par Claude le 2026-10-29 (étapes 1, 2, 3, 6 au clavier, 7) ; restent la voix (étapes 5 et 6) et le mode en ligne (clé Claude) — [fiche d'essai](docs/essais/essai-6.7-recherche.md)
 
 ## Phase 7 : agent de code
 *Plan : [phase 7](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md), branche `feature/agent-de-code` (fusionnée dans `develop`) — guide : [docs/agent.md](docs/agent.md)*

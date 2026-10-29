@@ -241,7 +241,7 @@ impl SearchSkill {
 
     /// Réponse dite et chemin suivi (`ia` ou `extrait`). `None` : page vide.
     async fn answer(&self, query: &str, page: &SearchPage) -> Option<(String, &'static str)> {
-        let extract = extract::extract_answer(page)?;
+        let extract = extract::extract_answer(query, page)?;
         if self.settings.summarize {
             let budget = self.summarizer.budget();
             let sources = self.sources(page);

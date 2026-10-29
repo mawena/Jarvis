@@ -60,7 +60,12 @@ par l'IA du mode actif, qui dispose des mêmes outils.
 - « lance la bande-annonce de Dune ».
 
 La vidéo vient des moteurs vidéo de SearXNG (`video_engines`, YouTube par défaut), sinon de
-`yt-dlp` en secours. Les lecteurs en cours (Spotify…) sont mis en pause avant l'ouverture.
+`yt-dlp` en secours. Les lecteurs en cours (Spotify…) sont mis en pause avant l'ouverture,
+puis Jarvis envoie la touche « pause » du clavier : elle arrête aussi ce que Jarvis ne voit pas,
+comme une vidéo YouTube dans Firefox installé en snap. Un « reprends » ensuite repasse par la
+touche, sans relancer un autre lecteur resté en pause (un vieux VLC, par exemple). Firefox
+bloque souvent la lecture automatique de la nouvelle vidéo : l'autoriser pour youtube.com
+(Paramètres → Vie privée et sécurité → Permissions → Lecture automatique).
 « Lance VS Code » ou « mets la vidéo en pause » ne sont pas des recherches.
 
 ## Ce qui quitte le PC
@@ -97,7 +102,9 @@ La vidéo vient des moteurs vidéo de SearXNG (`video_engines`, YouTube par déf
 ## Délais
 
 - SearXNG : 4 s (`timeout_ms`).
-- Résumé : 10 s en local, 5 s en ligne ; au-delà, Jarvis dit l'extrait du premier résultat.
+- Résumé : 10 s en local, 5 s en ligne ; au-delà, Jarvis dit un extrait : parmi les cinq
+  premiers résultats, la phrase qui reprend le plus de mots de la question (« D'après meteoart :
+  Il fera chaud demain à Lome. »), sinon la première phrase du premier résultat.
 - `yt-dlp` : 8 s (`ytdlp_timeout_s`).
 
 En local, compter environ 10 s pour une réponse résumée (1 à 2 s de SearXNG, environ 8 s

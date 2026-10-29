@@ -140,15 +140,16 @@ Remplis, puis colle-moi cette section.
 
 | Étape | OK ? | Remarque |
 | --- | --- | --- |
-| 1. `searx up` et `doctor` | | |
-| 1. Port 127.0.0.1 seulement | | |
-| 2. Recherche locale | | temps : … ; `ia` ou `extrait` : … |
-| 3. Ouvrir les résultats / le 2e | | |
-| 4. Recherche en ligne | | temps : … |
-| 5. Recherche à la voix | | |
-| 6. Vidéo + Spotify en pause | | lecture automatique ? |
-| 6. « pause » sur la vidéo | | |
-| 7. Rien chez Claude en local | | |
+| 1. `searx up` et `doctor` | oui | toutes les coches (Claude, 2026-10-29) |
+| 1. Port 127.0.0.1 seulement | oui | `127.0.0.1:8888` seulement |
+| 2. Recherche locale | en partie | 1er essai de Charles : 11,3 s, extrait hors sujet (« D'après meteofrance : Le changement climatique… ») → corrigé (extrait choisi selon la question) ; 2e essai : 7,6 s, résumé IA juste (28 °C / 25 °C) |
+| 3. Ouvrir les résultats / le 2e | oui | les deux pages s'ouvrent dans Firefox |
+| 4. Recherche en ligne | à faire | pas de clé Claude enregistrée |
+| 5. Recherche à la voix | à faire (Charles) | |
+| 6. Vidéo + Spotify en pause | non → corrigé | vidéo ouverte en 3 s, mais YouTube (Cardi B) dans Firefox ne se mettait pas en pause ; pas de lecture automatique (réglage Firefox) |
+| 6. « pause » sur la vidéo | oui | `jarvis say "pause"` arrête YouTube dans Firefox ; mais « reprends » relançait un vieux VLC → corrigé |
+| 6. « Jarvis… » pendant la vidéo | à faire (Charles) | |
+| 7. Rien chez Claude en local | oui | aucune clé Claude : rien ne peut partir ; journal non lisible depuis Claude |
 
 **Les réponses sont-elles justes et assez courtes ?**
 

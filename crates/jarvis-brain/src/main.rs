@@ -17,7 +17,7 @@ use jarvis_protocol::Mode;
 use jarvis_skills::agent::registry::Registry;
 use jarvis_skills::agent::{AgentSkill, recover_interrupted};
 use jarvis_skills::apps::{AppIndex, AppsSkill};
-use jarvis_skills::media::{MediaSkill, MprisPlayers};
+use jarvis_skills::media::{MediaSkill, MprisPlayers, PauseMemory};
 use jarvis_skills::search::{SearchSkill, SearxClient};
 use jarvis_skills::video::VideoSkill;
 use jarvis_skills::{Skill, SystemRunner, ToolSpec};
@@ -36,8 +36,12 @@ async fn main() -> anyhow::Result<()> {
     let runner = Arc::new(SystemRunner);
     // Lecteurs MPRIS partagés : la vidéo met la musique en pause.
     let players = Arc::new(MprisPlayers::new());
+    // Pause par la touche (Firefox en snap) : « reprends » passe aussi par la touche.
+    let pause_memory = PauseMemory::new();
     let mut skills: Vec<Arc<dyn Skill>> = vec![
-        Arc::new(MediaSkill::new(players.clone(), runner.clone())),
+        Arc::new(
+            MediaSkill::new(players.clone(), runner.clone()).with_memory(pause_memory.clone()),
+        ),
         Arc::new(AppsSkill::new(
             AppIndex::load(&AppIndex::default_dirs()),
             config.apps.aliases.clone(),
@@ -136,12 +140,10 @@ async fn main() -> anyhow::Result<()> {
                 runner.clone(),
                 config.search.clone(),
             )));
-            skills.push(Arc::new(VideoSkill::new(
-                client,
-                players,
-                runner.clone(),
-                config.search.clone(),
-            )));
+            skills.push(Arc::new(
+                VideoSkill::new(client, players, runner.clone(), config.search.clone())
+                    .with_memory(pause_memory),
+            ));
         }
         Err(e) => warn!(
             erreur = %e,
