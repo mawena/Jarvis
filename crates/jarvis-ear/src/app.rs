@@ -325,7 +325,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
 
     fn on_listen(&mut self, event: ListenEvent) {
         match event {
-            ListenEvent::Wake { score } => {
+            ListenEvent::Wake { score, .. } => {
                 tracing::info!("mot d'éveil détecté (score {score:.2})");
                 // « Jarvis » coupe la parole de Jarvis, et une question en attente.
                 if self.player.is_playing() {
@@ -347,6 +347,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             }
             ListenEvent::Utterance(samples) => self.send_listen(&samples),
             ListenEvent::NoSpeech => self.send_listen(&[]),
+            // Mode flux pas encore branché (tâche 7).
+            ListenEvent::Chunk(_) | ListenEvent::Ended { .. } => {}
         }
     }
 
