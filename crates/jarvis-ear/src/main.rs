@@ -261,13 +261,7 @@ async fn run(paths: Paths, profile: Option<String>) -> anyhow::Result<()> {
     });
 
     let control: Arc<dyn Brain> = Arc::new(SocketBrain { socket });
-    let (link, events) = spawn_link(
-        &store,
-        pairing,
-        local,
-        control.clone(),
-        config.brain_address(),
-    );
+    let (link, events) = spawn_link(&store, pairing, local, control, config.brain_address());
     let offline: OfflinePhrase = {
         let store = store.clone();
         Arc::new(move || store.offline_phrase().map(|(_, audio)| audio))
@@ -277,6 +271,7 @@ async fn run(paths: Paths, profile: Option<String>) -> anyhow::Result<()> {
         "oreille « {name} » démarrée (mot d'éveil : {})",
         wakeword.display()
     );
+    // Les annonces des agents arrivent par le lien (poussées par le cerveau).
     let mut app = App::new(
         listener,
         CpalCapture::new(config.device),
@@ -286,13 +281,8 @@ async fn run(paths: Paths, profile: Option<String>) -> anyhow::Result<()> {
         tray_tx,
     )
     .with_wake_threshold(threshold)
-    .with_name(name)
     .with_offline_phrase(offline)
     .with_mute_file(paths.mute_file);
-    // Annonces relevées par le socket Unix (oreille du PC seulement).
-    if local {
-        app = app.with_control(control);
-    }
     // Sans sortie audio, l'oreille fonctionne quand même, sans son.
     match CpalPlayer::new() {
         Ok(player) => app = app.with_player(Box::new(player)),
