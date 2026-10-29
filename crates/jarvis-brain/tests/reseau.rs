@@ -116,6 +116,8 @@ struct Fakes {
     ducker: Arc<FakeDucker>,
     media: Arc<FakeSkill>,
     suspend: Arc<Suspend>,
+    /// Fenêtre de l'arbitre.
+    window: Duration,
 }
 
 /// Cerveau en marche, dans son propre runtime (arrêté comme un processus tué).
@@ -177,11 +179,12 @@ impl Rig {
 }
 
 async fn rig() -> Rig {
-    rig_with(Duration::ZERO).await
+    rig_with(Duration::ZERO, WINDOW).await
 }
 
-/// `skill_delay` : durée de la compétence « suivant » (traitement long).
-async fn rig_with(skill_delay: Duration) -> Rig {
+/// `skill_delay` : durée de la compétence « suivant » (traitement long) ; `window` :
+/// fenêtre de l'arbitre.
+async fn rig_with(skill_delay: Duration, window: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let identity = BrainIdentity::load_or_create(&dir.path().join("tls")).unwrap();
     let mut registry = EarRegistry::load(&dir.path().join("ears.toml")).unwrap();
@@ -197,6 +200,7 @@ async fn rig_with(skill_delay: Duration) -> Rig {
                 .with_delay(skill_delay),
         ),
         suspend: Arc::new(Suspend::default()),
+        window,
     };
     let brain = start_brain(dir.path(), &fakes, "127.0.0.1:0".parse().unwrap()).await;
     Rig {
@@ -266,7 +270,7 @@ async fn start_brain(dir: &Path, fakes: &Fakes, bind: SocketAddr) -> BrainProc {
             port: addr.port(),
             fingerprint: identity.fingerprint,
             hosts: vec!["127.0.0.1".parse().unwrap()],
-            window: WINDOW,
+            window: fakes.window,
             pairing_ttl: Duration::from_secs(120),
         };
         let hub = Hub::spawn(settings, registry, services, None);
@@ -602,7 +606,9 @@ async fn la_perdante_recoit_stop() {
 
 #[tokio::test]
 async fn la_plus_forte_gagne() {
-    let rig = rig().await;
+    // La perdante se réveille la première : fenêtre d'une seconde pour que les deux
+    // réveils y tombent toujours, même machine chargée.
+    let rig = rig_with(Duration::ZERO, Duration::from_secs(1)).await;
     let (mut salon, mut cuisine) = two_ears(&rig).await;
     // Même score : la plus proche (son le plus fort) gagne.
     salon.wake(1, 0.8, -45.0).unwrap();
@@ -964,7 +970,7 @@ async fn annonce_retenue_pendant_une_phrase() {
 #[tokio::test]
 async fn pc_eveille_repond_avant_le_delai_de_l_oreille() {
     // Compétence lente (3 s) : la phrase du salon est longue à traiter.
-    let rig = rig_with(Duration::from_secs(3)).await;
+    let rig = rig_with(Duration::from_secs(3), WINDOW).await;
     let (mut salon, mut cuisine) = two_ears(&rig).await;
     let start = Instant::now();
     salon.wake(1, 0.9, -30.0).unwrap();
@@ -1035,11 +1041,14 @@ async fn capture_qui_continue_n_est_pas_abandonnee() {
 
 #[tokio::test]
 async fn gagnante_partie_pendant_la_fenetre_l_autre_est_elue() {
-    let rig = rig().await;
+    // Fenêtre d'une seconde : les deux réveils sont arrivés bien avant le départ.
+    let rig = rig_with(Duration::ZERO, Duration::from_secs(1)).await;
     let (salon, mut cuisine) = two_ears(&rig).await;
-    salon.wake(1, 0.95, -10.0).unwrap();
     cuisine.wake(1, 0.5, -40.0).unwrap();
+    salon.wake(1, 0.95, -10.0).unwrap();
     cuisine.speak(1, SUIVANT, 2).unwrap();
+    salon.speak(1, SUIVANT, 2).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
     salon.link.close().await;
     drop(salon);
     // La meilleure est partie avant la fin de la fenêtre : la cuisine est élue.
@@ -1047,13 +1056,15 @@ async fn gagnante_partie_pendant_la_fenetre_l_autre_est_elue() {
     cuisine.speak(1, SUIVANT, 3).unwrap();
     cuisine.end(1).unwrap();
     assert_eq!(heard_text(&cuisine.msg().await, 1), "suivant");
+    // Une seule baisse du son pour la phrase, rétablie une fois.
     assert_eq!(rig.ducker(), ["duck", "restore"]);
 }
 
 #[tokio::test]
 async fn fin_de_phrase_avant_l_election() {
-    // Phrase très courte : les deux fins arrivent avant la fin de la fenêtre.
-    let rig = rig().await;
+    // Phrase très courte : les deux fins arrivent avant la fin de la fenêtre (d'une
+    // seconde ici : la perdante se réveille la première).
+    let rig = rig_with(Duration::ZERO, Duration::from_secs(1)).await;
     let (mut salon, mut cuisine) = two_ears(&rig).await;
     salon.wake(5, 0.5, -30.0).unwrap();
     cuisine.wake(8, 0.9, -30.0).unwrap();
