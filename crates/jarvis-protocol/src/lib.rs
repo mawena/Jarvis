@@ -1,5 +1,14 @@
 //! Messages échangés entre le cerveau et ses clients sur le socket de contrôle.
 //! Format : une ligne JSON par message (terminée par `\n`).
+//! Le protocole réseau des oreilles (WebSocket) est dans [`ear`] et [`frame`].
+
+pub mod ear;
+pub mod fingerprint;
+pub mod frame;
+pub mod pairing_uri;
+
+pub use ear::{EarId, EarSummary};
+pub use fingerprint::Fingerprint;
 
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
@@ -86,6 +95,18 @@ pub enum ControlRequest {
     EnrollVoice {
         samples: Vec<String>,
     },
+    /// Ouvre la fenêtre d'appairage : réponse `Pairing`, puis, sur la même connexion,
+    /// `PairingDone` ou `PairingEnded`. Connexion fermée : fenêtre fermée.
+    PairStart,
+    /// Appairage de l'oreille du PC (le socket Unix vaut preuve, sans code).
+    PairLocal {
+        name: String,
+    },
+    ListEars,
+    /// Retire une oreille (nom ou identifiant) : réponse `Reply`.
+    Unpair {
+        ear: String,
+    },
 }
 
 /// Action demandée à l'oreille après une phrase entendue.
@@ -124,7 +145,8 @@ pub struct Announcement {
     pub sound: Option<Sound>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// `Debug` écrit à la main : jeton et code d'appairage masqués.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlResponse {
     Reply {
@@ -153,6 +175,113 @@ pub enum ControlResponse {
     Error {
         message: String,
     },
+    /// Fenêtre d'appairage ouverte (réponse à `PairStart`).
+    Pairing {
+        code: String,
+        /// URI du QR code (voir [`pairing_uri::PairingUri`]).
+        uri: String,
+        fingerprint_short: String,
+        expires_in_secs: u64,
+    },
+    /// Une oreille s'est appairée : fenêtre fermée.
+    PairingDone {
+        name: String,
+    },
+    /// Fenêtre fermée sans appairage (délai écoulé, trop d'essais…).
+    PairingEnded {
+        reason: String,
+    },
+    /// Oreille du PC appairée (réponse à `PairLocal`).
+    PairedLocal {
+        ear_id: EarId,
+        token: String,
+        port: u16,
+        fingerprint: Fingerprint,
+        brain_id: String,
+        brain_name: String,
+    },
+    Ears {
+        ears: Vec<EarSummary>,
+    },
+}
+
+const MASKED: &str = "***";
+
+impl fmt::Debug for ControlResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ControlResponse::Reply { speech } => {
+                f.debug_struct("Reply").field("speech", speech).finish()
+            }
+            ControlResponse::Status {
+                mode,
+                version,
+                local_model,
+            } => f
+                .debug_struct("Status")
+                .field("mode", mode)
+                .field("version", version)
+                .field("local_model", local_model)
+                .finish(),
+            ControlResponse::Heard {
+                text,
+                speech,
+                ear_action,
+                audio,
+                sound,
+            } => f
+                .debug_struct("Heard")
+                .field("text", text)
+                .field("speech", speech)
+                .field("ear_action", ear_action)
+                .field("audio", audio)
+                .field("sound", sound)
+                .finish(),
+            ControlResponse::Announcements { items } => f
+                .debug_struct("Announcements")
+                .field("items", items)
+                .finish(),
+            ControlResponse::Error { message } => {
+                f.debug_struct("Error").field("message", message).finish()
+            }
+            ControlResponse::Pairing {
+                code: _,
+                uri: _,
+                fingerprint_short,
+                expires_in_secs,
+            } => f
+                .debug_struct("Pairing")
+                .field("code", &MASKED)
+                .field("uri", &MASKED)
+                .field("fingerprint_short", fingerprint_short)
+                .field("expires_in_secs", expires_in_secs)
+                .finish(),
+            ControlResponse::PairingDone { name } => {
+                f.debug_struct("PairingDone").field("name", name).finish()
+            }
+            ControlResponse::PairingEnded { reason } => f
+                .debug_struct("PairingEnded")
+                .field("reason", reason)
+                .finish(),
+            ControlResponse::PairedLocal {
+                ear_id,
+                token: _,
+                port,
+                fingerprint,
+                brain_id,
+                brain_name,
+            } => f
+                .debug_struct("PairedLocal")
+                .field("ear_id", ear_id)
+                .field("token", &MASKED)
+                .field("port", port)
+                .field("fingerprint", fingerprint)
+                .field("brain_id", brain_id)
+                .field("brain_name", brain_name)
+                .finish(),
+            ControlResponse::Ears { ears } => f.debug_struct("Ears").field("ears", ears).finish(),
+        }
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -414,6 +543,68 @@ mod tests {
                 local_model: String::new(),
             }
         );
+    }
+
+    #[test]
+    fn pair_start_et_pairing_serialises() {
+        let json = serde_json::to_string(&ControlRequest::PairStart).unwrap();
+        assert_eq!(json, r#"{"type":"pair_start"}"#);
+        let requests = [
+            ControlRequest::PairStart,
+            ControlRequest::PairLocal { name: "PC".into() },
+            ControlRequest::ListEars,
+            ControlRequest::Unpair {
+                ear: "Pixel 4 XL".into(),
+            },
+        ];
+        for r in requests {
+            let json = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
+        }
+        let pairing = ControlResponse::Pairing {
+            code: "482913".into(),
+            uri: "jarvis://pair?v=1&c=482913".into(),
+            fingerprint_short: "A1B2-C3D4-E5F6-0718".into(),
+            expires_in_secs: 120,
+        };
+        let json = serde_json::to_string(&pairing).unwrap();
+        assert!(
+            json.starts_with(r#"{"type":"pairing","code":"482913","#),
+            "{json}"
+        );
+        assert!(!format!("{pairing:?}").contains("482913"));
+        let paired = ControlResponse::PairedLocal {
+            ear_id: EarId::new("ab"),
+            token: "jeton-tres-secret".into(),
+            port: 7341,
+            fingerprint: Fingerprint::of_der(b"cert"),
+            brain_id: "b1".into(),
+            brain_name: "PC".into(),
+        };
+        assert!(!format!("{paired:?}").contains("jeton-tres-secret"));
+        let responses = [
+            pairing,
+            paired,
+            ControlResponse::PairingDone {
+                name: "Pixel 4 XL".into(),
+            },
+            ControlResponse::PairingEnded {
+                reason: "délai écoulé".into(),
+            },
+            ControlResponse::Ears {
+                ears: vec![EarSummary {
+                    id: EarId::new("ab"),
+                    name: "PC".into(),
+                    platform: "linux".into(),
+                    connected: false,
+                    local: true,
+                }],
+            },
+        ];
+        for r in responses {
+            let json = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
+        }
     }
 
     #[test]

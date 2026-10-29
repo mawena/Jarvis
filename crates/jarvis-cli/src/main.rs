@@ -61,6 +61,8 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(ControlResponse::Error { message }) => fail(&message, 1),
+        // Réponses de l'appairage : jamais demandées par ces commandes.
+        Ok(_) => fail("Réponse inattendue du cerveau.", 1),
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
             fail(NOT_RUNNING, 2)
         }

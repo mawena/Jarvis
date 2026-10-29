@@ -1,7 +1,9 @@
-//! Logique pure de l'oreille de Jarvis : traits de détection, états du micro.
+//! Cœur commun des oreilles de Jarvis : traits de détection, états du micro, et
+//! réseau vers le cerveau ([`net`]).
 
 pub mod earshot;
 pub mod listener;
+pub mod net;
 pub mod resample;
 pub mod rustpotter;
 
