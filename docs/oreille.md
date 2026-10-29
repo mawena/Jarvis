@@ -123,6 +123,8 @@ Commandes rapides, comprises sans IA (toujours précédées de « Jarvis ») :
 - Musique et vidéo : « pause », « reprends », « suivant », « précédent », « plus fort »,
   « moins fort », « qu'est-ce qui passe ? ».
 - Applications : « ouvre Spotify », « lance VS Code »…
+- Recherche et vidéos : « cherche… », « lance la vidéo de… », « ouvre les résultats » (voir
+  [recherche.md](recherche.md)).
 - Mode : « passe en mode local », « passe en mode en ligne », « statut ».
 - Alimentation, toujours confirmée par un « oui » : « mets le PC en veille », « redémarre le
   PC », « éteins le PC ».
