@@ -83,7 +83,10 @@ impl System for RealSystem {
     }
 
     fn brain_request(&self, request: &ControlRequest) -> Option<ControlResponse> {
-        let mut s = UnixStream::connect(jarvis_protocol::socket_path()).ok()?;
+        let socket = jarvis_protocol::socket_path();
+        // Dossier à soi et fermé aux autres, sinon rien n'est demandé.
+        jarvis_protocol::check_socket_dir(&socket).ok()?;
+        let mut s = UnixStream::connect(socket).ok()?;
         s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
         let line = serde_json::to_string(request).ok()?;
         writeln!(s, "{line}").ok()?;

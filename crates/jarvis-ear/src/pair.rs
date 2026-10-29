@@ -17,9 +17,9 @@ use jarvis_ear_core::net::tls::{TlsConnector, pinned_client_config, tofu_client_
 use jarvis_ear_core::net::{
     Connector, Discovery, PairError, Paired, Pairing, PairingStore, pair_with_code,
 };
-use jarvis_protocol::Fingerprint;
 use jarvis_protocol::ear::{DEFAULT_PORT, RejectReason};
 use jarvis_protocol::pairing_uri::PairingUri;
+use jarvis_protocol::{Fingerprint, printable};
 
 /// Plateforme annoncée au cerveau.
 pub const PLATFORM: &str = "linux";
@@ -155,7 +155,7 @@ pub async fn pair_code(
                      sur le PC, ou donnez son adresse (--address hôte:port)"
                 );
             };
-            println!("Cerveau « {} » trouvé.", brain.name);
+            println!("Cerveau « {} » trouvé.", printable(&brain.name));
             brain.addrs
         }
     };
@@ -198,7 +198,8 @@ fn pairing_of(
 ) -> Pairing {
     Pairing {
         brain_id: paired.brain_id,
-        brain_name: paired.brain_name,
+        // Venu du réseau : affiché ensuite au terminal.
+        brain_name: printable(&paired.brain_name),
         ear_id: paired.ear_id,
         token: paired.token,
         fingerprint,
@@ -209,6 +210,10 @@ fn pairing_of(
 
 fn refusal(reason: &RejectReason) -> String {
     match reason {
+        RejectReason::WrongCode { attempts_left: 0 } => {
+            "code faux, plus aucun essai depuis cette machine : relancez `jarvis pair` sur le PC"
+                .into()
+        }
         RejectReason::WrongCode { attempts_left } => {
             format!("code faux (encore {attempts_left} essai(s))")
         }
@@ -283,7 +288,7 @@ pub fn run(
     })?;
     println!(
         "Oreille « {name} » appairée au cerveau « {} » (empreinte {}).",
-        pairing.brain_name,
+        printable(&pairing.brain_name),
         pairing.fingerprint.short()
     );
     match profile {
@@ -296,6 +301,14 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_faux_dit_ce_qu_il_reste() {
+        let left = |n| refusal(&RejectReason::WrongCode { attempts_left: n });
+        assert_eq!(left(2), "code faux (encore 2 essai(s))");
+        assert!(left(0).contains("plus aucun essai"), "{}", left(0));
+        assert!(left(0).contains("jarvis pair"), "{}", left(0));
+    }
     use jarvis_protocol::EarId;
     use std::sync::Mutex;
 

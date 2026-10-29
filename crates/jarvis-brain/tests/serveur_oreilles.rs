@@ -60,16 +60,22 @@ fn limits() -> Limits {
 }
 
 async fn rig() -> Rig {
+    rig_with(Duration::ZERO, net::hub::PROCESS_TIMEOUT).await
+}
+
+/// `skill_delay` : durée de la compétence « suivant » ; `process_timeout` : traitement
+/// d'une phrase au plus.
+async fn rig_with(skill_delay: Duration, process_timeout: Duration) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let identity = BrainIdentity::load_or_create(&dir.path().join("tls")).unwrap();
     let mut registry = EarRegistry::load(&dir.path().join("ears.toml")).unwrap();
     let (salon, token) = registry.add("Salon", "linux", false).unwrap();
 
-    let skill = Arc::new(FakeSkill::new(&["media_next"]).with_shortcut(
-        "suivant",
-        "media_next",
-        serde_json::json!({}),
-    ));
+    let skill = Arc::new(
+        FakeSkill::new(&["media_next"])
+            .with_shortcut("suivant", "media_next", serde_json::json!({}))
+            .with_delay(skill_delay),
+    );
     let llm = || Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))));
     let modes = Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local));
     let changes = modes.subscribe();
@@ -107,6 +113,7 @@ async fn rig() -> Rig {
         hosts: vec!["192.168.1.20".parse().unwrap()],
         window: Duration::from_millis(50),
         pairing_ttl: Duration::from_secs(120),
+        process_timeout,
     };
     let hub = Hub::spawn(settings, registry, services, None);
     let tls = identity.server_config().unwrap();
@@ -487,12 +494,92 @@ async fn appairage_hors_fenetre_refuse() {
     assert!(matches!(
         pair_with_code(stream, wrong, "Pixel", "android").await,
         Err(PairError::Rejected(RejectReason::WrongCode {
-            attempts_left: 4
+            attempts_left: 2
         }))
     ));
     // `jarvis pair` interrompu : la fenêtre se ferme.
     drop(cli);
     tokio::time::sleep(Duration::from_millis(100)).await;
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    assert!(matches!(
+        pair_with_code(stream, &code, "Pixel", "android").await,
+        Err(PairError::Rejected(RejectReason::PairingClosed))
+    ));
+}
+
+#[tokio::test]
+async fn une_machine_seule_ne_ferme_pas_la_fenetre() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+        panic!("fenêtre d'appairage attendue")
+    };
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let intrus: std::net::IpAddr = "192.168.1.66".parse().unwrap();
+    let try_from = |code: &str, from: std::net::IpAddr| {
+        rig.hub
+            .pair(code.into(), "Intrus".into(), "linux".into(), from)
+    };
+    for left in [2, 1, 0] {
+        assert_eq!(
+            try_from(wrong, intrus).await,
+            BrainMessage::Rejected {
+                reason: RejectReason::WrongCode {
+                    attempts_left: left
+                }
+            }
+        );
+    }
+    // Essais épuisés : même le bon code est refusé depuis cette adresse.
+    assert_eq!(
+        try_from(&code, intrus).await,
+        BrainMessage::Rejected {
+            reason: RejectReason::WrongCode { attempts_left: 0 }
+        }
+    );
+    // La fenêtre reste ouverte : l'oreille attendue s'appaire, par le vrai serveur.
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    pair_with_code(stream, &code, "Pixel", "android")
+        .await
+        .unwrap();
+    assert_eq!(
+        cli.read().await,
+        ControlResponse::PairingDone {
+            name: "Pixel".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn vingt_codes_faux_ferment_la_fenetre() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+        panic!("fenêtre d'appairage attendue")
+    };
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    for n in 0..20u8 {
+        let from = std::net::IpAddr::from([10, 0, 0, n / 3]);
+        let answer = rig
+            .hub
+            .pair(wrong.into(), "Intrus".into(), "linux".into(), from)
+            .await;
+        assert!(
+            matches!(
+                answer,
+                BrainMessage::Rejected {
+                    reason: RejectReason::WrongCode { .. }
+                }
+            ),
+            "{answer:?}"
+        );
+    }
+    assert_eq!(
+        cli.read().await,
+        ControlResponse::PairingEnded {
+            reason: "Trop d'essais.".into()
+        }
+    );
     let stream = stream_to(rig.addr, &rig.fingerprint).await;
     assert!(matches!(
         pair_with_code(stream, &code, "Pixel", "android").await,
@@ -562,6 +649,64 @@ async fn appairage_local_par_le_socket() {
             reason: RejectReason::UnknownEar
         }
     );
+}
+
+#[tokio::test]
+async fn jeton_de_l_oreille_du_pc_seulement_par_la_boucle_locale() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::PairedLocal { ear_id, token, .. } = cli
+        .send(ControlRequest::PairLocal { name: "PC".into() })
+        .await
+    else {
+        panic!("appairage local attendu")
+    };
+    // L'oreille du PC connectée par la boucle locale.
+    let mut pc = session(&rig, &ear_id, &token).await;
+    let hello_from = |from: &str| {
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        rig.hub.hello(
+            ear_id.clone(),
+            token.clone(),
+            None,
+            tx,
+            from.parse().unwrap(),
+        )
+    };
+    // Son jeton, venu d'une autre machine : refusé…
+    assert!(matches!(
+        hello_from("192.168.1.66").await,
+        net::hub::HelloOutcome::Rejected(RejectReason::BadToken)
+    ));
+    // … sans fermer la vraie session.
+    send(&mut pc, &EarMessage::Status).await;
+    assert!(matches!(
+        next(&mut pc).await,
+        BrainMessage::Response {
+            utterance: None,
+            response: ControlResponse::Status { .. }
+        }
+    ));
+    // IPv4 dans IPv6 : la boucle locale reste reconnue.
+    assert!(matches!(
+        hello_from("::ffff:127.0.0.1").await,
+        net::hub::HelloOutcome::Accepted { .. }
+    ));
+    // Une oreille d'une autre machine se connecte de n'importe où.
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let (salon, salon_token) = rig.salon.clone();
+    assert!(matches!(
+        rig.hub
+            .hello(
+                salon,
+                salon_token,
+                None,
+                tx,
+                "192.168.1.66".parse().unwrap()
+            )
+            .await,
+        net::hub::HelloOutcome::Accepted { .. }
+    ));
 }
 
 #[tokio::test]
@@ -659,6 +804,37 @@ async fn reponse_envoyee_a_l_oreille_gagnante() {
     assert_eq!(rig.skill.calls().len(), 1);
     assert_eq!(rig.ducker.events().first(), Some(&"duck"));
     assert!(rig.ducker.events().contains(&"restore"));
+}
+
+#[tokio::test]
+async fn traitement_trop_long_arrete_pour_de_bon() {
+    // Compétence de 1,5 s, traitement permis : 200 ms.
+    let rig = rig_with(Duration::from_millis(1_500), Duration::from_millis(200)).await;
+    let mut ws = salon(&rig).await;
+    send(&mut ws, &wake(1, 0.9)).await;
+    assert_eq!(next(&mut ws).await, BrainMessage::Elected { utterance: 1 });
+    audio(&mut ws, 1, 1_600).await;
+    send(&mut ws, &end(1)).await;
+    let BrainMessage::Response {
+        utterance: Some(1),
+        response: ControlResponse::Error { message },
+    } = next(&mut ws).await
+    else {
+        panic!("erreur attendue")
+    };
+    assert_eq!(message, "Traitement trop long.");
+    eventually("compétence lancée", || rig.skill.calls().len() == 1).await;
+    // Son rétabli, et la phrase suivante passe tout de suite.
+    assert_eq!(rig.ducker.events().last(), Some(&"restore"));
+    send(&mut ws, &wake(2, 0.9)).await;
+    assert_eq!(next(&mut ws).await, BrainMessage::Elected { utterance: 2 });
+    // Le traitement abandonné ne finit jamais derrière : ni compétence, ni réponse.
+    tokio::time::sleep(Duration::from_millis(1_800)).await;
+    assert_eq!(rig.skill.finished(), 0);
+    assert_eq!(
+        next_within(&mut ws, Duration::from_millis(100)).await,
+        Next::Silent
+    );
 }
 
 #[tokio::test]
@@ -765,6 +941,53 @@ async fn changement_de_mode_diffuse() {
     ));
     assert_eq!(mode_of(next(&mut a).await), Mode::Local);
     assert_eq!(mode_of(next(&mut b).await), Mode::Local);
+}
+
+#[tokio::test]
+async fn mode_en_ligne_seulement_depuis_l_oreille_du_pc() {
+    let rig = rig().await;
+    let mut salon = salon(&rig).await;
+    // Une oreille d'une autre machine : refusé, le mode ne change pas.
+    send(&mut salon, &EarMessage::SetMode { mode: Mode::Online }).await;
+    let BrainMessage::Response {
+        utterance: None,
+        response: ControlResponse::Error { message },
+    } = next(&mut salon).await
+    else {
+        panic!("erreur attendue")
+    };
+    assert!(message.contains("PC"), "{message}");
+    assert_eq!(
+        next_within(&mut salon, Duration::from_millis(300)).await,
+        Next::Silent
+    );
+    let mut cli = Cli::connect(&rig.socket).await;
+    assert!(matches!(
+        cli.send(ControlRequest::Status).await,
+        ControlResponse::Status {
+            mode: Mode::Local,
+            ..
+        }
+    ));
+    // L'oreille du PC (son icône) : accepté.
+    let ControlResponse::PairedLocal { ear_id, token, .. } = cli
+        .send(ControlRequest::PairLocal { name: "PC".into() })
+        .await
+    else {
+        panic!("appairage local attendu")
+    };
+    let mut pc = session(&rig, &ear_id, &token).await;
+    send(&mut pc, &EarMessage::SetMode { mode: Mode::Online }).await;
+    assert!(matches!(
+        next(&mut pc).await,
+        BrainMessage::Response {
+            utterance: None,
+            response: ControlResponse::Status {
+                mode: Mode::Online,
+                ..
+            }
+        }
+    ));
 }
 
 #[tokio::test]

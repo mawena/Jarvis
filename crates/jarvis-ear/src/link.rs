@@ -67,7 +67,7 @@ pub async fn pair_local(control: &dyn Brain, name: &str) -> anyhow::Result<Pairi
             brain_name,
         }) => Ok(Pairing {
             brain_id,
-            brain_name,
+            brain_name: jarvis_protocol::printable(&brain_name),
             ear_id,
             token,
             fingerprint,

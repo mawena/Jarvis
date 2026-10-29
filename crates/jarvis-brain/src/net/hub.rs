@@ -39,6 +39,10 @@ const COMMANDS: usize = 256;
 const MAX_NAME_CHARS: usize = 64;
 const MAX_PLATFORM_CHARS: usize = 32;
 
+/// Réponse à une oreille distante qui demande le mode en ligne.
+pub const ONLINE_FROM_PC_ONLY: &str =
+    "Le mode en ligne se demande à la voix (avec confirmation) ou depuis le PC.";
+
 /// Rappel de l'annonce mDNS : `true` pendant une fenêtre d'appairage.
 pub type PairingHook = Arc<dyn Fn(bool) + Send + Sync>;
 
@@ -56,6 +60,9 @@ pub struct HubSettings {
     pub window: Duration,
     /// Durée d'ouverture d'une fenêtre d'appairage.
     pub pairing_ttl: Duration,
+    /// Traitement d'une phrase au plus ([`PROCESS_TIMEOUT`]) : passé ce délai, il est
+    /// arrêté.
+    pub process_timeout: Duration,
 }
 
 /// Ce que le hub appelle pour traiter une phrase.
@@ -120,12 +127,14 @@ enum Command {
         token: String,
         offline_phrase: Option<String>,
         outbox: mpsc::Sender<BrainMessage>,
+        from: IpAddr,
         reply: oneshot::Sender<HelloOutcome>,
     },
     Pair {
         code: String,
         name: String,
         platform: String,
+        from: IpAddr,
         reply: oneshot::Sender<BrainMessage>,
     },
     FromEar {
@@ -204,6 +213,7 @@ impl Hub {
             processing: 0,
             pairing: None,
             next_id: 1,
+            refusals: 0,
             offline: None,
             sound: sound_tx,
             me: tx.downgrade(),
@@ -220,32 +230,43 @@ impl Hub {
         rx.await.ok()
     }
 
-    /// Authentifie une oreille et ouvre sa session : `Welcome`, `Status` (et la
-    /// phrase hors ligne si besoin) sont déjà dans `outbox` au retour.
+    /// Authentifie une oreille venue de l'adresse `from` et ouvre sa session :
+    /// `Welcome`, `Status` (et la phrase hors ligne si besoin) sont déjà dans `outbox`
+    /// au retour. L'oreille du PC (enregistrement local) n'est acceptée que par la
+    /// boucle locale.
     pub async fn hello(
         &self,
         ear_id: EarId,
         token: String,
         offline_phrase: Option<String>,
         outbox: mpsc::Sender<BrainMessage>,
+        from: IpAddr,
     ) -> HelloOutcome {
         self.ask(|reply| Command::Hello {
             ear_id,
             token,
             offline_phrase,
             outbox,
+            from,
             reply,
         })
         .await
         .unwrap_or(HelloOutcome::Full)
     }
 
-    /// Essai d'appairage par code : `Paired` ou `Rejected`.
-    pub async fn pair(&self, code: String, name: String, platform: String) -> BrainMessage {
+    /// Essai d'appairage par code venu de l'adresse `from` : `Paired` ou `Rejected`.
+    pub async fn pair(
+        &self,
+        code: String,
+        name: String,
+        platform: String,
+        from: IpAddr,
+    ) -> BrainMessage {
         self.ask(|reply| Command::Pair {
             code,
             name,
             platform,
+            from,
             reply,
         })
         .await
@@ -435,6 +456,8 @@ struct State {
     processing: usize,
     pairing: Option<OpenWindow>,
     next_id: u64,
+    /// Connexions non authentifiées refusées depuis le démarrage.
+    refusals: u64,
     offline: Option<(String, SpeechAudio)>,
     sound: mpsc::UnboundedSender<SoundCmd>,
     me: mpsc::WeakSender<Command>,
@@ -496,18 +519,20 @@ impl State {
                 token,
                 offline_phrase,
                 outbox,
+                from,
                 reply,
             } => {
-                let outcome = self.hello(ear_id, &token, offline_phrase, outbox);
+                let outcome = self.hello(ear_id, &token, offline_phrase, outbox, from);
                 let _ = reply.send(outcome);
             }
             Command::Pair {
                 code,
                 name,
                 platform,
+                from,
                 reply,
             } => {
-                let _ = reply.send(self.pair(&code, &name, &platform));
+                let _ = reply.send(self.pair(&code, &name, &platform, from));
             }
             Command::FromEar {
                 ear,
@@ -566,6 +591,19 @@ impl State {
         }
     }
 
+    /// Une connexion non authentifiée refusée (`hello` refusé, appairage hors
+    /// fenêtre) : le détail est en `debug`, le journal n'en garde qu'un résumé, de
+    /// plus en plus rare (1, 2, 4, 8… refus) pour ne pas être noyé.
+    fn refused(&mut self) {
+        self.refusals += 1;
+        if self.refusals.is_power_of_two() {
+            info!(
+                refus = self.refusals,
+                "connexions refusées depuis le démarrage (détail : RUST_LOG=debug)"
+            );
+        }
+    }
+
     fn is_current(&self, ear: &EarId, session: SessionId) -> bool {
         self.sessions.get(ear).is_some_and(|s| s.id == session)
     }
@@ -578,6 +616,7 @@ impl State {
         token: &str,
         offline: Option<String>,
         outbox: mpsc::Sender<BrainMessage>,
+        from: IpAddr,
     ) -> HelloOutcome {
         let Some(record) = self.registry.authenticate(&ear_id, token) else {
             let reason = if self.registry.get(&ear_id).is_some() {
@@ -585,9 +624,16 @@ impl State {
             } else {
                 RejectReason::UnknownEar
             };
-            info!(oreille = shown(&ear_id), raison = ?reason, "oreille refusée");
+            debug!(oreille = shown(&ear_id), raison = ?reason, "oreille refusée");
+            self.refused();
             return HelloOutcome::Rejected(reason);
         };
+        if record.local && !from.to_canonical().is_loopback() {
+            // Le jeton de l'oreille du PC n'a de valeur que sur le PC : venu d'ailleurs,
+            // il a fuité. La vraie session, elle, reste ouverte.
+            warn!(oreille = %ear_id, %from, "jeton de l'oreille du PC présenté depuis le réseau : refusé");
+            return HelloOutcome::Rejected(RejectReason::BadToken);
+        }
         let replaced = self.sessions.contains_key(&ear_id);
         if replaced {
             // Nouvelle connexion de la même oreille : l'ancienne est fermée.
@@ -763,6 +809,22 @@ impl State {
                 );
             }
             EarMessage::SetMode { mode } => {
+                let local = self.sessions.get(ear).is_some_and(|s| s.record.local);
+                if mode == Mode::Online && !local {
+                    // À la voix, le mode en ligne demande une confirmation exacte : une
+                    // oreille d'une autre machine ne peut pas s'en passer.
+                    warn!(oreille = %ear, "mode en ligne demandé par une oreille distante : refusé");
+                    self.send(
+                        ear,
+                        BrainMessage::Response {
+                            utterance: None,
+                            response: ControlResponse::Error {
+                                message: ONLINE_FROM_PC_ONLY.into(),
+                            },
+                        },
+                    );
+                    return;
+                }
                 let response = match self.services.brain.set_mode(mode) {
                     Ok(()) => {
                         info!(oreille = %ear, mode = %mode, "mode changé par une oreille");
@@ -978,22 +1040,30 @@ impl State {
         let (listen, voice) = (self.services.listen.clone(), self.services.voice.clone());
         let (ear, follow_up, muted) = (ear.clone(), capture.follow_up, end.muted);
         let me = self.me.clone();
+        let limit = self.settings.process_timeout;
         tokio::spawn(async move {
-            let job_ear = ear.clone();
-            let job = tokio::spawn(async move {
-                let response = listen.listen(&job_ear, &audio, muted, follow_up).await;
+            let (job_ear, job_listen) = (ear.clone(), listen.clone());
+            let mut job = tokio::spawn(async move {
+                let response = job_listen.listen(&job_ear, &audio, muted, follow_up).await;
                 voice.speak(response).await
             });
-            let response = match tokio::time::timeout(PROCESS_TIMEOUT, job).await {
+            let response = match tokio::time::timeout(limit, &mut job).await {
                 Ok(Ok(response)) => response,
                 Ok(Err(e)) => {
                     warn!(erreur = %e, "traitement d'une phrase interrompu");
+                    listen.abandoned().await;
                     ControlResponse::Error {
                         message: "Traitement interrompu.".into(),
                     }
                 }
                 Err(_) => {
                     warn!("traitement d'une phrase trop long : abandonné");
+                    // Arrêté pour de bon (la compétence en cours est lâchée), et attendu :
+                    // plus rien de cette phrase ne touche l'action en attente ni le son
+                    // une fois la suivante lancée.
+                    job.abort();
+                    let _ = job.await;
+                    listen.abandoned().await;
                     ControlResponse::Error {
                         message: "Traitement trop long.".into(),
                     }
@@ -1132,15 +1202,17 @@ impl State {
         }
     }
 
-    fn pair(&mut self, code: &str, name: &str, platform: &str) -> BrainMessage {
+    fn pair(&mut self, code: &str, name: &str, platform: &str, from: IpAddr) -> BrainMessage {
         let closed = BrainMessage::Rejected {
             reason: RejectReason::PairingClosed,
         };
         let Some(open) = self.pairing.as_mut() else {
-            info!("appairage refusé : aucune fenêtre ouverte");
+            debug!(%from, "appairage refusé : aucune fenêtre ouverte");
+            self.refused();
             return closed;
         };
-        match open.window.try_code(code, Instant::now()) {
+        let now = Instant::now();
+        match open.window.try_code(code, from, now) {
             PairAttempt::Accepted => {
                 let name = clean(name, MAX_NAME_CHARS, "Oreille");
                 let platform = clean(platform, MAX_PLATFORM_CHARS, "inconnue");
@@ -1167,12 +1239,18 @@ impl State {
                 }
             }
             PairAttempt::WrongCode { attempts_left } => {
-                info!(restants = attempts_left, "code d'appairage faux");
-                if attempts_left == 0 {
+                info!(%from, restants = attempts_left, "code d'appairage faux");
+                if !open.window.is_open(now) {
                     self.close_pairing("Trop d'essais.");
                 }
                 BrainMessage::Rejected {
                     reason: RejectReason::WrongCode { attempts_left },
+                }
+            }
+            PairAttempt::Blocked => {
+                debug!(%from, "appairage refusé : essais épuisés pour cette adresse");
+                BrainMessage::Rejected {
+                    reason: RejectReason::WrongCode { attempts_left: 0 },
                 }
             }
             PairAttempt::Closed => {
@@ -1250,9 +1328,10 @@ fn shown(id: &EarId) -> &str {
     }
 }
 
-/// Texte d'une oreille : sans caractère de contrôle, borné ; vide : `fallback`.
+/// Texte d'une oreille : sans caractère de contrôle ni marque de direction, borné ;
+/// vide : `fallback`.
 fn clean(text: &str, max: usize, fallback: &str) -> String {
-    let text: String = text.chars().filter(|c| !c.is_control()).take(max).collect();
+    let text: String = jarvis_protocol::printable(text).chars().take(max).collect();
     match text.trim() {
         "" => fallback.to_string(),
         t => t.to_string(),
@@ -1281,6 +1360,7 @@ mod tests {
     fn nom_d_oreille_nettoye() {
         assert_eq!(clean("  Pixel\n4 XL ", 64, "Oreille"), "Pixel4 XL");
         assert_eq!(clean("\u{7}", 64, "Oreille"), "Oreille");
+        assert_eq!(clean("Salon\u{202E}gnp.exe", 64, "Oreille"), "Salongnp.exe");
         assert_eq!(clean(&"a".repeat(100), 64, "x").len(), 64);
     }
 
