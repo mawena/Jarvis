@@ -107,7 +107,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 6.7 Essai réel avec Charles (Charles) — [fiche d'essai](docs/essais/essai-6.7-recherche.md)
 
 ## Phase 7 : agent de code
-*Plan : [phase 7](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md), branche `feature/agent-de-code` (en cours)*
+*Plan : [phase 7](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md), branche `feature/agent-de-code` (fusionnée dans `develop`) — guide : [docs/agent.md](docs/agent.md)*
 
 - [x] 7.1 Rédiger le plan de la phase 7 ([plan](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md))
 - [x] 7.2 Liste des projets connus dans la configuration (`[[agent.projects]]`, nom dit à voix haute retrouvé, phrases de l'agent reconnues sans IA)
@@ -117,8 +117,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 7.6 Annonce de fin sur l'oreille la plus récemment active et notification de bureau
 - [x] 7.7 Socle (tâche 1 du plan) : protocole (oreille d'origine de la phrase, annonces), réglages `[agent]`, raccourcis propres à une compétence jamais proposés à l'IA
 - [x] 7.8 `jarvisctl` : `doctor` vérifie Claude Code et les projets, avertissement au redémarrage si une tâche tourne, `docs/agent.md`
-- [ ] 7.9 Relecture de la phase 7 et corrections
-- [ ] 7.10 Essai réel avec Charles sur un projet d'essai (Charles) — fiche d'essai à venir
+- [x] 7.9 Relecture de la phase 7 et corrections : agent enfermé (mode restreint de Claude Code, bac à sable obligatoire : écriture limitée au worktree, réseau limité à crates.io, aucun secret ni socket, environnement minimal), commit final sans hooks et revérifié, toutes les branches et étiquettes surveillées, délais sur git, seule une voix reconnue lance l'agent, « …merci Jarvis » ne lance rien (projet Jarvis : « projet Jarvis » ou « l'assistant »), arrêt et suivi mieux compris, Jarvis ne dit jamais « Jarvis », `doctor` vérifie le bac à sable
+- [ ] 7.10 Essai réel avec Charles sur un projet d'essai (Charles) — [fiche d'essai](docs/essais/essai-7.10-agent.md)
 
 ## Phase 8 : personnes et rôles
 - [ ] 8.1 Rédiger le plan de la phase 8
