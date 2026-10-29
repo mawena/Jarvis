@@ -45,8 +45,10 @@ jarvis pair
 Le terminal affiche un **code** à 6 chiffres, un **QR code**, l'adresse d'appairage
 (`jarvis://pair?…`), l'**empreinte courte** du PC (`A1B2-C3D4-E5F6-0718`) et un compte à
 rebours. La fenêtre reste ouverte 2 minutes, pour une seule oreille ; le code est à usage
-unique, 5 essais au plus. `jarvis pair` rend 0 quand une oreille s'est appairée, 1 sinon
-(délai écoulé, trop d'essais, `Ctrl+C`).
+unique. Chaque machine a 3 essais : après 3 codes faux, elle est refusée jusqu'à la fin de la
+fenêtre (« plus aucun essai depuis cette machine »), mais les autres peuvent encore s'appairer.
+Après 20 codes faux en tout, la fenêtre se ferme. `jarvis pair` rend 0 quand une oreille s'est
+appairée, 1 sinon (délai écoulé, trop d'essais, `Ctrl+C`).
 
 Sur l'oreille, au choix :
 

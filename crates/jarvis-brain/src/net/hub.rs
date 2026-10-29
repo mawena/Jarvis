@@ -126,6 +126,7 @@ enum Command {
         code: String,
         name: String,
         platform: String,
+        from: IpAddr,
         reply: oneshot::Sender<BrainMessage>,
     },
     FromEar {
@@ -240,12 +241,19 @@ impl Hub {
         .unwrap_or(HelloOutcome::Full)
     }
 
-    /// Essai d'appairage par code : `Paired` ou `Rejected`.
-    pub async fn pair(&self, code: String, name: String, platform: String) -> BrainMessage {
+    /// Essai d'appairage par code venu de l'adresse `from` : `Paired` ou `Rejected`.
+    pub async fn pair(
+        &self,
+        code: String,
+        name: String,
+        platform: String,
+        from: IpAddr,
+    ) -> BrainMessage {
         self.ask(|reply| Command::Pair {
             code,
             name,
             platform,
+            from,
             reply,
         })
         .await
@@ -505,9 +513,10 @@ impl State {
                 code,
                 name,
                 platform,
+                from,
                 reply,
             } => {
-                let _ = reply.send(self.pair(&code, &name, &platform));
+                let _ = reply.send(self.pair(&code, &name, &platform, from));
             }
             Command::FromEar {
                 ear,
@@ -1132,7 +1141,7 @@ impl State {
         }
     }
 
-    fn pair(&mut self, code: &str, name: &str, platform: &str) -> BrainMessage {
+    fn pair(&mut self, code: &str, name: &str, platform: &str, from: IpAddr) -> BrainMessage {
         let closed = BrainMessage::Rejected {
             reason: RejectReason::PairingClosed,
         };
@@ -1140,7 +1149,8 @@ impl State {
             info!("appairage refusé : aucune fenêtre ouverte");
             return closed;
         };
-        match open.window.try_code(code, Instant::now()) {
+        let now = Instant::now();
+        match open.window.try_code(code, from, now) {
             PairAttempt::Accepted => {
                 let name = clean(name, MAX_NAME_CHARS, "Oreille");
                 let platform = clean(platform, MAX_PLATFORM_CHARS, "inconnue");
@@ -1167,12 +1177,18 @@ impl State {
                 }
             }
             PairAttempt::WrongCode { attempts_left } => {
-                info!(restants = attempts_left, "code d'appairage faux");
-                if attempts_left == 0 {
+                info!(%from, restants = attempts_left, "code d'appairage faux");
+                if !open.window.is_open(now) {
                     self.close_pairing("Trop d'essais.");
                 }
                 BrainMessage::Rejected {
                     reason: RejectReason::WrongCode { attempts_left },
+                }
+            }
+            PairAttempt::Blocked => {
+                debug!(%from, "appairage refusé : essais épuisés pour cette adresse");
+                BrainMessage::Rejected {
+                    reason: RejectReason::WrongCode { attempts_left: 0 },
                 }
             }
             PairAttempt::Closed => {

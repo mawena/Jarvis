@@ -294,7 +294,7 @@ async fn handshake(
                 reject(&mut ws, version_rejected()).await;
                 return None;
             }
-            let answer = hub.pair(code, name, platform).await;
+            let answer = hub.pair(code, name, platform, peer.ip()).await;
             send_then_close(&mut ws, &answer).await;
             None
         }

@@ -209,6 +209,10 @@ fn pairing_of(
 
 fn refusal(reason: &RejectReason) -> String {
     match reason {
+        RejectReason::WrongCode { attempts_left: 0 } => {
+            "code faux, plus aucun essai depuis cette machine : relancez `jarvis pair` sur le PC"
+                .into()
+        }
         RejectReason::WrongCode { attempts_left } => {
             format!("code faux (encore {attempts_left} essai(s))")
         }
@@ -296,6 +300,14 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_faux_dit_ce_qu_il_reste() {
+        let left = |n| refusal(&RejectReason::WrongCode { attempts_left: n });
+        assert_eq!(left(2), "code faux (encore 2 essai(s))");
+        assert!(left(0).contains("plus aucun essai"), "{}", left(0));
+        assert!(left(0).contains("jarvis pair"), "{}", left(0));
+    }
     use jarvis_protocol::EarId;
     use std::sync::Mutex;
 

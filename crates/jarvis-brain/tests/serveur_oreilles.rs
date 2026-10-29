@@ -487,12 +487,92 @@ async fn appairage_hors_fenetre_refuse() {
     assert!(matches!(
         pair_with_code(stream, wrong, "Pixel", "android").await,
         Err(PairError::Rejected(RejectReason::WrongCode {
-            attempts_left: 4
+            attempts_left: 2
         }))
     ));
     // `jarvis pair` interrompu : la fenêtre se ferme.
     drop(cli);
     tokio::time::sleep(Duration::from_millis(100)).await;
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    assert!(matches!(
+        pair_with_code(stream, &code, "Pixel", "android").await,
+        Err(PairError::Rejected(RejectReason::PairingClosed))
+    ));
+}
+
+#[tokio::test]
+async fn une_machine_seule_ne_ferme_pas_la_fenetre() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+        panic!("fenêtre d'appairage attendue")
+    };
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    let intrus: std::net::IpAddr = "192.168.1.66".parse().unwrap();
+    let try_from = |code: &str, from: std::net::IpAddr| {
+        rig.hub
+            .pair(code.into(), "Intrus".into(), "linux".into(), from)
+    };
+    for left in [2, 1, 0] {
+        assert_eq!(
+            try_from(wrong, intrus).await,
+            BrainMessage::Rejected {
+                reason: RejectReason::WrongCode {
+                    attempts_left: left
+                }
+            }
+        );
+    }
+    // Essais épuisés : même le bon code est refusé depuis cette adresse.
+    assert_eq!(
+        try_from(&code, intrus).await,
+        BrainMessage::Rejected {
+            reason: RejectReason::WrongCode { attempts_left: 0 }
+        }
+    );
+    // La fenêtre reste ouverte : l'oreille attendue s'appaire, par le vrai serveur.
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    pair_with_code(stream, &code, "Pixel", "android")
+        .await
+        .unwrap();
+    assert_eq!(
+        cli.read().await,
+        ControlResponse::PairingDone {
+            name: "Pixel".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn vingt_codes_faux_ferment_la_fenetre() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+        panic!("fenêtre d'appairage attendue")
+    };
+    let wrong = if code == "000000" { "111111" } else { "000000" };
+    for n in 0..20u8 {
+        let from = std::net::IpAddr::from([10, 0, 0, n / 3]);
+        let answer = rig
+            .hub
+            .pair(wrong.into(), "Intrus".into(), "linux".into(), from)
+            .await;
+        assert!(
+            matches!(
+                answer,
+                BrainMessage::Rejected {
+                    reason: RejectReason::WrongCode { .. }
+                }
+            ),
+            "{answer:?}"
+        );
+    }
+    assert_eq!(
+        cli.read().await,
+        ControlResponse::PairingEnded {
+            reason: "Trop d'essais.".into()
+        }
+    );
     let stream = stream_to(rig.addr, &rig.fingerprint).await;
     assert!(matches!(
         pair_with_code(stream, &code, "Pixel", "android").await,
