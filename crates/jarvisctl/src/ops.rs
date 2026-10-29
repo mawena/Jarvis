@@ -302,10 +302,25 @@ fn write_units(paths: &Paths, out: &mut dyn Write) -> Result<(Vec<Service>, bool
     Ok((created, written))
 }
 
+/// Registre des tâches du cerveau (`XDG_STATE_HOME` compris).
+fn tasks_dir(paths: &Paths, sys: &dyn System) -> PathBuf {
+    paths.tasks_dir(sys.env_var("XDG_STATE_HOME").as_deref())
+}
+
 /// Prévient, sans bloquer, que les tâches de l'agent en cours seront interrompues
 /// (le registre du cerveau est sur disque ; les processus, eux, meurent avec le service).
-fn warn_running_tasks(paths: &Paths, out: &mut dyn Write) -> Result<()> {
-    match Registry::running_on_disk(&paths.tasks_dir()) {
+/// Cerveau inactif : un enregistrement `Running` est le reste d'un arrêt brutal,
+/// rien ne tourne.
+fn warn_running_tasks(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let running = Registry::running_on_disk(&tasks_dir(paths, sys));
+    if running == 0 {
+        return Ok(());
+    }
+    let active = systemctl(sys, &["is-active", SERVICE])?;
+    if active.stdout.trim() != "active" {
+        return Ok(());
+    }
+    match running {
         0 => {}
         1 => writeln!(
             out,
@@ -320,7 +335,7 @@ fn warn_running_tasks(paths: &Paths, out: &mut dyn Write) -> Result<()> {
 }
 
 pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
-    warn_running_tasks(paths, out)?;
+    warn_running_tasks(paths, sys, out)?;
     let source = installed_source(paths)?;
     writeln!(out, "Compilation (release) dans {}…", source.display())?;
     build(sys, &source)?;
@@ -456,7 +471,7 @@ pub fn service_verb(
         _ => ("désactivé au démarrage", "désactiver"),
     };
     if matches!(verb, "stop" | "restart") && services.contains(&Service::Brain) {
-        warn_running_tasks(paths, out)?;
+        warn_running_tasks(paths, sys, out)?;
     }
     let mut order = services.to_vec();
     if matches!(verb, "stop" | "disable") {
@@ -809,14 +824,27 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
 }
 
 /// Options de `claude` dont dépend la ligne de commande de l'agent.
-const CLAUDE_OPTIONS: [&str; 6] = [
+const CLAUDE_OPTIONS: [&str; 12] = [
+    "--restricted",
+    "--tools",
+    "--strict-mcp-config",
+    "--mcp-config",
     "--permission-mode",
-    "--setting-sources",
+    "--permission-prompts",
+    "--settings",
     "--session-id",
     "--append-system-prompt",
     "--disallowedTools",
+    "--verbose",
     "stream-json",
 ];
+
+/// `opt` apparaît comme un mot entier de l'aide (« --tools » n'est pas trouvé
+/// dans « --disallowed-tools »).
+fn help_has(help: &str, opt: &str) -> bool {
+    help.split(|c: char| c.is_whitespace() || ",;()[]\"'=<>".contains(c))
+        .any(|word| word == opt)
+}
 
 /// Section `[agent]` de la configuration, `~/` développé depuis `paths.home`.
 fn agent_settings(paths: &Paths) -> Result<AgentSettings, String> {
@@ -889,7 +917,7 @@ fn agent_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Re
             Some(help) => {
                 let missing: Vec<&str> = CLAUDE_OPTIONS
                     .into_iter()
-                    .filter(|opt| !help.contains(opt))
+                    .filter(|opt| !help_has(&help, opt))
                     .collect();
                 if missing.is_empty() {
                     writeln!(out, "✓ Options requises de Claude Code présentes")?;
@@ -935,6 +963,48 @@ fn agent_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Re
         writeln!(
             out,
             "! notify-send absent — optionnel (fin des tâches de l'agent) : sudo apt install libnotify-bin"
+        )?;
+    }
+    sandbox_diagnostics(sys, out)
+}
+
+/// Bac à sable de Claude Code sous Linux : `bwrap` et `socat`, et des espaces de
+/// noms utilisables (Ubuntu 24.04 les restreint par AppArmor).
+fn sandbox_diagnostics(sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let found = |tool: &str| {
+        sys.run("sh", &["-c", &format!("command -v {tool}")])
+            .is_ok_and(|o| o.code == 0)
+    };
+    let bwrap = found("bwrap");
+    if !bwrap {
+        writeln!(
+            out,
+            "! bwrap absent — bac à sable de l'agent : sudo apt install bubblewrap"
+        )?;
+    }
+    if found("socat") {
+        writeln!(out, "✓ socat présent")?;
+    } else {
+        writeln!(
+            out,
+            "! socat absent — bac à sable de l'agent : sudo apt install socat"
+        )?;
+    }
+    if !bwrap {
+        return Ok(());
+    }
+    let works = sys
+        .run("bwrap", &["--ro-bind", "/", "/", "--unshare-net", "true"])
+        .is_ok_and(|o| o.code == 0);
+    if works {
+        writeln!(
+            out,
+            "✓ bwrap présent et utilisable (bac à sable de l'agent)"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "! bwrap ne peut pas isoler l'agent (espaces de noms refusés, AppArmor sous Ubuntu 24.04) — installez ou activez un profil AppArmor pour /usr/bin/bwrap (règle `userns,`), puis `sudo systemctl reload apparmor`"
         )?;
     }
     Ok(())
@@ -1976,10 +2046,16 @@ WantedBy=graphical-session.target
     const AIDE_CLAUDE: &str = "Usage: claude [options]\n\
         --append-system-prompt <prompt>\n\
         --disallowedTools, --disallowed-tools <tools...>\n\
+        --mcp-config <configs...>\n\
         --output-format <format>  \"text\", \"json\", or \"stream-json\"\n\
         --permission-mode <mode>\n\
+        --permission-prompts <target>\n\
+        --restricted  Restricted mode\n\
         --session-id <uuid>\n\
-        --setting-sources <sources>\n";
+        --settings <file-or-json>\n\
+        --strict-mcp-config\n\
+        --tools <tools...>\n\
+        --verbose\n";
 
     /// Faux `claude` exécutable à l'emplacement par défaut (`~/.local/bin/claude`).
     fn fake_claude(paths: &Paths, sys: &mut Fake, help: &str) -> PathBuf {
@@ -2118,11 +2194,139 @@ WantedBy=graphical-session.target
         );
         assert!(o.contains("! notify-send absent"), "{o}");
         assert_eq!((code, code_ancienne), (1, 1), "avertissements seulement");
+
+        // Options du lancement restreint, cherchées comme mots entiers : « --tools »
+        // n'est pas « --disallowed-tools », ni « --mcp-config » « --strict-mcp-config ».
+        let sans_restreint = AIDE_CLAUDE
+            .replace("--restricted  Restricted mode\n", "")
+            .replace("--tools <tools...>\n", "")
+            .replace("--mcp-config <configs...>\n", "")
+            .replace("--verbose\n", "");
+        fake_claude(&paths, &mut sys, &sans_restreint);
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "! Options absentes de `claude --help` : --restricted, --tools, --mcp-config, --verbose"
+            ),
+            "{o}"
+        );
+        // `--setting-sources` n'est plus exigée.
+        assert!(!AIDE_CLAUDE.contains("--setting-sources"));
+    }
+
+    #[test]
+    fn aide_de_claude_lue_mot_a_mot() {
+        let aide = "  --append-system-prompt[-file], --add-dir\n  --disallowed-tools <tools...>\n  \"text\", \"stream-json\")";
+        assert!(help_has(aide, "--append-system-prompt"));
+        assert!(help_has(aide, "--add-dir"));
+        assert!(help_has(aide, "stream-json"));
+        assert!(!help_has(aide, "--tools"));
+        assert!(!help_has(aide, "--append-system"));
+    }
+
+    #[test]
+    fn doctor_verifie_le_bac_a_sable() {
+        const BWRAP: &str = "bwrap --ro-bind / / --unshare-net true";
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ socat présent"), "{o}");
+        assert!(o.contains("✓ bwrap présent et utilisable"), "{o}");
+        assert!(sys.cmds.borrow().iter().any(|c| c == BWRAP));
+
+        // Espaces de noms refusés (AppArmor) : avertissement, code inchangé.
+        sys.replies.insert(BWRAP.into(), (1, String::new()));
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! bwrap ne peut pas isoler l'agent"), "{o}");
+        assert!(o.contains("AppArmor"), "{o}");
+        assert_eq!(code, 1, "seul Ollama (injoignable) fait échouer");
+
+        // Outils absents : bwrap n'est pas lancé.
+        sys.replies
+            .insert("sh -c command -v bwrap".into(), (1, String::new()));
+        sys.replies
+            .insert("sh -c command -v socat".into(), (1, String::new()));
+        sys.cmds.borrow_mut().clear();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! bwrap absent — bac à sable de l'agent : sudo apt install bubblewrap"),
+            "{o}"
+        );
+        assert!(
+            o.contains("! socat absent — bac à sable de l'agent : sudo apt install socat"),
+            "{o}"
+        );
+        assert!(!sys.cmds.borrow().iter().any(|c| c == BWRAP));
+        assert_eq!(code, 1);
+
+        // Agent désactivé : rien de tout cela.
+        write_config(&paths, "[agent]\nenabled = false\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("bwrap"), "{o}");
+    }
+
+    #[test]
+    fn registre_des_taches_suit_xdg_state_home() {
+        let (home, paths) = setup();
+        let defaut = home.path().join(".local/state/jarvis/tasks");
+        assert_eq!(paths.tasks_dir(None), defaut);
+        assert_eq!(paths.tasks_dir(Some("")), defaut);
+        assert_eq!(paths.tasks_dir(Some("relatif/state")), defaut);
+        assert_eq!(
+            paths.tasks_dir(Some("/srv/state")),
+            PathBuf::from("/srv/state/jarvis/tasks")
+        );
+
+        // L'avertissement lit le registre au même endroit que le cerveau.
+        use jarvis_skills::agent::TaskState;
+        let (_home, paths, mut sys) = installed();
+        let state = tempfile::tempdir().unwrap();
+        sys.env.insert(
+            "XDG_STATE_HOME".into(),
+            state.path().to_string_lossy().into_owned(),
+        );
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-brain.service".into(),
+            (0, "active\n".into()),
+        );
+        running_task(&paths, "ailleurs", TaskState::Running);
+        let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
+        assert!(!o.contains("Attention"), "registre par défaut ignoré : {o}");
+        save_task(
+            &state.path().join("jarvis/tasks"),
+            "ici",
+            TaskState::Running,
+        );
+        let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
+        assert!(o.contains("Attention : 1 tâche"), "{o}");
+    }
+
+    #[test]
+    fn taches_d_un_cerveau_arrete_sans_avertissement() {
+        use jarvis_skills::agent::TaskState;
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        // Reste d'un cerveau planté : le service est inactif, rien ne tourne.
+        running_task(&paths, "orpheline", TaskState::Running);
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-brain.service".into(),
+            (3, "inactive\n".into()),
+        );
+        for verb in ["restart", "stop"] {
+            let (_, o) = verb_out(&paths, &sys, verb, &Service::ALL);
+            assert!(!o.contains("Attention"), "{verb} : {o}");
+        }
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        assert!(!text(out).contains("Attention"));
     }
 
     fn running_task(paths: &Paths, id: &str, state: jarvis_skills::agent::TaskState) {
+        save_task(&paths.tasks_dir(None), id, state);
+    }
+
+    fn save_task(dir: &Path, id: &str, state: jarvis_skills::agent::TaskState) {
         use jarvis_skills::agent::{TaskId, TaskRecord, registry::Registry};
-        let reg = Registry::open(paths.tasks_dir()).unwrap();
+        let reg = Registry::open(dir.to_path_buf()).unwrap();
         let id = TaskId(id.into());
         reg.save(&TaskRecord {
             log: reg.log_path(&id),
@@ -2148,8 +2352,12 @@ WantedBy=graphical-session.target
     fn redemarrage_previent_des_taches_en_cours() {
         use jarvis_skills::agent::TaskState;
         const UNE: &str = "Attention : 1 tâche d'agent en cours sera interrompue.\n";
-        let (_home, paths, sys) = installed();
+        let (_home, paths, mut sys) = installed();
         enroll_wakeword(&paths);
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-brain.service".into(),
+            (0, "active\n".into()),
+        );
 
         // Aucune tâche (ni dossier) : aucun avertissement.
         let (_, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
@@ -2166,7 +2374,15 @@ WantedBy=graphical-session.target
         let (code, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
         assert_eq!(code, 0);
         assert!(o.starts_with(UNE), "{o}");
-        assert_eq!(sys.cmds.borrow().len(), 2);
+        // État du cerveau, puis les deux redémarrages.
+        assert_eq!(
+            *sys.cmds.borrow(),
+            [
+                "systemctl --user is-active jarvis-brain.service",
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
         let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
         assert!(o.starts_with(UNE), "{o}");
         // L'oreille seule n'interrompt rien ; démarrer non plus.

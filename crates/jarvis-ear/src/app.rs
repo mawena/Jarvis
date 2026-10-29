@@ -534,6 +534,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         match internal {
             Internal::Status(result) => {
                 self.status_in_flight = false;
+                let was_connected = matches!(self.link, BrainLink::Connected { .. });
                 self.link = match result {
                     Ok(ControlResponse::Status {
                         mode, local_model, ..
@@ -542,6 +543,10 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                     Err(_) => BrainLink::Unreachable,
                 };
                 if matches!(self.link, BrainLink::Connected { .. }) {
+                    // Cerveau revenu (peut-être mis à jour) : on redemande les annonces.
+                    if !was_connected {
+                        self.announcements_supported = true;
+                    }
                     self.poll_announcements();
                 }
             }
@@ -1853,6 +1858,48 @@ mod tests {
         .await;
         assert_eq!(announcement_requests(&h).len(), 1, "plus de relève");
         assert!(matches!(h.tray.borrow().brain, BrainLink::Connected { .. }));
+    }
+
+    #[tokio::test]
+    async fn cerveau_revenu_annonces_redemandees() {
+        // 0 : ancien cerveau ; 1 : arrêté ; 2 : nouveau cerveau, avec les annonces.
+        let phase = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let p = phase.clone();
+        let h = build_harness_full(
+            move |r| match (p.load(Ordering::SeqCst), r) {
+                (1, _) => Err(ClientError::BrainUnreachable),
+                (0, ControlRequest::Announcements { .. }) => Ok(ControlResponse::Error {
+                    message: "requête invalide".into(),
+                }),
+                (_, ControlRequest::Announcements { .. }) => {
+                    Ok(ControlResponse::Announcements { items: vec![] })
+                }
+                _ => status_ok(),
+            },
+            false,
+            0,
+            0,
+            None,
+            0.9,
+            Duration::from_millis(20),
+            None,
+        );
+        let statuses = |h: &Harness| {
+            h.requests()
+                .iter()
+                .filter(|r| **r == ControlRequest::Status)
+                .count()
+        };
+        h.wait_for("relève abandonnée", |h| statuses(h) >= 3).await;
+        assert_eq!(announcement_requests(&h).len(), 1);
+        phase.store(1, Ordering::SeqCst);
+        h.wait_for("cerveau injoignable", |h| {
+            h.tray.borrow().brain == BrainLink::Unreachable
+        })
+        .await;
+        phase.store(2, Ordering::SeqCst);
+        h.wait_for("relève reprise", |h| announcement_requests(h).len() >= 3)
+            .await;
     }
 
     #[tokio::test]

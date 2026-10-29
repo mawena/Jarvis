@@ -63,8 +63,10 @@ pub enum ReplyVoice {
 /// D'où vient la phrase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source {
-    /// Voix vérifiée, par l'oreille.
-    Voice,
+    /// Voix, par l'oreille. `verified` : empreinte reconnue (`Verdict::Match`) ;
+    /// faux sans empreinte ou sans vérification. Seule une voix reconnue (ou le
+    /// texte tapé) déclenche les raccourcis des compétences (l'agent de code).
+    Voice { verified: bool },
     /// Texte tapé (`Say`, CLI) : la réponse n'est pas écoutée par l'oreille, donc
     /// jamais d'action risquée ni de question reposée.
     Typed,
@@ -193,16 +195,26 @@ impl Brain {
         self.answer(text, Source::Typed).await.reply
     }
 
-    /// Phrase complète d'une voix vérifiée : commande du cerveau, raccourci, sinon IA.
-    /// Toute nouvelle commande efface l'action en attente (sauf « annule » et « répète »).
+    /// Phrase complète d'une voix reconnue par son empreinte : commande du cerveau,
+    /// raccourci, sinon IA. Toute nouvelle commande efface l'action en attente (sauf
+    /// « annule » et « répète »).
     pub async fn answer_text(&self, text: &str) -> Answer {
-        self.answer(text, Source::Voice).await
+        self.answer_voice(text, true).await
+    }
+
+    /// Comme [`Self::answer_text`] ; `verified` faux (aucune empreinte enregistrée,
+    /// vérification désactivée) : tout reste permis sauf les raccourcis des
+    /// compétences, refusés d'une phrase sans repli sur l'IA.
+    pub async fn answer_voice(&self, text: &str, verified: bool) -> Answer {
+        self.answer(text, Source::Voice { verified }).await
     }
 
     async fn answer(&self, text: &str, source: Source) -> Answer {
         info!(phrase = %text, "phrase reçue");
         let answer = match match_brain_command(text) {
-            Some(BrainCommand::Repeat) if source == Source::Voice => return self.repeat(),
+            Some(BrainCommand::Repeat) if matches!(source, Source::Voice { .. }) => {
+                return self.repeat();
+            }
             Some(BrainCommand::Repeat) => return self.repeat_last(),
             Some(BrainCommand::Cancel) => self.cancel(),
             None => {
@@ -233,6 +245,10 @@ impl Brain {
         // remplacés par un bip seul (`fast_path` reste faux).
         if let Some(shortcut) = self.skills.iter().find_map(|s| s.shortcut(text)) {
             debug!(route = "skill_shortcut", tool = %shortcut.tool);
+            if source == (Source::Voice { verified: false }) {
+                info!(tool = %shortcut.tool, "raccourci de compétence refusé : voix non reconnue");
+                return Reply::failed(NEEDS_KNOWN_VOICE).into();
+            }
             let intent = Intent::new(shortcut.tool, shortcut.args);
             return match self.run_or_ask(intent, source).await {
                 Step::Answer(a) => a,
@@ -304,7 +320,10 @@ impl Brain {
                     return None;
                 }
                 info!(phrase = %text, "phrase reçue (raccourci seul)");
-                let answer = match self.run_or_ask(intent, Source::Voice).await {
+                let answer = match self
+                    .run_or_ask(intent, Source::Voice { verified: false })
+                    .await
+                {
                     Step::Answer(a) => a,
                     Step::NotFound(m) => Reply::failed(m).into(),
                 };
@@ -558,6 +577,9 @@ const VOICE_REFUSED: &str = "Je ne reconnais toujours pas votre voix : je ne fai
 const NO_MORE_REASK: &str = "Je ne repose pas la question : je ne fais rien.";
 /// Adressée.
 const ASK_ALOUD: &str = "Pour cela, demandez-le-moi à voix haute.";
+/// Raccourci de compétence (agent de code) demandé par une voix non reconnue.
+pub const NEEDS_KNOWN_VOICE: &str = "Je ne confie une tâche à l'agent qu'à une voix reconnue : \
+                                     enregistrez votre voix avec jarvis-ear enroll.";
 
 const LOCAL_UNREACHABLE: &str = "L'IA locale ne répond pas. Ollama est-il lancé ?";
 const ONLINE_UNREACHABLE: &str =
@@ -1366,6 +1388,97 @@ mod tests {
         assert_eq!(a.agent.calls().len(), 1);
     }
 
+    /// Toujours la même empreinte : toute voix est celle de Charles.
+    struct SameVoice;
+
+    impl crate::speaker::SpeakerVerifier for SameVoice {
+        fn embed(&self, _audio: &[f32]) -> anyhow::Result<Vec<f32>> {
+            Ok(vec![1.0, 0.0])
+        }
+    }
+
+    fn known_voice(dir: &std::path::Path) -> Arc<crate::speaker::SpeakerGate> {
+        let gate = crate::speaker::SpeakerGate::new(
+            Arc::new(SameVoice),
+            dir.join("charles.json"),
+            0.55,
+            0.65,
+        );
+        gate.enroll(&[vec![0.0; 16_000]]).unwrap();
+        Arc::new(gate)
+    }
+
+    #[tokio::test]
+    async fn voix_non_reconnue_refuse_les_raccourcis_de_competence() {
+        let a = agent();
+        let r = a.brain.answer_voice(PHRASE_AGENT, false).await;
+        assert_eq!(
+            (r.reply.speech.as_str(), r.reply.outcome),
+            (NEEDS_KNOWN_VOICE, Outcome::Failed)
+        );
+        assert!(!r.fast_path);
+        assert!(a.agent.calls().is_empty());
+        assert_eq!(a.llm.calls(), 0, "pas de repli sur l'IA");
+        // Raccourcis du cerveau et IA : comme avant.
+        assert_eq!(
+            a.brain.answer_voice("suivant", false).await.reply.speech,
+            "Bien."
+        );
+        assert_eq!(a.media.calls().len(), 1);
+        a.brain.answer_voice("quel temps fait-il", false).await;
+        assert_eq!(a.llm.calls(), 1);
+        // Voix reconnue : l'outil part.
+        a.brain.answer_voice(PHRASE_AGENT, true).await;
+        assert_eq!(a.agent.calls().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn oreille_sans_voix_reconnue_ne_lance_pas_l_agent() {
+        use crate::listen::ListenService;
+        use crate::speaker::SpeakerState;
+        use crate::testing::{FakeDucker, FakeTranscriber};
+
+        let voices = tempfile::tempdir().unwrap();
+        let states = [
+            SpeakerState::Disabled,
+            SpeakerState::Unavailable { enrolled: false },
+            // Vérification prête, mais aucune empreinte enregistrée.
+            SpeakerState::Ready(Arc::new(crate::speaker::SpeakerGate::new(
+                Arc::new(SameVoice),
+                voices.path().join("absente.json"),
+                0.55,
+                0.65,
+            ))),
+        ];
+        for state in states {
+            let a = agent();
+            let agent = a.agent.clone();
+            let svc = ListenService::new(
+                Arc::new(a.brain),
+                Arc::new(FakeTranscriber::new(PHRASE_AGENT)),
+                Arc::new(FakeDucker::new()),
+            )
+            .with_speaker_state(state);
+            let r = svc.listen(&[0; 3 * 16_000], false, false).await;
+            let jarvis_protocol::ControlResponse::Heard { speech, .. } = r else {
+                panic!("{r:?}");
+            };
+            assert_eq!(speech, NEEDS_KNOWN_VOICE);
+            assert!(agent.calls().is_empty());
+        }
+        // Voix reconnue par son empreinte : l'agent part.
+        let a = agent();
+        let agent = a.agent.clone();
+        let svc = ListenService::new(
+            Arc::new(a.brain),
+            Arc::new(FakeTranscriber::new(PHRASE_AGENT)),
+            Arc::new(FakeDucker::new()),
+        )
+        .with_speaker(Some(known_voice(voices.path())));
+        svc.listen(&[0; 3 * 16_000], false, false).await;
+        assert_eq!(agent.calls().len(), 1);
+    }
+
     #[tokio::test]
     async fn outils_hors_ia_non_proposes() {
         let a = agent();
@@ -1398,16 +1511,19 @@ mod tests {
             (depart, Outcome::Done)
         );
 
-        // Par l'oreille, avec le bip seul activé : la phrase est dite quand même.
+        // Par l'oreille (voix reconnue), avec le bip seul activé : la phrase est dite
+        // quand même.
         let skill = fake_agent().with_result(Ok(Reply::done(depart)));
         let a = agent_with(skill, persona);
+        let voices = tempfile::tempdir().unwrap();
         let svc = ListenService::new(
             Arc::new(a.brain),
             Arc::new(FakeTranscriber::new(PHRASE_AGENT)),
             Arc::new(FakeDucker::new()),
-        );
+        )
+        .with_speaker(Some(known_voice(voices.path())));
         assert_eq!(
-            svc.listen(&[1, 2, 3], false, false).await,
+            svc.listen(&[0; 3 * 16_000], false, false).await,
             ControlResponse::Heard {
                 text: PHRASE_AGENT.into(),
                 speech: depart.into(),
