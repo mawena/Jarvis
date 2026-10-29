@@ -478,8 +478,9 @@ impl Brain {
 
     async fn execute(&self, skill: &dyn Skill, intent: Intent) -> Step {
         let tool = intent.tool.clone();
+        let limit = skill.timeout(&tool).unwrap_or(self.skill_timeout);
         let call = skill.call(&intent.tool, intent.args);
-        let result = match tokio::time::timeout(self.skill_timeout, call).await {
+        let result = match tokio::time::timeout(limit, call).await {
             Ok(r) => r,
             Err(_) => {
                 warn!(tool = %intent.tool, "délai de la compétence dépassé");
@@ -733,6 +734,21 @@ mod tests {
             Arc::new(FakeSkill::new(&["media_next"]).with_delay(Duration::from_millis(500)));
         let (brain, _dir) = brain_with(skill, Arc::new(answer("x")));
         let brain = brain.with_skill_timeout(Duration::from_millis(30));
+        let r = brain.handle_text("suivant").await;
+        assert_eq!(r.speech, "Désolé, la commande a pris trop de temps.");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delai_propre_a_la_competence() {
+        // Délai propre de 10 s : un outil de 6 s répond.
+        let lente = FakeSkill::new(&["media_next"]).with_delay(Duration::from_secs(6));
+        let skill = Arc::new(lente.with_timeout(Duration::from_secs(10)));
+        let (brain, _dir) = brain_with(skill, Arc::new(answer("x")));
+        let r = brain.handle_text("suivant").await;
+        assert_eq!(r.speech, "ok");
+        // Sans délai propre : les 5 s communes, trop court.
+        let skill = Arc::new(FakeSkill::new(&["media_next"]).with_delay(Duration::from_secs(6)));
+        let (brain, _dir) = brain_with(skill, Arc::new(answer("x")));
         let r = brain.handle_text("suivant").await;
         assert_eq!(r.speech, "Désolé, la commande a pris trop de temps.");
     }
