@@ -37,6 +37,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 1.16 Essai réel : `jarvis say "suivant"` avec Spotify, `jarvis say "lance VS Code"`, mode en ligne avec clé API
 
 ## Phase 2 : oreille du PC (écoute permanente)
+*Plan : [phase 2](docs/superpowers/plans/2026-10-28-phase-2-oreille-pc.md), branche `feature/oreille-pc` (fusionnée dans `develop`)*
+
 - [x] 2.1 Rédiger le plan de la phase 2 ([plan](docs/superpowers/plans/2026-10-28-phase-2-oreille-pc.md))
 - [x] 2.2 Installer les prérequis système : `sudo apt install libasound2-dev libclang-dev` (Charles)
 - [x] 2.3 Socle : protocole d'écoute (`Wake`, `Listen`, `Heard`), crates `jarvis-ear-core` et `jarvis-ear` (tâche 1)
@@ -50,19 +52,26 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 2.11 Icône dans la zone de notification GNOME : statut (écoute, micro coupé, cerveau injoignable, mode, modèle)
 - [x] 2.12 Menu de l'icône : couper / réactiver l'écoute, coupure totale, mode local / en ligne, statut détaillé, quitter
 - [x] 2.13 Empreinte vocale : enregistrer la voix de Charles dans `jarvis-ear enroll` (quelques « Jarvis » + quelques phrases), ne garder que l'empreinte (aucun son)
-- [ ] 2.14 Vérification du locuteur par le cerveau : une phrase dont la voix n'est pas celle de Charles est ignorée sans rien exécuter
-- [ ] 2.15 Mesurer le taux de fausses détections sur une journée
+- [x] 2.14 Vérification du locuteur par le cerveau : une phrase dont la voix n'est pas celle de Charles est ignorée sans rien exécuter
+- [x] 2.16 Whisper accéléré : fenêtre ajustée à la phrase, attention flash, sans relances (`small` : ~6 s → ~1 s, outil `bench_stt`)
+- [x] 2.17 Relecture finale de la phase 2 et corrections : vérification du locuteur fermée en cas d'échec (empreinte abîmée, modèle absent), phrases courtes non vérifiées limitées aux raccourcis, musique rétablie (quitter, surveillance 15 s, arrêt et redémarrage du cerveau), écoute coupée retenue, prises privées, requêtes bornées, `doctor` suit la configuration
+- [ ] 2.15 Mesurer le taux de fausses détections sur une journée (Charles)
+- [ ] 2.18 Essai réel : confirmer qu'une autre voix est ignorée (phrase rejetée à 0,34 le 2026-10-28 : autre voix ou Charles ?) (Charles)
 
 ## Phase 3 : voix de Jarvis
+*Plan : [phase 3](docs/superpowers/plans/2026-10-28-phase-3-voix.md), branche `feature/voix` (fusionnée dans `develop`)*
+
 - [x] 3.1 Rédiger le plan de la phase 3 ([plan](docs/superpowers/plans/2026-10-28-phase-3-voix.md))
-- [ ] 3.2 Synthèse vocale Piper avec une voix française
-- [ ] 3.3 Sons de confirmation (réveil, succès, échec)
-- [ ] 3.4 Confirmation vocale des actions risquées (oui/non sur la même oreille, 8 s)
-- [ ] 3.5 Commandes « annule » et « répète »
-- [ ] 3.6 Personnalité : réponses brèves, ton majordome, nom d'adresse configurable
+- [x] 3.2 Synthèse vocale Piper avec une voix française — voix `upmc-medium` « pierre » via sherpa-onnx + `piper-phonemize` (0,1-0,4 s), `scripts/download-models.sh voice`, lecture dans l'oreille
+- [x] 3.3 Sons de confirmation (réveil, succès, échec)
+- [x] 3.4 Confirmation vocale des actions risquées (oui/non sur la même oreille, 8 s) — veille, redémarrage, extinction ; seule la voix vérifiée de Charles confirme
+- [x] 3.5 Commandes « annule » et « répète »
+- [x] 3.6 Personnalité : réponses brèves, ton majordome, nom d'adresse configurable, option « bip seul » pour les réussites
+- [x] 3.7 Relectures et corrections : bip et écho de Jarvis ignorés par l'oreille, lecture robuste, voix bornée (400 caractères, 8 s), faille de confirmation par une voix courte inconnue corrigée, alimentation lancée 4 s après la réponse
+- [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles)
 
 ## Phase 4 : oreilles en réseau
-- [ ] 4.1 Rédiger le plan de la phase 4
+- [ ] 4.1 Rédiger le plan de la phase 4 (en cours)
 - [ ] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`)
 - [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau
 - [ ] 4.4 Serveur WebSocket + TLS avec certificat épinglé
@@ -82,14 +91,14 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 5.7 Essai de bout en bout depuis une autre pièce
 
 ## Phase 6 : recherche et vidéos
-- [ ] 6.1 Rédiger le plan de la phase 6
+- [ ] 6.1 Rédiger le plan de la phase 6 (en cours)
 - [ ] 6.2 SearXNG auto-hébergé dans Docker
 - [ ] 6.3 Compétence recherche avec résumé vocal court (IA du mode actif)
 - [ ] 6.4 « Ouvre les résultats » dans le navigateur du PC
 - [ ] 6.5 « Lance la vidéo de… » (`yt-dlp` ou SearXNG vidéos)
 
 ## Phase 7 : agent de code
-- [ ] 7.1 Rédiger le plan de la phase 7
+- [ ] 7.1 Rédiger le plan de la phase 7 (en cours)
 - [ ] 7.2 Liste des projets connus dans la configuration
 - [ ] 7.3 Lancement de Claude Code en arrière-plan (`claude -p`), sans confirmation
 - [ ] 7.4 Garde-fous : branche `feature/*` dédiée, rien de poussé ni fusionné, refus si modifications non enregistrées
