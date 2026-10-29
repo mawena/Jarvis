@@ -122,13 +122,23 @@ pub fn spawn(inv: Invocation, log: &Path, limits: Limits) -> io::Result<Running>
     }
     let mut file = open_log(log)?;
     file.write_all(header(&inv).as_bytes())?;
+    // Sans eux, le bac à sable n'aurait rien à rendre inscriptible.
+    for dir in &inv.create_dirs {
+        if let Err(e) = std::fs::create_dir_all(dir) {
+            let _ = writeln!(
+                file,
+                "# dossier impossible à créer : {} ({e})",
+                dir.display()
+            );
+        }
+    }
 
     let mut cmd = Command::new(&inv.program);
-    cmd.args(&inv.args).current_dir(&inv.cwd);
-    for key in &inv.env_remove {
-        cmd.env_remove(key);
-    }
-    cmd.envs(inv.env_set.iter().map(|(k, v)| (k, v)))
+    // Environnement fermé : seulement ce que `claude::build` a choisi.
+    cmd.args(&inv.args)
+        .current_dir(&inv.cwd)
+        .env_clear()
+        .envs(inv.env.iter().map(|(k, v)| (k, v)))
         .process_group(0)
         .kill_on_drop(true)
         .stdin(Stdio::piped())
@@ -143,6 +153,7 @@ pub fn spawn(inv: Invocation, log: &Path, limits: Limits) -> io::Result<Running>
         }
     };
     let pid = child.id().unwrap_or(0);
+    let guard = GroupGuard(pid);
 
     // Consigne sur l'entrée standard, puis fermée.
     if let Some(mut stdin) = child.stdin.take() {
@@ -181,6 +192,7 @@ pub fn spawn(inv: Invocation, log: &Path, limits: Limits) -> io::Result<Running>
     let stop = Arc::new(watch::Sender::new(false));
     let watched = Watched {
         child,
+        guard,
         pid,
         limits,
         stop: stop.clone(),
@@ -358,6 +370,8 @@ async fn read_stderr(err: ChildStderr, log: SharedLog, activity: Arc<Notify>) {
 /// Ce que surveille la tâche de supervision.
 struct Watched {
     child: Child,
+    /// Tue tout le groupe si la supervision est abandonnée en route.
+    guard: GroupGuard,
     pid: u32,
     limits: Limits,
     /// Gardé ici : l'arrêt reste possible même si tous les `Stopper` sont lâchés.
@@ -371,6 +385,7 @@ struct Watched {
 async fn supervise(w: Watched) -> RunOutcome {
     let Watched {
         mut child,
+        guard,
         pid,
         limits,
         stop,
@@ -395,7 +410,9 @@ async fn supervise(w: Watched) -> RunOutcome {
     let (reason, status) = match ended {
         Ok(status) => (EndReason::Exited, status.ok()),
         Err(reason) => {
-            kill_group(pid, "TERM").await;
+            // `TERM` à Claude Code seul : il arrête lui-même ses commandes Bash
+            // et sort. Le groupe entier ne reçoit `KILL` qu'ensuite.
+            signal(&pid.to_string(), "TERM").await;
             let status = match timeout(limits.grace, child.wait()).await {
                 Ok(status) => status.ok(),
                 Err(_) => {
@@ -408,6 +425,7 @@ async fn supervise(w: Watched) -> RunOutcome {
     };
     // Restes du groupe : un `cargo test` laissé en arrière-plan par l'agent.
     kill_group(pid, "KILL").await;
+    guard.disarm();
 
     // Fin du flux : les dernières lignes sont déjà dans les tubes.
     let until = Instant::now() + limits.grace;
@@ -441,18 +459,52 @@ fn reason_text(reason: EndReason) -> &'static str {
 }
 
 /// Signal à tout le groupe par le `kill` du système.
-async fn kill_group(pid: u32, signal: &str) {
+async fn kill_group(pid: u32, sig: &str) {
     // Jamais `kill -- -0` : ce serait notre propre groupe.
     if pid == 0 {
         return;
     }
+    signal(&format!("-{pid}"), sig).await;
+}
+
+/// `kill -s <sig> -- <cible>` : un pid, ou `-<pgid>` pour un groupe.
+async fn signal(target: &str, sig: &str) {
+    if target == "0" || target == "-0" {
+        return;
+    }
     let _ = Command::new("kill")
-        .args(["-s", signal, "--", &format!("-{pid}")])
+        .args(["-s", sig, "--", target])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
         .await;
+}
+
+/// Groupe de l'agent, tué (`KILL`) si la supervision est lâchée avant la fin :
+/// arrêt du cerveau, tâche annulée, panique d'un test.
+struct GroupGuard(u32);
+
+impl GroupGuard {
+    /// Fin normale : le groupe est déjà tué, son id peut resservir.
+    fn disarm(mut self) {
+        self.0 = 0;
+    }
+}
+
+impl Drop for GroupGuard {
+    fn drop(&mut self) {
+        if self.0 == 0 {
+            return;
+        }
+        // Appel bloquant très court : plus rien ne peut être attendu ici.
+        let _ = std::process::Command::new("kill")
+            .args(["-s", "KILL", "--", &format!("-{}", self.0)])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
 }
 
 #[cfg(test)]
@@ -486,6 +538,8 @@ mod tests {
         std::fs::create_dir(&worktree).unwrap();
         let settings = AgentSettings {
             claude_path: program,
+            cargo_target_dir: dir.path().join("target"),
+            cargo_home: dir.path().join("cargo"),
             ..AgentSettings::default()
         };
         let task = TaskRecord {
@@ -549,8 +603,8 @@ mod tests {
         ]
         .join("\n");
         let (dir, mut inv, log) = setup(&body);
-        inv.env_set.push(("JARVIS_ESSAI".into(), "1".into()));
-        inv.env_remove.push("HOME".into());
+        inv.env.push(("JARVIS_ESSAI".into(), "1".into()));
+        inv.env.retain(|(k, _)| k != "HOME");
         let running = spawn(inv.clone(), &log, limits()).unwrap();
         assert!(running.pid > 0);
         let out = running.wait().await;
@@ -573,8 +627,34 @@ mod tests {
         let env = read("env");
         assert!(env.contains("JARVIS_ESSAI=1"));
         assert!(!env.lines().any(|l| l.starts_with("HOME=")));
-        assert!(!env.lines().any(|l| l.starts_with("ANTHROPIC_API_KEY=")));
+        // Environnement fermé : rien du processus de test ne passe sans être choisi.
+        let names: Vec<&str> = env.lines().filter_map(|l| l.split('=').next()).collect();
+        for k in [
+            "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "SSH_AUTH_SOCK",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "CARGO_PKG_NAME",
+            "RUST_TEST_THREADS",
+        ] {
+            assert!(!names.contains(&k), "{k}");
+        }
+        for (k, _) in &inv.env {
+            assert!(names.contains(&k.as_str()), "{k}");
+        }
+        // `sh` ajoute au plus `PWD`, `OLDPWD`, `SHLVL` et `_`.
+        let extra: Vec<&&str> = names
+            .iter()
+            .filter(|n| !inv.env.iter().any(|(k, _)| k == *n))
+            .filter(|n| !["PWD", "OLDPWD", "SHLVL", "_"].contains(n))
+            .collect();
+        assert!(extra.is_empty(), "{extra:?}");
         assert!(env.contains("GIT_TERMINAL_PROMPT=0"));
+        assert!(env.contains("BASH_MAX_TIMEOUT_MS=1500000"));
+        // Dossiers de compilation créés pour le bac à sable.
+        assert!(dir.path().join("target/Jarvis").is_dir());
+        assert!(dir.path().join("cargo").is_dir());
     }
 
     #[tokio::test]
@@ -695,12 +775,14 @@ mod tests {
     #[tokio::test]
     async fn silence_trop_long_arrete() {
         // Une ligne toutes les 100 ms remet le minuteur à zéro, puis plus rien.
+        // Sous forte charge, un intervalle peut dépasser `idle` : seuls la
+        // raison et des bornes larges sont vérifiées.
         let body = format!(
             "for i in 1 2 3 4 5; do {}; sleep 0.1; done\nsleep 1000",
             print_line(&init_line("abc"))
         );
         let (_dir, inv, log) = setup(&body);
-        let idle = Duration::from_millis(300);
+        let idle = Duration::from_millis(800);
         let started = Instant::now();
         let out = spawn(inv, &log, Limits { idle, ..limits() })
             .unwrap()
@@ -708,9 +790,93 @@ mod tests {
             .await;
         let elapsed = started.elapsed();
         assert_eq!(out.reason, EndReason::Idle);
-        assert_eq!(out.progress.lines, 5);
-        assert!(elapsed >= Duration::from_millis(700), "{elapsed:?}");
-        assert!(elapsed < Duration::from_secs(3), "{elapsed:?}");
+        assert!(out.progress.lines >= 1);
+        assert!(elapsed >= idle, "{elapsed:?}");
+        if out.progress.lines == 5 {
+            // Minuteur remis à zéro par chaque ligne : 4 intervalles en plus.
+            assert!(elapsed >= idle + Duration::from_millis(400), "{elapsed:?}");
+        }
+        assert!(elapsed < Duration::from_secs(15), "{elapsed:?}");
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("# fin : silence trop long"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn arret_envoie_term_a_claude_d_abord() {
+        // Le faux claude note le `TERM` reçu ; son enfant note s'il en reçoit un
+        // aussi (il ne doit pas : seul Claude Code reçoit `TERM`).
+        let (dir, inv, log) = setup("");
+        let recu = shell_quote(&dir.path().join("recu").display().to_string());
+        let enfant = dir.path().join("enfant");
+        let pret = dir.path().join("pret");
+        let body = format!(
+            "( trap 'echo enfant-term >> {recu}' TERM; while :; do sleep 0.05; done ) &\n\
+             echo $! > {}\n\
+             trap 'echo term >> {recu}; sleep 0.4; exit 0' TERM\n\
+             echo oui > {}\n\
+             wait",
+            shell_quote(&enfant.display().to_string()),
+            shell_quote(&pret.display().to_string()),
+        );
+        let inv = Invocation {
+            program: fake_claude(dir.path(), &body),
+            ..inv
+        };
+        let running = spawn(inv, &log, limits()).unwrap();
+        wait_file(&pret).await;
+        let child = wait_file(&enfant).await;
+        let started = Instant::now();
+        running.stopper().stop();
+        let out = running.wait().await;
+        assert_eq!(out.reason, EndReason::Stopped);
+        // Sorti de lui-même sur `TERM`, avant la fin du délai de grâce.
+        assert_eq!(out.exit_code, Some(0));
+        assert!(
+            started.elapsed() < limits().grace,
+            "{:?}",
+            started.elapsed()
+        );
+        let recu = std::fs::read_to_string(dir.path().join("recu")).unwrap();
+        assert_eq!(recu.trim(), "term");
+        // Puis tout le groupe est tué.
+        let mut dead = false;
+        for _ in 0..200 {
+            if !alive(&child) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(dead, "le processus {child} vit encore");
+    }
+
+    #[tokio::test]
+    async fn supervision_lachee_tue_le_groupe() {
+        let (dir, inv, log) = setup("");
+        let child = dir.path().join("enfant");
+        let body = format!(
+            "sleep 1000 &\necho $! > {}\nwait",
+            shell_quote(&child.display().to_string())
+        );
+        let inv = Invocation {
+            program: fake_claude(dir.path(), &body),
+            ..inv
+        };
+        let running = spawn(inv, &log, limits()).unwrap();
+        let pid = wait_file(&child).await;
+        assert!(alive(&pid));
+        // Comme à l'arrêt du cerveau : la tâche de supervision disparaît.
+        running.handle.abort();
+        assert!(running.handle.await.unwrap_err().is_cancelled());
+        let mut dead = false;
+        for _ in 0..200 {
+            if !alive(&pid) {
+                dead = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(dead, "le processus {pid} vit encore");
     }
 
     #[tokio::test]

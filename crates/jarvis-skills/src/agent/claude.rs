@@ -3,7 +3,7 @@
 use super::settings::{AgentSettings, DENIED_TOOLS, Project};
 use super::types::{Progress, RunResult, TaskRecord};
 use crate::text::fold;
-use serde_json::Value;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 /// Tout ce qu'il faut pour lancer l'agent.
@@ -12,35 +12,102 @@ pub struct Invocation {
     pub program: PathBuf,
     pub args: Vec<String>,
     pub cwd: PathBuf,
-    pub env_set: Vec<(String, String)>,
-    pub env_remove: Vec<String>,
+    /// Environnement complet du processus : rien d'autre n'est hérité.
+    pub env: Vec<(String, String)>,
+    /// Dossiers créés avant le lancement (écriture permise par le bac à sable).
+    pub create_dirs: Vec<PathBuf>,
     /// Consigne de Charles, écrite sur l'entrée standard puis fermée.
     pub stdin: String,
 }
 
-/// Réglages passés à Claude Code : aucune ligne d'attribution.
-const ATTRIBUTION_SETTINGS: &str =
-    r#"{"includeCoAuthoredBy":false,"attribution":{"commit":"","pr":""}}"#;
+/// Outils intégrés offerts à l'agent (`--tools`) ; aucun autre n'existe pour lui.
+pub const TOOLS: &str = "Bash,Read,Edit,Write,Glob,Grep";
 
-/// Variables toujours retirées : aucun identifiant pour pousser.
-const ALWAYS_REMOVED: &[&str] = &[
-    "SSH_AUTH_SOCK",
-    "GH_TOKEN",
-    "GITHUB_TOKEN",
-    "GIT_ASKPASS",
-    "SSH_ASKPASS",
-    // Claude Code lancé depuis une session Claude Code se croirait imbriqué.
-    "CLAUDECODE",
+/// Aucun serveur MCP (`--mcp-config` avec `--strict-mcp-config`).
+const NO_MCP: &str = r#"{"mcpServers":{}}"#;
+
+/// Secrets jamais lisibles depuis le bac à sable.
+const SANDBOX_DENY_READ: &[&str] = &[
+    "~/.ssh",
+    "~/.gnupg",
+    "~/.config/jarvis",
+    "~/.config/gh",
+    "~/.git-credentials",
+    "~/.aws",
+    "~/.docker",
+    "~/.local/share/keyrings",
+    "~/.claude/.credentials.json",
 ];
 
+/// Dossiers du worktree en lecture seule dans le bac à sable : leur contenu
+/// ferait tourner du code hors du bac à sable (crochets git, réglages).
+const SANDBOX_DENY_WRITE: &[&str] = &[".git", ".claude", ".cargo", ".githooks", ".husky"];
+
+/// Seuls domaines joignables depuis le bac à sable : le registre de cargo.
+const ALLOWED_DOMAINS: &[&str] = &["crates.io", "index.crates.io", "static.crates.io"];
+
+/// Variables héritées du cerveau (plus `LC_*`). Jamais `XDG_RUNTIME_DIR`,
+/// `DBUS_*`, `SSH_AUTH_SOCK`, `DISPLAY`, `WAYLAND_DISPLAY`, ni aucun identifiant.
+const INHERITED_ENV: &[&str] = &[
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LANGUAGE",
+    "TERM",
+    "TZ",
+    "SHELL",
+    "TMPDIR",
+    "XDG_CONFIG_HOME",
+    "XDG_DATA_HOME",
+    "XDG_CACHE_HOME",
+    "XDG_STATE_HOME",
+];
+
+/// Variables git qui désigneraient un autre dépôt : jamais posées.
+const GIT_REDIRECTS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_NAMESPACE",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_EXEC_PATH",
+    "GIT_ASKPASS",
+    "GIT_TEMPLATE_DIR",
+];
+
+/// Délai par défaut d'une commande Bash de l'agent : 15 min.
+pub const BASH_DEFAULT_TIMEOUT_MS: u64 = 15 * 60 * 1000;
+/// Délai maximal d'une commande Bash de l'agent : 25 min (sous `idle_minutes`).
+pub const BASH_MAX_TIMEOUT_MS: u64 = 25 * 60 * 1000;
+
 /// Ligne de commande de l'agent pour `task` (voir « Décisions » du plan de la
-/// phase 7). `git_set` et `git_remove` viennent de `git::no_push_env`.
+/// phase 7). `git_set` vient de `git::no_push_env` ; `git_remove` est sans
+/// effet : l'environnement part vide.
 pub fn build(
     settings: &AgentSettings,
     project: &Project,
     task: &TaskRecord,
     git_set: Vec<(String, String)>,
     git_remove: Vec<String>,
+) -> Invocation {
+    let _ = git_remove;
+    let inherited: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+        .collect();
+    build_with_env(settings, project, task, git_set, &inherited)
+}
+
+/// [`build`] avec l'environnement du cerveau donné (tests).
+fn build_with_env(
+    settings: &AgentSettings,
+    project: &Project,
+    task: &TaskRecord,
+    git_set: Vec<(String, String)>,
+    inherited: &[(String, String)],
 ) -> Invocation {
     // Les interdits sont prioritaires chez Claude Code ; on les retire quand même.
     let allowed: Vec<String> = settings
@@ -50,6 +117,7 @@ pub fn build(
         .collect();
     let slug = task.branch.rsplit('/').next().unwrap_or(&task.branch);
     let slug = slug.strip_prefix("jarvis-").unwrap_or(slug);
+    let target_dir = settings.cargo_target_dir.join(&project.name);
 
     let mut args: Vec<String> = [
         "-p",
@@ -60,15 +128,22 @@ pub fn build(
         "dontAsk",
         "--permission-prompts",
         "none",
-        "--setting-sources",
-        "project",
-        "--settings",
-        ATTRIBUTION_SETTINGS,
+        // Ni réglages utilisateur, projet ou local ; outils de fichiers
+        // confinés au worktree ; écritures sensibles jamais approuvées.
+        "--restricted",
+        "--strict-mcp-config",
     ]
     .iter()
     .map(|a| a.to_string())
     .collect();
-    // Forme `--option=liste` : ces options acceptent plusieurs valeurs.
+    // Forme `--option=valeur` : ces options acceptent plusieurs valeurs.
+    args.push(format!("--tools={TOOLS}"));
+    args.push(format!("--mcp-config={NO_MCP}"));
+    args.push("--settings".into());
+    args.push(
+        agent_settings_json(&allowed, &target_dir, &settings.cargo_home, &task.worktree)
+            .to_string(),
+    );
     args.push(format!("--allowedTools={}", allowed.join(",")));
     args.push(format!("--disallowedTools={}", DENIED_TOOLS.join(",")));
     args.push("--append-system-prompt".into());
@@ -86,56 +161,138 @@ pub fn build(
         args.push(settings.max_budget_usd.to_string());
     }
 
-    let mut env_set = git_set;
-    for (key, value) in [("GIT_SSH_COMMAND", "false"), ("GIT_TERMINAL_PROMPT", "0")] {
-        if !env_set.iter().any(|(k, _)| k == key) {
-            env_set.push((key.into(), value.into()));
-        }
-    }
-    env_set.retain(|(k, _)| k != "PATH" && k != "CARGO_TARGET_DIR");
-    env_set.push(("PATH".into(), agent_path(&settings.extra_path)));
-    env_set.push((
-        "CARGO_TARGET_DIR".into(),
-        settings
-            .cargo_target_dir
-            .join(&project.name)
-            .to_string_lossy()
-            .into_owned(),
-    ));
-
-    let mut env_remove: Vec<String> = Vec::new();
-    let api_key = (!settings.pass_api_key).then_some("ANTHROPIC_API_KEY");
-    let removed = git_remove
-        .into_iter()
-        .chain(ALWAYS_REMOVED.iter().map(|k| k.to_string()))
-        .chain(api_key.map(String::from));
-    for key in removed {
-        if !env_remove.contains(&key) && !env_set.iter().any(|(k, _)| *k == key) {
-            env_remove.push(key);
-        }
-    }
-
     Invocation {
         program: settings.claude_path.clone(),
         args,
         cwd: task.worktree.clone(),
-        env_set,
-        env_remove,
+        env: agent_env(settings, git_set, inherited, &target_dir),
+        create_dirs: vec![target_dir, settings.cargo_home.clone()],
         stdin: task.instruction.clone(),
     }
 }
 
+/// Réglages passés par `--settings` : aucune attribution, aucun connecteur,
+/// bac à sable obligatoire pour Bash, permissions limitées au worktree.
+fn agent_settings_json(
+    allowed: &[String],
+    target_dir: &Path,
+    cargo_home: &Path,
+    worktree: &Path,
+) -> Value {
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    let deny_write: Vec<String> = SANDBOX_DENY_WRITE
+        .iter()
+        .map(|d| path(&worktree.join(d)))
+        .collect();
+    json!({
+        "includeCoAuthoredBy": false,
+        "attribution": {"commit": "", "pr": ""},
+        "disableClaudeAiConnectors": true,
+        "strictMcpConfig": true,
+        "permissions": {
+            "allow": allowed,
+            "deny": DENIED_TOOLS,
+        },
+        "sandbox": {
+            "enabled": true,
+            // Bac à sable indisponible : Claude Code s'arrête au lieu de lancer
+            // les commandes sans lui.
+            "failIfUnavailable": true,
+            "allowUnsandboxedCommands": false,
+            // La liste des commandes permises reste une couche de plus.
+            "autoAllowBashIfSandboxed": false,
+            "excludedCommands": [],
+            "filesystem": {
+                "allowWrite": [path(target_dir), path(cargo_home)],
+                "denyWrite": deny_write,
+                "denyRead": SANDBOX_DENY_READ,
+            },
+            "network": {
+                "allowedDomains": ALLOWED_DOMAINS,
+                "strictAllowlist": true,
+                "allowLocalBinding": false,
+                "allowUnixSockets": [],
+                "allowAllUnixSockets": false,
+            },
+        },
+    })
+}
+
+/// Environnement complet de l'agent : liste fermée de variables du cerveau,
+/// environnement git de Jarvis, chemins de cargo, délais de Bash, et la clé
+/// d'API seulement si `pass_api_key`.
+fn agent_env(
+    settings: &AgentSettings,
+    git_set: Vec<(String, String)>,
+    inherited: &[(String, String)],
+    target_dir: &Path,
+) -> Vec<(String, String)> {
+    let lookup = |key: &str| {
+        inherited
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.clone())
+    };
+    let mut env: Vec<(String, String)> = inherited
+        .iter()
+        .filter(|(k, _)| INHERITED_ENV.contains(&k.as_str()) || k.starts_with("LC_"))
+        .cloned()
+        .collect();
+    env.extend(
+        git_set
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("GIT_") && !GIT_REDIRECTS.contains(&k.as_str())),
+    );
+    for (key, value) in [("GIT_SSH_COMMAND", "false"), ("GIT_TERMINAL_PROMPT", "0")] {
+        if !env.iter().any(|(k, _)| k == key) {
+            env.push((key.into(), value.into()));
+        }
+    }
+    let path = |p: &Path| p.to_string_lossy().into_owned();
+    env.push((
+        "PATH".into(),
+        agent_path(&settings.extra_path, lookup("PATH")),
+    ));
+    env.push(("CARGO_TARGET_DIR".into(), path(target_dir)));
+    env.push(("CARGO_HOME".into(), path(&settings.cargo_home)));
+    // Les mandataires de rustup (`~/.cargo/bin/cargo`) y trouvent les chaînes.
+    let rustup = lookup("RUSTUP_HOME")
+        .map(PathBuf::from)
+        .or_else(|| lookup("HOME").map(|h| Path::new(&h).join(".rustup")))
+        .filter(|p| p.is_dir());
+    if let Some(rustup) = rustup {
+        env.push(("RUSTUP_HOME".into(), path(&rustup)));
+    }
+    env.push((
+        "BASH_DEFAULT_TIMEOUT_MS".into(),
+        BASH_DEFAULT_TIMEOUT_MS.to_string(),
+    ));
+    env.push((
+        "BASH_MAX_TIMEOUT_MS".into(),
+        BASH_MAX_TIMEOUT_MS.to_string(),
+    ));
+    if settings.pass_api_key {
+        let name = settings.api_key_env.trim();
+        let name = if name.is_empty() {
+            "ANTHROPIC_API_KEY"
+        } else {
+            name
+        };
+        if let Some(key) = lookup(name).filter(|k| !k.is_empty()) {
+            env.push(("ANTHROPIC_API_KEY".into(), key));
+        }
+    }
+    env
+}
+
 /// `extra_path` puis le `PATH` hérité : le service systemd n'a pas `~/.cargo/bin`.
-fn agent_path(extra: &[PathBuf]) -> String {
+fn agent_path(extra: &[PathBuf], inherited: Option<String>) -> String {
     let mut parts: Vec<String> = extra
         .iter()
         .map(|p| p.to_string_lossy().into_owned())
         .collect();
-    if let Some(inherited) = std::env::var_os("PATH") {
-        let inherited = inherited.to_string_lossy().into_owned();
-        if !inherited.is_empty() {
-            parts.push(inherited);
-        }
+    if let Some(inherited) = inherited.filter(|p| !p.is_empty()) {
+        parts.push(inherited);
     }
     parts.join(":")
 }
@@ -151,6 +308,8 @@ Tu travailles dans un worktree git à part, sur la branche « {branch} ».\n\
 Interdit : pousser, fusionner, changer de branche, committer (Jarvis enregistre le travail à la fin), \
 modifier la configuration git, toucher à quoi que ce soit hors de ce dossier, \
 lancer les binaires du projet (cargo run) ou les tests marqués #[ignore].\n\
+Tes commandes tournent dans un bac à sable : écriture limitée à ce dossier et au dossier de compilation, \
+réseau limité à crates.io. Si une commande échoue à cause de lui, ne cherche pas à le contourner : dis-le.\n\
 Lance les tests avant de finir.\n\
 Termine par une seule ligne : RÉSUMÉ : <une phrase en français, 25 mots au plus, lisible à voix haute, sans markdown>\n"
     )
@@ -237,11 +396,8 @@ pub fn describe_tool(name: &str, input: &Value) -> String {
             .map(|f| f.to_string_lossy().into_owned())
     };
     match name {
-        "Bash" => match input["command"].as_str() {
-            Some(cmd) if !cmd.trim().is_empty() => {
-                let words: Vec<&str> = cmd.split_whitespace().take(4).collect();
-                format!("lance « {} »", bounded(&words.join(" "), 60))
-            }
+        "Bash" => match input["command"].as_str().map(spoken_command) {
+            Some(cmd) if !cmd.is_empty() => format!("lance « {cmd} »"),
             _ => "lance une commande".into(),
         },
         "Edit" | "Write" | "MultiEdit" | "NotebookEdit" => match file() {
@@ -253,8 +409,58 @@ pub fn describe_tool(name: &str, input: &Value) -> String {
             None => "lit un fichier".into(),
         },
         "Grep" | "Glob" => "cherche dans le code".into(),
-        other => other.to_string(),
+        // TodoWrite, outils MCP… : jamais de nom brut à voix haute.
+        _ => "travaille".into(),
     }
+}
+
+/// Commande courte, lisible à voix haute : sans `cd … &&` en tête, sans
+/// variables posées devant, chemins absolus réduits à leur dernier nom,
+/// 4 mots et 60 caractères au plus.
+fn spoken_command(cmd: &str) -> String {
+    let mut rest = cmd.trim();
+    // `cd dossier && …` ou `cd dossier; …`, éventuellement plusieurs fois.
+    while let Some(after) = rest.strip_prefix("cd ") {
+        let cut = [
+            after.find("&&").map(|i| (i, 2)),
+            after.find(';').map(|i| (i, 1)),
+        ]
+        .into_iter()
+        .flatten()
+        .min();
+        match cut {
+            Some((i, len)) => rest = after[i + len..].trim_start(),
+            None => return String::new(),
+        }
+    }
+    let words: Vec<String> = rest
+        .split_whitespace()
+        .skip_while(|w| is_assignment(w))
+        .take(4)
+        .map(|w| {
+            let bare = w.trim_matches(|c| c == '"' || c == '\'');
+            if bare.starts_with('/') || bare.starts_with('~') {
+                let name = bare.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+                if name.is_empty() || name == "~" {
+                    "…".into()
+                } else {
+                    name.to_string()
+                }
+            } else {
+                w.to_string()
+            }
+        })
+        .collect();
+    bounded(&words.join(" "), 60)
+}
+
+/// `NOM=valeur` devant une commande.
+fn is_assignment(word: &str) -> bool {
+    word.split_once('=').is_some_and(|(name, _)| {
+        !name.is_empty()
+            && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+            && !name.starts_with(|c: char| c.is_ascii_digit())
+    })
 }
 
 /// Longueur maximale d'un résumé.
@@ -365,6 +571,7 @@ mod tests {
         AgentSettings {
             claude_path: PathBuf::from("/opt/claude"),
             cargo_target_dir: PathBuf::from("/cache/target"),
+            cargo_home: PathBuf::from("/cache/agent-cargo"),
             extra_path: vec![
                 PathBuf::from("/h/.cargo/bin"),
                 PathBuf::from("/h/.local/bin"),
@@ -373,8 +580,44 @@ mod tests {
         }
     }
 
-    fn invocation(s: &AgentSettings) -> Invocation {
-        let git_set = vec![
+    /// Environnement du cerveau, avec tout ce qui ne doit jamais passer.
+    fn brain_env() -> Vec<(String, String)> {
+        [
+            ("HOME", "/h"),
+            ("USER", "charles"),
+            ("LANG", "fr_FR.UTF-8"),
+            ("LC_TIME", "fr_FR.UTF-8"),
+            ("PATH", "/usr/bin:/bin"),
+            ("TMPDIR", "/tmp/c"),
+            ("XDG_CONFIG_HOME", "/h/.config"),
+            ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ("SSH_AUTH_SOCK", "/run/user/1000/ssh"),
+            ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+            ("DISPLAY", ":0"),
+            ("WAYLAND_DISPLAY", "wayland-0"),
+            ("ANTHROPIC_API_KEY", "sk-ant-cerveau"),
+            ("JARVIS_CLE", "sk-ant-jarvis"),
+            ("ANTHROPIC_AUTH_TOKEN", "jeton"),
+            ("ANTHROPIC_BASE_URL", "https://ailleurs.invalid"),
+            ("CLAUDE_CODE_OAUTH_TOKEN", "oauth"),
+            ("CLAUDE_CODE_USE_BEDROCK", "1"),
+            ("CLAUDE_CODE_USE_VERTEX", "1"),
+            ("AWS_SECRET_ACCESS_KEY", "aws"),
+            ("GH_TOKEN", "gh"),
+            ("GITHUB_TOKEN", "gh"),
+            ("GIT_DIR", "/h/Work/Jarvis/.git"),
+            ("GIT_WORK_TREE", "/h/Work/Jarvis"),
+            ("GIT_INDEX_FILE", "/h/Work/Jarvis/.git/index"),
+            ("CLAUDECODE", "1"),
+            ("CARGO_HOME", "/h/.cargo"),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+    }
+
+    fn git_set() -> Vec<(String, String)> {
+        vec![
             ("GIT_CONFIG_COUNT".to_string(), "1".to_string()),
             (
                 "GIT_CONFIG_KEY_0".to_string(),
@@ -382,14 +625,11 @@ mod tests {
             ),
             ("GIT_CONFIG_VALUE_0".to_string(), String::new()),
             ("GIT_SSH_COMMAND".to_string(), "false".to_string()),
-        ];
-        build(
-            s,
-            &s.projects[0],
-            &task(),
-            git_set,
-            vec!["SSH_AUTH_SOCK".into()],
-        )
+        ]
+    }
+
+    fn invocation(s: &AgentSettings) -> Invocation {
+        build_with_env(s, &s.projects[0], &task(), git_set(), &brain_env())
     }
 
     fn value<'a>(inv: &'a Invocation, flag: &str) -> Option<&'a str> {
@@ -397,11 +637,30 @@ mod tests {
         inv.args.get(i + 1).map(String::as_str)
     }
 
+    fn eq_value<'a>(inv: &'a Invocation, flag: &str) -> Option<&'a str> {
+        let prefix = format!("{flag}=");
+        inv.args
+            .iter()
+            .find_map(|a| a.strip_prefix(prefix.as_str()))
+    }
+
     fn env<'a>(inv: &'a Invocation, key: &str) -> Option<&'a str> {
-        inv.env_set
+        inv.env
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    fn settings_json(inv: &Invocation) -> Value {
+        serde_json::from_str(value(inv, "--settings").unwrap()).unwrap()
+    }
+
+    fn strings(v: &Value) -> Vec<&str> {
+        v.as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap())
+            .collect()
     }
 
     #[test]
@@ -411,7 +670,7 @@ mod tests {
         assert_eq!(inv.program, PathBuf::from("/opt/claude"));
         assert_eq!(inv.cwd, PathBuf::from("/tmp/wt/jarvis-finis-tests"));
         assert_eq!(
-            &inv.args[..9],
+            &inv.args[..10],
             [
                 "-p",
                 "--output-format",
@@ -421,20 +680,19 @@ mod tests {
                 "dontAsk",
                 "--permission-prompts",
                 "none",
-                "--setting-sources",
+                "--restricted",
+                "--strict-mcp-config",
             ]
         );
-        assert_eq!(value(&inv, "--setting-sources"), Some("project"));
-        let settings_json: Value =
-            serde_json::from_str(value(&inv, "--settings").unwrap()).unwrap();
-        assert_eq!(settings_json["includeCoAuthoredBy"], false);
-        assert_eq!(settings_json["attribution"]["commit"], "");
-        assert_eq!(settings_json["attribution"]["pr"], "");
-        let allowed = inv
-            .args
-            .iter()
-            .find_map(|a| a.strip_prefix("--allowedTools="))
-            .unwrap();
+        // Les réglages du dépôt (`.claude/settings.json`) ne s'appliquent jamais.
+        assert!(!inv.args.iter().any(|a| a.starts_with("--setting-sources")));
+        assert_eq!(
+            eq_value(&inv, "--tools"),
+            Some("Bash,Read,Edit,Write,Glob,Grep")
+        );
+        let mcp: Value = serde_json::from_str(eq_value(&inv, "--mcp-config").unwrap()).unwrap();
+        assert_eq!(mcp, json!({"mcpServers": {}}));
+        let allowed = eq_value(&inv, "--allowedTools").unwrap();
         assert_eq!(allowed, DEFAULT_ALLOWED_TOOLS.join(","));
         assert_eq!(
             value(&inv, "--session-id"),
@@ -448,6 +706,13 @@ mod tests {
         // Modèle par défaut, sans plafond.
         assert!(!inv.args.iter().any(|a| a == "--model"));
         assert!(!inv.args.iter().any(|a| a == "--max-budget-usd"));
+        assert_eq!(
+            inv.create_dirs,
+            [
+                PathBuf::from("/cache/target/Jarvis"),
+                PathBuf::from("/cache/agent-cargo")
+            ]
+        );
 
         let s = AgentSettings {
             model: "opus".into(),
@@ -460,25 +725,126 @@ mod tests {
     }
 
     #[test]
+    fn reglages_sans_attribution_ni_connecteurs() {
+        let v = settings_json(&invocation(&settings()));
+        assert_eq!(v["includeCoAuthoredBy"], false);
+        assert_eq!(v["attribution"]["commit"], "");
+        assert_eq!(v["attribution"]["pr"], "");
+        assert_eq!(v["disableClaudeAiConnectors"], true);
+        assert_eq!(v["strictMcpConfig"], true);
+    }
+
+    #[test]
+    fn bac_a_sable_obligatoire() {
+        let v = settings_json(&invocation(&settings()));
+        let sb = &v["sandbox"];
+        assert_eq!(sb["enabled"], true);
+        // Sans bac à sable, Claude Code s'arrête au lieu de tout lancer.
+        assert_eq!(sb["failIfUnavailable"], true);
+        assert_eq!(sb["allowUnsandboxedCommands"], false);
+        assert_eq!(sb["autoAllowBashIfSandboxed"], false);
+        assert_eq!(sb["excludedCommands"], json!([]));
+        let fs = &sb["filesystem"];
+        assert_eq!(
+            strings(&fs["allowWrite"]),
+            ["/cache/target/Jarvis", "/cache/agent-cargo"]
+        );
+        let deny_read = strings(&fs["denyRead"]);
+        for p in [
+            "~/.ssh",
+            "~/.gnupg",
+            "~/.config/jarvis",
+            "~/.config/gh",
+            "~/.git-credentials",
+            "~/.aws",
+            "~/.docker",
+            "~/.local/share/keyrings",
+            "~/.claude/.credentials.json",
+        ] {
+            assert!(deny_read.contains(&p), "{p}");
+        }
+        let deny_write = strings(&fs["denyWrite"]);
+        for d in [".git", ".claude", ".cargo", ".githooks", ".husky"] {
+            let p = format!("/tmp/wt/jarvis-finis-tests/{d}");
+            assert!(deny_write.contains(&p.as_str()), "{p}");
+        }
+        let net = &sb["network"];
+        assert_eq!(
+            strings(&net["allowedDomains"]),
+            ["crates.io", "index.crates.io", "static.crates.io"]
+        );
+        assert_eq!(net["strictAllowlist"], true);
+        assert_eq!(net["allowLocalBinding"], false);
+        assert_eq!(net["allowAllUnixSockets"], false);
+        assert_eq!(net["allowUnixSockets"], json!([]));
+    }
+
+    #[test]
+    fn permissions_limitees_au_worktree() {
+        let mut s = settings();
+        s.extra_allowed_tools = vec!["Bash(make*)".into(), "Read(~/.ssh/**)".into()];
+        let inv = invocation(&s);
+        let v = settings_json(&inv);
+        let allow = strings(&v["permissions"]["allow"]);
+        for t in [
+            "Read(./**)",
+            "Edit(./**)",
+            "Glob",
+            "Grep",
+            "Bash(cargo test*)",
+            "Bash(make*)",
+        ] {
+            assert!(allow.contains(&t), "{t}");
+        }
+        for t in [
+            "Read",
+            "Edit",
+            "Write",
+            "MultiEdit",
+            "TodoWrite",
+            "Bash(rg *)",
+            "Bash(git grep*)",
+            "Read(~/.ssh/**)",
+        ] {
+            assert!(!allow.contains(&t), "{t}");
+        }
+        assert_eq!(
+            eq_value(&inv, "--allowedTools"),
+            Some(allow.join(",").as_str())
+        );
+        let deny = strings(&v["permissions"]["deny"]);
+        assert_eq!(deny, DENIED_TOOLS);
+        for t in [
+            "Bash(git push*)",
+            "Read(~/.ssh/**)",
+            "Read(~/.gnupg/**)",
+            "Read(~/.config/jarvis/**)",
+            "Read(~/.config/gh/**)",
+            "Read(~/.git-credentials)",
+            "Read(~/.aws/**)",
+            "Read(~/.claude/.credentials.json)",
+            "Edit(./.git/**)",
+            "Edit(./.claude/**)",
+            "Edit(./.cargo/**)",
+            "Edit(./.githooks/**)",
+            "Edit(./.husky/**)",
+        ] {
+            assert!(deny.contains(&t), "{t}");
+        }
+    }
+
+    #[test]
     fn arguments_interdisent_push_et_commit() {
         let mut s = settings();
         // Un outil interdit ajouté par erreur aux permis n'y figure pas.
         s.extra_allowed_tools = vec!["Bash(git push*)".into(), "Bash(make*)".into()];
         let inv = invocation(&s);
-        let denied = inv
-            .args
-            .iter()
-            .find_map(|a| a.strip_prefix("--disallowedTools="))
-            .unwrap();
+        let denied = eq_value(&inv, "--disallowedTools").unwrap();
         assert_eq!(denied, DENIED_TOOLS.join(","));
         for t in ["Bash(git push*)", "Bash(git commit*)", "Bash(git merge*)"] {
             assert!(denied.split(',').any(|d| d == t), "{t}");
         }
-        let allowed = inv
-            .args
-            .iter()
-            .find_map(|a| a.strip_prefix("--allowedTools="))
-            .unwrap();
+        let allowed = eq_value(&inv, "--allowedTools").unwrap();
         assert!(allowed.split(',').all(|a| !DENIED_TOOLS.contains(&a)));
         assert!(allowed.ends_with(",Bash(make*)"));
         for a in &inv.args {
@@ -515,24 +881,83 @@ mod tests {
         let inv = invocation(&s);
         for k in [
             "ANTHROPIC_API_KEY",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_BASE_URL",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_USE_BEDROCK",
+            "CLAUDE_CODE_USE_VERTEX",
+            "AWS_SECRET_ACCESS_KEY",
             "SSH_AUTH_SOCK",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "DISPLAY",
+            "WAYLAND_DISPLAY",
             "GH_TOKEN",
             "GITHUB_TOKEN",
-            "GIT_ASKPASS",
-            "SSH_ASKPASS",
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "CLAUDECODE",
+            "JARVIS_CLE",
         ] {
-            assert!(inv.env_remove.iter().any(|r| r == k), "{k}");
+            assert_eq!(env(&inv, k), None, "{k}");
         }
-        // Pas de doublon, rien de retiré qui soit aussi posé.
-        let mut sorted = inv.env_remove.clone();
-        sorted.sort();
-        sorted.dedup();
-        assert_eq!(sorted.len(), inv.env_remove.len());
-        assert!(inv.env_set.iter().all(|(k, _)| !inv.env_remove.contains(k)));
+        // Liste fermée : chaque variable est connue.
+        for (k, _) in &inv.env {
+            let known = [
+                "HOME",
+                "USER",
+                "LANG",
+                "TMPDIR",
+                "XDG_CONFIG_HOME",
+                "PATH",
+                "CARGO_TARGET_DIR",
+                "CARGO_HOME",
+                "BASH_DEFAULT_TIMEOUT_MS",
+                "BASH_MAX_TIMEOUT_MS",
+            ];
+            assert!(
+                known.contains(&k.as_str()) || k.starts_with("LC_") || k.starts_with("GIT_"),
+                "{k}"
+            );
+        }
+        let mut keys: Vec<&str> = inv.env.iter().map(|(k, _)| k.as_str()).collect();
+        keys.sort();
+        let len = keys.len();
+        keys.dedup();
+        assert_eq!(keys.len(), len, "pas de doublon");
+        assert_eq!(env(&inv, "HOME"), Some("/h"));
+        assert_eq!(env(&inv, "LC_TIME"), Some("fr_FR.UTF-8"));
         assert_eq!(env(&inv, "GIT_SSH_COMMAND"), Some("false"));
         assert_eq!(env(&inv, "GIT_TERMINAL_PROMPT"), Some("0"));
         assert_eq!(env(&inv, "GIT_CONFIG_COUNT"), Some("1"));
         assert_eq!(env(&inv, "GIT_CONFIG_KEY_0"), Some("credential.helper"));
+        // Jamais le registre cargo de Charles.
+        assert_eq!(env(&inv, "CARGO_HOME"), Some("/cache/agent-cargo"));
+        assert_eq!(env(&inv, "BASH_DEFAULT_TIMEOUT_MS"), Some("900000"));
+        assert_eq!(env(&inv, "BASH_MAX_TIMEOUT_MS"), Some("1500000"));
+        // `/h/.rustup` n'existe pas.
+        assert_eq!(env(&inv, "RUSTUP_HOME"), None);
+    }
+
+    #[test]
+    fn delai_bash_sous_le_silence_maximal() {
+        let s = AgentSettings::default();
+        const { assert!(BASH_DEFAULT_TIMEOUT_MS <= BASH_MAX_TIMEOUT_MS) };
+        assert!(BASH_MAX_TIMEOUT_MS < s.idle_minutes * 60 * 1000);
+    }
+
+    #[test]
+    fn rustup_trouve_dans_le_dossier_personnel() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".rustup")).unwrap();
+        let mut brain = brain_env();
+        brain.retain(|(k, _)| k != "HOME");
+        brain.push(("HOME".into(), home.path().display().to_string()));
+        let s = settings();
+        let inv = build_with_env(&s, &s.projects[0], &task(), git_set(), &brain);
+        let expected = home.path().join(".rustup").display().to_string();
+        assert_eq!(env(&inv, "RUSTUP_HOME"), Some(expected.as_str()));
     }
 
     #[test]
@@ -542,23 +967,64 @@ mod tests {
             ..settings()
         };
         let inv = invocation(&s);
-        assert!(!inv.env_remove.iter().any(|r| r == "ANTHROPIC_API_KEY"));
-        assert!(inv.env_remove.iter().any(|r| r == "SSH_AUTH_SOCK"));
+        assert_eq!(env(&inv, "ANTHROPIC_API_KEY"), Some("sk-ant-cerveau"));
+        assert_eq!(env(&inv, "SSH_AUTH_SOCK"), None);
+        assert_eq!(env(&inv, "ANTHROPIC_AUTH_TOKEN"), None);
+
+        // Clé lue dans la variable configurée, passée sous le nom attendu.
+        let s = AgentSettings {
+            pass_api_key: true,
+            api_key_env: "JARVIS_CLE".into(),
+            ..settings()
+        };
+        let inv = invocation(&s);
+        assert_eq!(env(&inv, "ANTHROPIC_API_KEY"), Some("sk-ant-jarvis"));
+        assert_eq!(env(&inv, "JARVIS_CLE"), None);
+
+        // Variable absente : aucune clé.
+        let s = AgentSettings {
+            pass_api_key: true,
+            api_key_env: "ABSENTE".into(),
+            ..settings()
+        };
+        assert_eq!(env(&invocation(&s), "ANTHROPIC_API_KEY"), None);
     }
 
     #[test]
     fn chemin_cargo_en_tete_du_path() {
         let s = settings();
         let inv = invocation(&s);
-        let path = env(&inv, "PATH").unwrap();
-        assert!(path.starts_with("/h/.cargo/bin:/h/.local/bin"), "{path}");
-        if let Some(inherited) = std::env::var_os("PATH") {
-            let inherited = inherited.to_string_lossy().to_string();
-            if !inherited.is_empty() {
-                assert!(path.ends_with(&format!(":{inherited}")), "{path}");
-            }
-        }
+        assert_eq!(
+            env(&inv, "PATH"),
+            Some("/h/.cargo/bin:/h/.local/bin:/usr/bin:/bin")
+        );
         assert_eq!(env(&inv, "CARGO_TARGET_DIR"), Some("/cache/target/Jarvis"));
+    }
+
+    #[test]
+    fn environnement_reel_ferme() {
+        // `build` lit l'environnement du processus de test, sans rien y ajouter.
+        let s = settings();
+        let inv = build(
+            &s,
+            &s.projects[0],
+            &task(),
+            git_set(),
+            vec!["SSH_AUTH_SOCK".into()],
+        );
+        for k in [
+            "SSH_AUTH_SOCK",
+            "DBUS_SESSION_BUS_ADDRESS",
+            "ANTHROPIC_API_KEY",
+            "XDG_RUNTIME_DIR",
+        ] {
+            assert_eq!(env(&inv, k), None, "{k}");
+        }
+        assert!(
+            env(&inv, "PATH")
+                .unwrap()
+                .starts_with("/h/.cargo/bin:/h/.local/bin")
+        );
     }
 
     #[test]
@@ -612,9 +1078,59 @@ mod tests {
             d("Glob", &json!({"pattern": "*.rs"})),
             "cherche dans le code"
         );
-        assert_eq!(d("TodoWrite", &json!({})), "TodoWrite");
         assert_eq!(d("Bash", &json!({})), "lance une commande");
         assert_eq!(d("Edit", &json!(null)), "modifie un fichier");
+        assert_eq!(
+            d(
+                "Edit",
+                &json!({"file_path": "/home/c/Work/Jarvis/src/brain.rs"})
+            ),
+            "modifie brain.rs"
+        );
+        assert_eq!(
+            d("Read", &json!({"file_path": "/home/c/.ssh/id_ed25519"})),
+            "lit id_ed25519"
+        );
+    }
+
+    #[test]
+    fn outils_inconnus_sans_nom_brut() {
+        let d = describe_tool;
+        for name in ["TodoWrite", "mcp__serveur__outil", "Task", "WebFetch", ""] {
+            assert_eq!(d(name, &json!({"x": 1})), "travaille", "{name}");
+        }
+    }
+
+    #[test]
+    fn commande_courte_sans_chemin_absolu() {
+        let d = |cmd: &str| describe_tool("Bash", &json!({ "command": cmd }));
+        assert_eq!(
+            d("cd /home/c/.local/share/jarvis/worktrees/x && cargo test -p jarvis-brain --lib"),
+            "lance « cargo test -p jarvis-brain »"
+        );
+        assert_eq!(d("cd a; cd b && ls -la"), "lance « ls -la »");
+        assert_eq!(
+            d("CARGO_TARGET_DIR=/home/c/target RUST_LOG=debug cargo build"),
+            "lance « cargo build »"
+        );
+        assert_eq!(d("ls /home/c/Work/Jarvis/crates/"), "lance « ls crates »");
+        assert_eq!(
+            d("head -n 5 '/home/c/x/lib.rs'"),
+            "lance « head -n 5 lib.rs »"
+        );
+        assert_eq!(d("cd /tmp"), "lance une commande");
+        assert_eq!(d("ls /"), "lance « ls … »");
+        let long = d(&format!("cargo {}", "x".repeat(200)));
+        assert!(
+            long.chars().count() <= 60 + "lance «  »".chars().count(),
+            "{long}"
+        );
+        for cmd in [
+            "cd /home/c && rg secret /home/c/Work",
+            "/home/c/.cargo/bin/cargo test",
+        ] {
+            assert!(!d(cmd).contains("/home"), "{cmd}");
+        }
     }
 
     #[test]

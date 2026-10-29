@@ -3,15 +3,14 @@
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
 
-/// Outils permis à Claude Code par défaut (`--allowedTools`).
+/// Outils permis à Claude Code par défaut (`--allowedTools` et `permissions.allow`).
+/// Lecture et écriture limitées au worktree (`./**`, relatif au dossier de
+/// travail) ; l'outil `Grep` remplace `rg` et `git grep` (`--pre`, `-O`).
 pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
-    "Read",
-    "Edit",
-    "Write",
-    "MultiEdit",
+    "Read(./**)",
+    "Edit(./**)",
     "Glob",
     "Grep",
-    "TodoWrite",
     "Bash(cargo build*)",
     "Bash(cargo check*)",
     "Bash(cargo test*)",
@@ -27,9 +26,7 @@ pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
     "Bash(git show*)",
     "Bash(git blame*)",
     "Bash(git ls-files*)",
-    "Bash(git grep*)",
     "Bash(ls*)",
-    "Bash(rg *)",
     "Bash(grep *)",
     "Bash(head *)",
     "Bash(tail *)",
@@ -61,6 +58,21 @@ pub const DENIED_TOOLS: &[&str] = &[
     "Bash(cargo login*)",
     "WebFetch",
     "WebSearch",
+    // Secrets de Charles : jamais lus (bloque aussi l'écriture).
+    "Read(~/.ssh/**)",
+    "Read(~/.gnupg/**)",
+    "Read(~/.config/jarvis/**)",
+    "Read(~/.config/gh/**)",
+    "Read(~/.git-credentials)",
+    "Read(~/.aws/**)",
+    "Read(~/.claude/.credentials.json)",
+    // Configuration qui ferait tourner du code hors du bac à sable.
+    "Edit(./.git)",
+    "Edit(./.git/**)",
+    "Edit(./.claude/**)",
+    "Edit(./.cargo/**)",
+    "Edit(./.githooks/**)",
+    "Edit(./.husky/**)",
 ];
 
 /// Réglages de l'agent de code. Les chemins peuvent commencer par `~/` :
@@ -80,13 +92,18 @@ pub struct AgentSettings {
     pub model: String,
     /// 0 : sans plafond.
     pub max_budget_usd: f64,
-    /// Faux : `ANTHROPIC_API_KEY` retirée, l'agent utilise le compte de Charles.
+    /// Faux : aucune `ANTHROPIC_API_KEY`, l'agent utilise le compte de Charles.
     pub pass_api_key: bool,
+    /// Variable du cerveau qui contient la clé, passée en `ANTHROPIC_API_KEY`
+    /// quand `pass_api_key` est vrai.
+    pub api_key_env: String,
     /// Un commit de Jarvis à la fin d'une tâche réussie.
     pub commit_at_end: bool,
     pub worktree_dir: PathBuf,
     /// Dossier de compilation de l'agent, suivi de `/<projet>`.
     pub cargo_target_dir: PathBuf,
+    /// `CARGO_HOME` de l'agent : jamais le `~/.cargo` de Charles.
+    pub cargo_home: PathBuf,
     /// Placés en tête du `PATH` de l'agent.
     pub extra_path: Vec<PathBuf>,
     /// Ajoutés à [`DEFAULT_ALLOWED_TOOLS`] ; [`DENIED_TOOLS`] reste prioritaire.
@@ -115,14 +132,17 @@ impl Default for AgentSettings {
             enabled: true,
             claude_path: PathBuf::from("~/.local/bin/claude"),
             max_minutes: 45,
-            idle_minutes: 10,
+            // Au-dessus des 25 min permises à une commande Bash de l'agent.
+            idle_minutes: 30,
             max_tasks: 2,
             model: String::new(),
             max_budget_usd: 0.0,
             pass_api_key: false,
+            api_key_env: "ANTHROPIC_API_KEY".into(),
             commit_at_end: true,
             worktree_dir: PathBuf::from("~/.local/share/jarvis/worktrees"),
             cargo_target_dir: PathBuf::from("~/.cache/jarvis/agent-target"),
+            cargo_home: PathBuf::from("~/.cache/jarvis/agent-cargo"),
             extra_path: vec![PathBuf::from("~/.cargo/bin"), PathBuf::from("~/.local/bin")],
             extra_allowed_tools: Vec::new(),
             projects: vec![Project {
@@ -145,6 +165,7 @@ impl AgentSettings {
         s.claude_path = expand(&s.claude_path, home);
         s.worktree_dir = expand(&s.worktree_dir, home);
         s.cargo_target_dir = expand(&s.cargo_target_dir, home);
+        s.cargo_home = expand(&s.cargo_home, home);
         for p in &mut s.extra_path {
             *p = expand(p, home);
         }
@@ -209,6 +230,8 @@ mod tests {
         if std::env::var_os("HOME").is_some() {
             assert!(s.claude_path.is_absolute());
             assert!(s.worktree_dir.ends_with(".local/share/jarvis/worktrees"));
+            assert!(s.cargo_home.is_absolute());
+            assert!(s.cargo_home.ends_with(".cache/jarvis/agent-cargo"));
             assert!(s.extra_path.iter().all(|p| p.is_absolute()));
             assert!(s.projects[0].path.is_absolute());
         }
@@ -217,7 +240,7 @@ mod tests {
     #[test]
     fn outils_permis_sans_doublon() {
         let s = AgentSettings {
-            extra_allowed_tools: vec!["Bash(npm test*)".into(), "Read".into()],
+            extra_allowed_tools: vec!["Bash(npm test*)".into(), "Read(./**)".into()],
             ..AgentSettings::default()
         };
         let mut p = s.projects[0].clone();
@@ -243,6 +266,40 @@ mod tests {
     }
 
     #[test]
+    fn permis_limites_au_worktree() {
+        // Jamais `Read`, `Edit` ou `Write` nus : ils couvriraient tout le disque.
+        for t in [
+            "Read",
+            "Edit",
+            "Write",
+            "MultiEdit",
+            "Bash(rg *)",
+            "Bash(git grep*)",
+        ] {
+            assert!(!DEFAULT_ALLOWED_TOOLS.contains(&t), "{t}");
+        }
+        assert!(DEFAULT_ALLOWED_TOOLS.contains(&"Read(./**)"));
+        assert!(DEFAULT_ALLOWED_TOOLS.contains(&"Edit(./**)"));
+        for t in [
+            "Read(~/.ssh/**)",
+            "Read(~/.claude/.credentials.json)",
+            "Edit(./.git/**)",
+            "Edit(./.claude/**)",
+            "Edit(./.cargo/**)",
+        ] {
+            assert!(DENIED_TOOLS.contains(&t), "{t}");
+        }
+    }
+
+    #[test]
+    fn silence_plus_long_qu_une_commande() {
+        let s = AgentSettings::default();
+        assert_eq!((s.max_minutes, s.idle_minutes), (45, 30));
+        // Une commande Bash de l'agent dure 25 min au plus.
+        assert!(s.idle_minutes > 25);
+    }
+
+    #[test]
     fn section_toml_lue() {
         let s: AgentSettings = toml::from_str(
             "max_tasks = 1\n[[projects]]\nname = \"Essai\"\npath = \"/tmp/essai\"\n",
@@ -250,6 +307,8 @@ mod tests {
         .unwrap();
         assert_eq!(s.max_tasks, 1);
         assert_eq!(s.max_minutes, 45);
+        assert_eq!(s.idle_minutes, 30);
+        assert_eq!(s.api_key_env, "ANTHROPIC_API_KEY");
         assert_eq!(s.projects.len(), 1);
         assert_eq!(s.projects[0].base, None);
         assert!(s.projects[0].aliases.is_empty());
