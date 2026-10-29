@@ -132,7 +132,11 @@ répète »** (ou « tu peux répéter ? », « qu'est-ce que tu as dit ? ») re
 sans rien refaire ; si une question attend, elle est reposée et le délai de 8 s repart, y
 compris en réponse directe à la question (« répète » sans « Jarvis »). La question n'est
 reposée qu'**une fois** par action, voix mal reconnue comprise. Seule ta voix reconnue fait
-répéter : une voix non reconnue est ignorée.
+répéter : le « répète » d'une voix non reconnue est ignoré et annule la question.
+
+Avec `[speaker] enabled = false`, ou sans empreinte enregistrée, la voix n'est pas vérifiée :
+toute voix peut alors confirmer. Enregistre ton empreinte (`jarvis-ear enroll`) pour réserver
+les confirmations à ta voix.
 
 Par `jarvis-cli say`, veille, redémarrage et arrêt sont refusés (« Pour cela, demandez-le-moi
 à voix haute, Monsieur. ») : la confirmation se fait à la voix.
