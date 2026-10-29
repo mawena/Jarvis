@@ -17,9 +17,9 @@ use jarvis_ear_core::net::tls::{TlsConnector, pinned_client_config, tofu_client_
 use jarvis_ear_core::net::{
     Connector, Discovery, PairError, Paired, Pairing, PairingStore, pair_with_code,
 };
-use jarvis_protocol::Fingerprint;
 use jarvis_protocol::ear::{DEFAULT_PORT, RejectReason};
 use jarvis_protocol::pairing_uri::PairingUri;
+use jarvis_protocol::{Fingerprint, printable};
 
 /// Plateforme annoncée au cerveau.
 pub const PLATFORM: &str = "linux";
@@ -155,7 +155,7 @@ pub async fn pair_code(
                      sur le PC, ou donnez son adresse (--address hôte:port)"
                 );
             };
-            println!("Cerveau « {} » trouvé.", brain.name);
+            println!("Cerveau « {} » trouvé.", printable(&brain.name));
             brain.addrs
         }
     };
@@ -198,7 +198,8 @@ fn pairing_of(
 ) -> Pairing {
     Pairing {
         brain_id: paired.brain_id,
-        brain_name: paired.brain_name,
+        // Venu du réseau : affiché ensuite au terminal.
+        brain_name: printable(&paired.brain_name),
         ear_id: paired.ear_id,
         token: paired.token,
         fingerprint,
@@ -287,7 +288,7 @@ pub fn run(
     })?;
     println!(
         "Oreille « {name} » appairée au cerveau « {} » (empreinte {}).",
-        pairing.brain_name,
+        printable(&pairing.brain_name),
         pairing.fingerprint.short()
     );
     match profile {

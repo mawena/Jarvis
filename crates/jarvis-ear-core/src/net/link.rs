@@ -656,7 +656,8 @@ async fn read_paired(ws: &mut Ws) -> Result<Paired, PairError> {
                         ear_id,
                         token,
                         brain_id,
-                        brain_name,
+                        // Affiché par `jarvis-ear pair`, gardé dans l'appairage.
+                        brain_name: jarvis_protocol::printable(&brain_name),
                     });
                 }
                 Ok(BrainMessage::Rejected { reason }) => return Err(PairError::Rejected(reason)),
@@ -1177,5 +1178,17 @@ mod tests {
         })
         .await;
         assert!(matches!(result, Err(PairError::Rejected(r)) if r == reason));
+    }
+
+    #[tokio::test]
+    async fn nom_du_cerveau_nettoye_a_l_appairage() {
+        let (_, result) = pair_once(BrainMessage::Paired {
+            ear_id: EarId::new("ab"),
+            token: "jeton".into(),
+            brain_id: BRAIN_ID.into(),
+            brain_name: "PC\u{1b}[2J\r\u{202E}lam".into(),
+        })
+        .await;
+        assert_eq!(result.unwrap().brain_name, "PC[2Jlam");
     }
 }

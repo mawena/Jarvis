@@ -302,6 +302,26 @@ pub fn decode_pcm(b64: &str) -> Result<Vec<i16>, ProtocolError> {
         .collect())
 }
 
+/// Texte venu d'ailleurs (réseau, annonce mDNS), sûr à afficher : sans caractère de
+/// contrôle (retour chariot, échappement ANSI…) ni marque de direction (U+061C,
+/// U+200E, U+200F, U+202A à U+202E, U+2066 à U+2069), qui pourraient maquiller un
+/// terminal ou un nom.
+pub fn printable(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{061C}'
+                        | '\u{200E}'
+                        | '\u{200F}'
+                        | '\u{202A}'..='\u{202E}'
+                        | '\u{2066}'..='\u{2069}'
+                )
+        })
+        .collect()
+}
+
 /// Chemin du socket de contrôle du cerveau.
 pub fn socket_path() -> PathBuf {
     let uid = std::fs::metadata("/proc/self")
@@ -323,6 +343,21 @@ mod tests {
     use super::*;
     use std::ffi::OsString;
     use std::path::PathBuf;
+
+    #[test]
+    fn texte_affichable_sans_controle_ni_direction() {
+        assert_eq!(printable("PC de Charles"), "PC de Charles");
+        assert_eq!(printable("Bureau é ü 😀"), "Bureau é ü 😀");
+        // Échappement ANSI, retour chariot, retour à la ligne, nul.
+        assert_eq!(printable("PC\u{1b}[2J\r\nfaux\0"), "PC[2Jfaux");
+        // Inversion de direction (« txt.exe » affiché « exe.txt »), isolats, marques.
+        assert_eq!(
+            printable("a\u{202E}b\u{2066}c\u{2069}d\u{200E}e\u{200F}f\u{061C}g\u{202A}h"),
+            "abcdefgh"
+        );
+        // C1 (U+0080–U+009F) aussi.
+        assert_eq!(printable("a\u{9b}31mb"), "a31mb");
+    }
 
     #[test]
     fn say_serialise() {

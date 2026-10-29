@@ -1284,9 +1284,10 @@ fn shown(id: &EarId) -> &str {
     }
 }
 
-/// Texte d'une oreille : sans caractère de contrôle, borné ; vide : `fallback`.
+/// Texte d'une oreille : sans caractère de contrôle ni marque de direction, borné ;
+/// vide : `fallback`.
 fn clean(text: &str, max: usize, fallback: &str) -> String {
-    let text: String = text.chars().filter(|c| !c.is_control()).take(max).collect();
+    let text: String = jarvis_protocol::printable(text).chars().take(max).collect();
     match text.trim() {
         "" => fallback.to_string(),
         t => t.to_string(),
@@ -1315,6 +1316,7 @@ mod tests {
     fn nom_d_oreille_nettoye() {
         assert_eq!(clean("  Pixel\n4 XL ", 64, "Oreille"), "Pixel4 XL");
         assert_eq!(clean("\u{7}", 64, "Oreille"), "Oreille");
+        assert_eq!(clean("Salon\u{202E}gnp.exe", 64, "Oreille"), "Salongnp.exe");
         assert_eq!(clean(&"a".repeat(100), 64, "x").len(), 64);
     }
 

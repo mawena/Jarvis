@@ -156,6 +156,8 @@ fn usable(ip: &IpAddr) -> bool {
 }
 
 /// « Charles PC._jarvis._tcp.local. » → « Charles PC » (`\.` et `\\` déséchappés).
+/// Venu de n'importe quelle machine du réseau : sans caractère de contrôle ni marque
+/// de direction (voir [`jarvis_protocol::printable`]).
 fn instance_name(fullname: &str) -> String {
     let suffix = format!(".{MDNS_SERVICE}");
     let mut name = String::new();
@@ -167,7 +169,7 @@ fn instance_name(fullname: &str) -> String {
             c
         });
     }
-    name
+    jarvis_protocol::printable(&name)
 }
 #[cfg(test)]
 mod tests {
@@ -224,5 +226,15 @@ mod tests {
         );
         assert_eq!(instance_name("bizarre"), "bizarre");
         assert_eq!(instance_name(r"PC 2\.0._jarvis._tcp.local."), "PC 2.0");
+    }
+
+    #[test]
+    fn nom_d_instance_sans_caractere_de_controle() {
+        assert_eq!(
+            instance_name("PC\u{1b}[31m\r\nCerveau\u{202E}lam._jarvis._tcp.local."),
+            "PC[31mCerveaulam"
+        );
+        // Déséchappé puis nettoyé : `\` ne fait pas revenir un contrôle.
+        assert_eq!(instance_name("a\\\u{7}b._jarvis._tcp.local."), "ab");
     }
 }
