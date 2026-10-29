@@ -1597,12 +1597,14 @@ dependencies = [
  "anyhow",
  "async-trait",
  "fuzzy-matcher",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
+ "wiremock",
  "zbus 6.1.0",
 ]
 

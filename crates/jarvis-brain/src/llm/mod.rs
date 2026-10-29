@@ -32,6 +32,18 @@ pub enum LlmError {
 #[async_trait::async_trait]
 pub trait LlmBackend: Send + Sync {
     async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError>;
+
+    /// Complétion simple, **sans outils** (résumé d'une recherche).
+    async fn complete(
+        &self,
+        _system: &str,
+        _user: &str,
+        _max_tokens: u32,
+    ) -> Result<String, LlmError> {
+        Err(LlmError::BadResponse(
+            "complétion non prise en charge".into(),
+        ))
+    }
 }
 
 /// Ton commun aux deux consignes. Court : les petits modèles locaux (llama3.2:3b,
@@ -65,6 +77,25 @@ pub fn system_prompt(address: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Backend qui ne sait que comprendre.
+    struct SansCompletion;
+
+    #[async_trait::async_trait]
+    impl LlmBackend for SansCompletion {
+        async fn understand(&self, _: &str, _: &[ToolSpec]) -> Result<Understanding, LlmError> {
+            Ok(Understanding::Answer("ok".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn complete_par_defaut_non_pris_en_charge() {
+        let r = SansCompletion.complete("consigne", "question", 80).await;
+        assert!(
+            matches!(&r, Err(LlmError::BadResponse(m)) if m == "complétion non prise en charge"),
+            "{r:?}"
+        );
+    }
 
     #[test]
     fn prompt_contient_le_nom() {

@@ -1,14 +1,18 @@
 //! Skill abstraction and command execution for Jarvis.
 
 pub mod apps;
+pub mod browser;
 pub mod power;
 pub mod runner;
+pub mod search;
+pub mod video;
 
 #[cfg(any(test, feature = "test-util"))]
 pub use runner::FakeRunner;
 pub use runner::{CommandOutput, CommandRunner, SystemRunner};
 
 use serde::Serialize;
+use std::time::Duration;
 
 /// Whether a tool can run immediately or needs confirmation (phase 3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -92,6 +96,11 @@ pub trait Skill: Send + Sync {
     /// Question posée avant un outil `Risky` (« Je mets le PC en veille ? »).
     /// `None` : le cerveau formule une question générale.
     fn confirmation(&self, _tool: &str, _args: &serde_json::Value) -> Option<String> {
+        None
+    }
+
+    /// Délai propre à un outil. `None` : le délai commun du cerveau (5 s).
+    fn timeout(&self, _tool: &str) -> Option<Duration> {
         None
     }
 

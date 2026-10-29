@@ -11,6 +11,7 @@ pub mod persona;
 pub mod server;
 pub mod speaker;
 pub mod stt;
+pub mod summarizer;
 pub mod system_skill;
 #[cfg(any(test, feature = "test-util"))]
 pub mod testing;
