@@ -74,7 +74,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles) — [fiche d'essai](docs/essais/essai-3.8-voix.md)
 
 ## Phase 4 : oreilles en réseau
-*Plan : [phase 4](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md), branche `feature/oreilles-reseau` (à venir, après la phase 7)*
+*Plan : [phase 4](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md), branche `feature/oreilles-reseau` (en cours)*
 
 - [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
 - [ ] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`)
