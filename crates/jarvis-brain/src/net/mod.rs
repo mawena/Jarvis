@@ -259,7 +259,7 @@ async fn handshake(
             offline_phrase,
         } => {
             if version != PROTOCOL_VERSION {
-                info!(%peer, version, "oreille d'une autre version refusée");
+                debug!(%peer, version, "oreille d'une autre version refusée");
                 reject(&mut ws, version_rejected()).await;
                 return None;
             }

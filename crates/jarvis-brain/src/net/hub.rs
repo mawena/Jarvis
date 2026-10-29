@@ -205,6 +205,7 @@ impl Hub {
             processing: 0,
             pairing: None,
             next_id: 1,
+            refusals: 0,
             offline: None,
             sound: sound_tx,
             me: tx.downgrade(),
@@ -443,6 +444,8 @@ struct State {
     processing: usize,
     pairing: Option<OpenWindow>,
     next_id: u64,
+    /// Connexions non authentifiées refusées depuis le démarrage.
+    refusals: u64,
     offline: Option<(String, SpeechAudio)>,
     sound: mpsc::UnboundedSender<SoundCmd>,
     me: mpsc::WeakSender<Command>,
@@ -575,6 +578,19 @@ impl State {
         }
     }
 
+    /// Une connexion non authentifiée refusée (`hello` refusé, appairage hors
+    /// fenêtre) : le détail est en `debug`, le journal n'en garde qu'un résumé, de
+    /// plus en plus rare (1, 2, 4, 8… refus) pour ne pas être noyé.
+    fn refused(&mut self) {
+        self.refusals += 1;
+        if self.refusals.is_power_of_two() {
+            info!(
+                refus = self.refusals,
+                "connexions refusées depuis le démarrage (détail : RUST_LOG=debug)"
+            );
+        }
+    }
+
     fn is_current(&self, ear: &EarId, session: SessionId) -> bool {
         self.sessions.get(ear).is_some_and(|s| s.id == session)
     }
@@ -594,7 +610,8 @@ impl State {
             } else {
                 RejectReason::UnknownEar
             };
-            info!(oreille = shown(&ear_id), raison = ?reason, "oreille refusée");
+            debug!(oreille = shown(&ear_id), raison = ?reason, "oreille refusée");
+            self.refused();
             return HelloOutcome::Rejected(reason);
         };
         let replaced = self.sessions.contains_key(&ear_id);
@@ -1146,7 +1163,8 @@ impl State {
             reason: RejectReason::PairingClosed,
         };
         let Some(open) = self.pairing.as_mut() else {
-            info!("appairage refusé : aucune fenêtre ouverte");
+            debug!(%from, "appairage refusé : aucune fenêtre ouverte");
+            self.refused();
             return closed;
         };
         let now = Instant::now();
