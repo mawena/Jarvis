@@ -103,6 +103,8 @@ simple d'avoir deux oreilles qui entendent la même phrase.
 - [ ] Dis : « Jarvis, quelle heure est-il ? »
 
   **Attendu :**
+  - deux bips de réveil presque en même temps : c'est normal, chaque oreille bipe dès
+    qu'elle entend « Jarvis », avant que le cerveau ne choisisse ;
   - tu entends **une seule** réponse, pas deux, et pas de bip d'échec ;
   - dans le journal du cerveau, **une seule** ligne « oreille élue » pour cette phrase.
 
@@ -139,8 +141,9 @@ Les deux oreilles tournent toujours.
 
 - [ ] Attends 5 secondes, puis dis : « Jarvis, quelle heure est-il ? »
 
-  **Attendu :** en moins de 2 secondes, la voix de Jarvis dit que le PC est endormi (ou un bip
-  d'échec). L'icône de l'oreille du PC dit « PC injoignable » ou « connexion au PC… ».
+  **Attendu :** après le bip de réveil, en 2 secondes au plus (en général tout de suite), la
+  voix de Jarvis dit que le PC est endormi (ou un bip d'échec), une seule fois par oreille.
+  L'icône de l'oreille du PC dit « PC injoignable » ou « connexion au PC… ».
 
 - [ ] Relance le cerveau :
 
@@ -160,8 +163,18 @@ Les deux oreilles tournent toujours.
   jarvis unpair <nom de la deuxième oreille>
   ```
 
-  **Attendu :** dans le deuxième terminal, la deuxième oreille est déconnectée tout de suite et
-  dit que l'appairage est refusé. Elle ne se reconnecte pas.
+  Si on te demande l'identifiant (deux oreilles du même nom), donne celui de la colonne
+  « Id » de `jarvis ears`.
+
+  **Attendu :** dans le deuxième terminal, la deuxième oreille est déconnectée tout de suite.
+  Elle réessaie seule (aussitôt, puis après 30 s, puis de plus en plus rarement, jusqu'à une
+  fois toutes les 5 min), et elle est refusée à chaque essai ; son journal montre :
+
+  ```
+  cerveau : connexion refusée (UnknownEar)
+  ```
+
+  `jarvis ears` ne la montre plus.
 
 - [ ] Arrête-la avec `Ctrl+C`, puis dis : « Jarvis, quelle heure est-il ? »
 
