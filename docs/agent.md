@@ -14,7 +14,9 @@ l'agent, et l'IA de Jarvis ne peut pas le lancer : l'outil ne lui est jamais pro
 ## Mise en route
 
 Il faut [Claude Code](https://claude.com/claude-code) connecté au compte de Charles
-(`~/.local/bin/claude`) et `notify-send` (`sudo apt install libnotify-bin`).
+(`~/.local/bin/claude`), `notify-send` (`sudo apt install libnotify-bin`) et, pour le bac à
+sable des commandes de l'agent, `bubblewrap` et `socat` (`sudo apt install bubblewrap socat`).
+Sans bac à sable, Claude Code refuse de démarrer (`failIfUnavailable`).
 
 ```bash
 jarvisctl doctor    # Claude Code, sa version, ses options, les projets, notify-send
@@ -36,14 +38,16 @@ Toutes les clés sont facultatives ; valeurs par défaut :
 enabled = true
 claude_path = "~/.local/bin/claude"
 max_minutes = 45          # durée maximale d'une tâche
-idle_minutes = 10         # sans aucune sortie : tâche bloquée, arrêtée
+idle_minutes = 30         # sans aucune sortie : tâche bloquée, arrêtée (> 25 min, délai max d'une commande)
 max_tasks = 2             # en même temps ; une seule par projet
 model = ""                # vide : modèle par défaut de Claude Code
 max_budget_usd = 0.0      # 0 : sans plafond
-pass_api_key = false      # ANTHROPIC_API_KEY retirée : l'agent utilise le compte de Charles
+pass_api_key = false      # aucune ANTHROPIC_API_KEY : l'agent utilise le compte de Charles
+api_key_env = "ANTHROPIC_API_KEY"   # avec pass_api_key : variable lue, passée en ANTHROPIC_API_KEY
 commit_at_end = true      # un commit de Jarvis à la fin d'une tâche réussie
 worktree_dir = "~/.local/share/jarvis/worktrees"
 cargo_target_dir = "~/.cache/jarvis/agent-target"   # suivi de /<projet>
+cargo_home = "~/.cache/jarvis/agent-cargo"          # CARGO_HOME de l'agent, jamais ~/.cargo
 extra_path = ["~/.cargo/bin", "~/.local/bin"]       # en tête du PATH de l'agent
 extra_allowed_tools = []  # ajoutés aux outils permis ; les interdits restent prioritaires
 
@@ -101,19 +105,32 @@ seul ou « arrête la musique » ne touchent pas à l'agent. Le travail reste su
   Jarvis a des modifications non enregistrées : je ne lance rien. » Rien n'est créé. Les
   fichiers non suivis sont ignorés.
 - **Rien de poussé ni fusionné**, trois couches indépendantes :
-  1. permissions de Claude Code : mode `dontAsk` (tout ce qui n'est pas permis est refusé),
-     réglages utilisateur ignorés (`--setting-sources project`) ; permis : lire, modifier,
+  1. Claude Code en **mode restreint** (`--restricted`) : réglages utilisateur, projet
+     (`.claude/settings.json` du dépôt) et local ignorés ; outils `Bash, Read, Edit, Write,
+     Glob, Grep` seulement (`--tools`), aucun serveur MCP ni connecteur ; outils de fichiers
+     confinés au worktree. Mode `dontAsk` (tout ce qui n'est pas permis est refusé) ; permis :
+     lire et modifier dans le worktree (`Read(./**)`, `Edit(./**)`), chercher,
      `cargo build/check/test/clippy/fmt/doc/tree`, `scripts/check.sh`, git en lecture ;
      interdits : `git push/merge/rebase/reset/checkout/switch/branch/commit/worktree/remote/config/flow/tag`,
-     `gh`, `cargo run/publish/install/update/login`, WebFetch, WebSearch ;
-  2. environnement git du processus : chaque remote pousse vers une adresse sans transport,
-     aucun identifiant (`SSH_AUTH_SOCK`, `GH_TOKEN`, `GITHUB_TOKEN`, assistants retirés,
-     `GIT_SSH_COMMAND=false`) ;
+     `gh`, `cargo run/publish/install/update/login`, WebFetch, WebSearch, la lecture des
+     secrets (`~/.ssh`, `~/.gnupg`, `~/.config/jarvis`, `~/.config/gh`, `~/.aws`…) et la
+     modification de `.git`, `.claude`, `.cargo`, `.githooks`, `.husky` ;
+     **bac à sable** obligatoire pour chaque commande (et ses enfants : `build.rs`, tests) :
+     écriture limitée au worktree, au dossier de compilation et au `CARGO_HOME` de l'agent,
+     secrets illisibles, réseau limité à `crates.io`, aucun socket Unix (ni agent SSH, ni
+     D-Bus, ni socket de Jarvis) ;
+  2. environnement du processus **vidé** puis rempli d'une liste fermée (`HOME`, `USER`,
+     langue, `TMPDIR`, `XDG_*_HOME`, `PATH`, cargo) : ni `SSH_AUTH_SOCK`, ni `DBUS_*`, ni
+     `XDG_RUNTIME_DIR`, ni jeton (`GH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `AWS_*`…) ; chaque
+     remote pousse vers une adresse sans transport, aucun assistant d'identifiants,
+     `GIT_SSH_COMMAND=false` ;
   3. vérification après coup : branches protégées inchangées, aucune nouvelle branche
      distante, worktree toujours sur sa branche, partie de la base. Toute violation est annoncée en urgence
      (« Attention : la branche develop a été modifiée. Vérifiez le projet Jarvis. »).
-- **Limites** : 45 minutes, 10 minutes sans sortie, 2 tâches en même temps, une par projet.
-  L'arrêt tue tout le groupe de processus (y compris un `cargo test` lancé par l'agent).
+- **Limites** : 45 minutes, 30 minutes sans sortie, 2 tâches en même temps, une par projet ;
+  une commande de l'agent dure 15 minutes par défaut, 25 au plus. L'arrêt envoie `TERM` à
+  Claude Code (qui arrête ses commandes), puis, 10 s plus tard, tue tout le groupe de
+  processus (y compris un `cargo test` lancé par l'agent).
 - **Redémarrage du cerveau** : les tâches en cours sont interrompues (`jarvisctl restart`,
   `stop` et `update` le disent avant) ; au démarrage suivant, une notification les signale.
   Le worktree et la branche restent.
@@ -155,7 +172,7 @@ Pour l'abandonner : `git worktree remove --force <dossier>` puis
 L'agent est **la seule compétence qui envoie du contenu à une IA en ligne, même en mode
 local** : la consigne et le code du projet partent chez Claude Code (Anthropic), sous
 l'**abonnement Claude Code de Charles**. La phrase de départ le dit (« je confie cela à
-Claude »). `ANTHROPIC_API_KEY` n'est pas transmise à l'agent (`pass_api_key = false`) : il
+Claude »). Aucune `ANTHROPIC_API_KEY` n'est transmise à l'agent (`pass_api_key = false`) : il
 n'est pas facturé sur la clé API du mode en ligne. Le suivi, l'arrêt et le compte des fichiers
 n'utilisent aucune IA ; le résumé de fin est la dernière ligne de l'agent (`RÉSUMÉ : …`).
 

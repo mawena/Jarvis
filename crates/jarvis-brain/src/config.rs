@@ -399,7 +399,7 @@ mod tests {
         assert_eq!(*a, AgentSettings::default());
         assert!(a.enabled);
         assert_eq!(a.claude_path, PathBuf::from("~/.local/bin/claude"));
-        assert_eq!((a.max_minutes, a.idle_minutes, a.max_tasks), (45, 10, 2));
+        assert_eq!((a.max_minutes, a.idle_minutes, a.max_tasks), (45, 30, 2));
         assert_eq!(a.model, "");
         assert_eq!(a.max_budget_usd, 0.0);
         assert!(!a.pass_api_key);
