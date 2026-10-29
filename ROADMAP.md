@@ -56,6 +56,8 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 2.14 Vérification du locuteur par le cerveau : une phrase dont la voix n'est pas celle de Charles est ignorée sans rien exécuter
 - [x] 2.16 Whisper accéléré : fenêtre ajustée à la phrase, attention flash, sans relances (`small` : ~6 s → ~1 s, outil `bench_stt`)
 - [x] 2.17 Relecture finale de la phase 2 et corrections : vérification du locuteur fermée en cas d'échec (empreinte abîmée, modèle absent), phrases courtes non vérifiées limitées aux raccourcis, musique rétablie (quitter, surveillance 15 s, arrêt et redémarrage du cerveau), écoute coupée retenue, prises privées, requêtes bornées, `doctor` suit la configuration
+- [x] 2.19 Reconnaissance des noms rares (« lance GiGit » entendu « lance youtube ») : fenêtre minimale de Whisper (512 trames, ≈ 1,9 s au lieu de 0,9 s mais bien plus sûr), vocabulaire en indice (`[stt] vocabulary`), nom d'application à une ou deux lettres près retrouvé, outil `say_wav` pour essayer sans micro
+- [ ] 2.20 Essai réel : « lance GiGit » et quelques commandes courantes, avec `vocabulary = ["GiGit"]` (Charles)
 - [ ] 2.15 Mesurer le taux de fausses détections sur une journée (Charles) — [fiche d'essai](docs/essais/essai-2.15-fausses-detections.md)
 - [ ] 2.18 Essai réel : confirmer qu'une autre voix est ignorée (phrase rejetée à 0,34 le 2026-10-28 : autre voix ou Charles ?) (Charles) — [fiche d'essai](docs/essais/essai-2.18-autre-voix.md)
 
