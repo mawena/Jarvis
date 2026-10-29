@@ -239,6 +239,142 @@ async fn oreille_nommee_et_annonces_vides() {
     );
 }
 
+/// Serveur avec un tableau d'annonces (et une voix, si donnée).
+async fn start_with_board(
+    dir: &Path,
+    voice: jarvis_brain::tts::Voice,
+) -> (
+    PathBuf,
+    Arc<jarvis_brain::announce::AnnouncementBoard>,
+    Arc<jarvis_skills::FakeRunner>,
+) {
+    use jarvis_brain::announce::AnnouncementBoard;
+    use jarvis_brain::server::{SpeakerState, serve_with_board};
+    use jarvis_brain::testing::ManualClock;
+    let socket = dir.join("run/brain.sock");
+    let runner = Arc::new(jarvis_skills::FakeRunner::new());
+    let board = Arc::new(AnnouncementBoard::new(
+        runner.clone(),
+        Arc::new(ManualClock::new()),
+    ));
+    let b = brain(dir);
+    let l = listen(&b);
+    let (s, bd) = (socket.clone(), board.clone());
+    tokio::spawn(
+        async move { serve_with_board(b, l, SpeakerState::Disabled, voice, bd, &s).await },
+    );
+    for _ in 0..100 {
+        if UnixStream::connect(&socket).await.is_ok() {
+            return (socket, board, runner);
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    panic!("le serveur ne démarre pas");
+}
+
+fn notice(speech: &str, outcome: jarvis_skills::Outcome) -> jarvis_skills::Notice {
+    jarvis_skills::Notice {
+        title: "Tâche terminée".into(),
+        speech: speech.into(),
+        body: String::new(),
+        outcome,
+        urgent: false,
+        speak: true,
+    }
+}
+
+#[tokio::test]
+async fn listen_marque_l_oreille_active() {
+    use jarvis_skills::{Announcer, Outcome};
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, board, _) = start_with_board(dir.path(), jarvis_brain::tts::Voice::none()).await;
+    let mut c = Client::connect(&socket).await;
+    let r = c
+        .send(ControlRequest::Listen {
+            audio: encode_pcm(&[1, 2, 3]),
+            muted: false,
+            follow_up: false,
+            ear: Some("salon".into()),
+        })
+        .await;
+    assert!(matches!(r, ControlResponse::Heard { .. }), "{r:?}");
+    board.announce(notice("C'est fait.", Outcome::Info));
+    // `pc` (oreille par défaut) n'est pas la cible.
+    assert_eq!(
+        c.raw(r#"{"type":"announcements"}"#).await,
+        ControlResponse::Announcements { items: vec![] }
+    );
+    let r = c
+        .send(ControlRequest::Announcements {
+            ear: Some("salon".into()),
+        })
+        .await;
+    assert_eq!(
+        r,
+        ControlResponse::Announcements {
+            items: vec![jarvis_protocol::Announcement {
+                speech: "C'est fait.".into(),
+                audio: None,
+                sound: None,
+            }]
+        }
+    );
+    // Un `Listen` sans nom : l'oreille par défaut devient la cible.
+    c.send(ControlRequest::Listen {
+        audio: encode_pcm(&[1, 2, 3]),
+        muted: false,
+        follow_up: false,
+        ear: None,
+    })
+    .await;
+    assert!(board.take_for("salon").is_empty());
+    board.announce(notice("Encore.", Outcome::Info));
+    assert!(board.take_for("salon").is_empty());
+    assert_eq!(board.take_for(jarvis_protocol::DEFAULT_EAR).len(), 1);
+}
+
+#[tokio::test]
+async fn requete_annonces_avec_voix_et_bip() {
+    use jarvis_brain::testing::FakeSynthesizer;
+    use jarvis_brain::tts::{Speech, Voice};
+    use jarvis_protocol::{Announcement, Sound, SpeechAudio};
+    use jarvis_skills::{Announcer, Outcome};
+    let dir = tempfile::tempdir().unwrap();
+    let synth = Arc::new(FakeSynthesizer::new(Speech {
+        samples: vec![7, -7],
+        sample_rate: 22_050,
+    }));
+    let (socket, board, runner) = start_with_board(dir.path(), Voice::new(synth.clone())).await;
+    board.announce(notice("Réussi.", Outcome::Done));
+    board.announce(notice("Raté.", Outcome::Failed));
+    board.announce(notice("Pour info.", Outcome::Info));
+    assert_eq!(runner.calls().len(), 3, "une notification chacune");
+    let audio = Some(SpeechAudio {
+        pcm: encode_pcm(&[7, -7]),
+        sample_rate: 22_050,
+    });
+    let item = |speech: &str, sound| Announcement {
+        speech: speech.into(),
+        audio: audio.clone(),
+        sound,
+    };
+    let mut c = Client::connect(&socket).await;
+    assert_eq!(
+        c.send(ControlRequest::Announcements {
+            ear: Some("pc".into())
+        })
+        .await,
+        ControlResponse::Announcements {
+            items: vec![
+                item("Réussi.", Some(Sound::Success)),
+                item("Raté.", Some(Sound::Failure)),
+                item("Pour info.", None),
+            ]
+        }
+    );
+    assert_eq!(synth.texts(), ["Réussi.", "Raté.", "Pour info."]);
+}
+
 /// Une seconde d'audio (i16 16 kHz) dont le premier échantillon désigne l'empreinte factice.
 fn second(id: i16) -> Vec<i16> {
     let mut a = vec![0i16; 16_000];

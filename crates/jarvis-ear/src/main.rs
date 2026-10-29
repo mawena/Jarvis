@@ -161,7 +161,11 @@ async fn run() -> anyhow::Result<()> {
     let brain = Arc::new(SocketBrain {
         socket: jarvis_protocol::socket_path(),
     });
-    tracing::info!("oreille démarrée (mot d'éveil : {})", wakeword.display());
+    let name = config.name();
+    tracing::info!(
+        "oreille « {name} » démarrée (mot d'éveil : {})",
+        wakeword.display()
+    );
     let mut app = App::new(
         listener,
         CpalCapture::new(config.device),
@@ -169,7 +173,8 @@ async fn run() -> anyhow::Result<()> {
         commands_rx,
         tray_tx,
     )
-    .with_wake_threshold(threshold);
+    .with_wake_threshold(threshold)
+    .with_name(name);
     if let Some(path) = default_mute_file() {
         app = app.with_mute_file(path);
     }

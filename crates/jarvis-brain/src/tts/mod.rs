@@ -81,18 +81,22 @@ impl Voice {
         else {
             return response;
         };
-        let audio = match &self.synth {
-            Some(synth) if !speech.trim().is_empty() => {
-                self.synthesize(synth.clone(), &speech).await
-            }
-            _ => None,
-        };
+        let audio = self.audio_for(&speech).await;
         ControlResponse::Heard {
             text,
             speech,
             ear_action,
             audio,
             sound,
+        }
+    }
+
+    /// Voix de `text` (même synthèse bornée que [`Voice::speak`]). Voix absente, en
+    /// panne ou texte vide : `None`.
+    pub async fn audio_for(&self, text: &str) -> Option<SpeechAudio> {
+        match &self.synth {
+            Some(synth) if !text.trim().is_empty() => self.synthesize(synth.clone(), text).await,
+            _ => None,
         }
     }
 
@@ -345,6 +349,22 @@ mod tests {
         let fake = Arc::new(voice_of(3_000, 100));
         let r = Voice::new(fake.clone()).speak(heard("Bien.")).await;
         assert!(audio_of(&r).is_some());
+    }
+
+    #[tokio::test]
+    async fn voix_d_un_texte() {
+        let fake = Arc::new(voice_of(3, 22_050));
+        let voice = Voice::new(fake.clone());
+        assert_eq!(
+            voice.audio_for("C'est fait.").await,
+            Some(SpeechAudio {
+                pcm: encode_pcm(&[1, 1, 1]),
+                sample_rate: 22_050,
+            })
+        );
+        assert_eq!(voice.audio_for("  ").await, None);
+        assert_eq!(fake.texts(), ["C'est fait."]);
+        assert_eq!(Voice::none().audio_for("C'est fait.").await, None);
     }
 
     #[tokio::test]

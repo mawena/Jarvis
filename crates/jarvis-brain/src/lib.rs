@@ -1,3 +1,4 @@
+pub mod announce;
 pub mod brain;
 pub mod config;
 pub mod ducking;

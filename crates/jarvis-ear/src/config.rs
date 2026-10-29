@@ -14,6 +14,8 @@ pub struct EarConfig {
     pub threshold: Option<f32>,
     /// Nom du périphérique d'entrée (défaut : le micro par défaut du système).
     pub device: Option<String>,
+    /// Nom de cette oreille, pour les annonces (défaut : `pc`).
+    pub name: Option<String>,
 }
 
 impl EarConfig {
@@ -27,6 +29,14 @@ impl EarConfig {
             Ok(text) => Self::parse(&text).with_context(|| path.display().to_string()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
             Err(e) => Err(e).with_context(|| format!("lecture de {}", path.display())),
+        }
+    }
+
+    /// Nom de l'oreille ; absent ou vide : `pc`.
+    pub fn name(&self) -> String {
+        match self.name.as_deref().map(str::trim) {
+            Some(name) if !name.is_empty() => name.to_string(),
+            _ => jarvis_protocol::DEFAULT_EAR.to_string(),
         }
     }
 
@@ -49,12 +59,19 @@ mod tests {
     #[test]
     fn configuration_complete() {
         let c = EarConfig::parse(
-            "wakeword_path = \"/x/jarvis.rpw\"\nthreshold = 0.6\ndevice = \"USB Mic\"\n",
+            "wakeword_path = \"/x/jarvis.rpw\"\nthreshold = 0.6\ndevice = \"USB Mic\"\nname = \"salon\"\n",
         )
         .unwrap();
+        assert_eq!(c.name(), "salon");
         assert_eq!(c.wakeword_path, Some(PathBuf::from("/x/jarvis.rpw")));
         assert_eq!(c.threshold, Some(0.6));
         assert_eq!(c.device.as_deref(), Some("USB Mic"));
+    }
+
+    #[test]
+    fn nom_d_oreille_par_defaut() {
+        assert_eq!(EarConfig::default().name(), "pc");
+        assert_eq!(EarConfig::parse("name = \"  \"").unwrap().name(), "pc");
     }
 
     #[test]
