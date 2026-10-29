@@ -39,6 +39,10 @@ struct EarsFile {
     ears: Vec<EarRecord>,
 }
 
+/// Début d'identifiant accepté au moins par [`EarRegistry::remove`] (`jarvis ears`
+/// en montre 8 caractères).
+pub const MIN_ID_PREFIX: usize = 4;
+
 pub struct EarRegistry {
     path: PathBuf,
     ears: Vec<EarRecord>,
@@ -110,35 +114,56 @@ impl EarRegistry {
         Ok((record, token))
     }
 
-    /// Retire une oreille par son nom ou son identifiant.
+    /// Retire une oreille par son identifiant, son nom, ou le début de son identifiant
+    /// (au moins [`MIN_ID_PREFIX`] caractères, comme la colonne Id de `jarvis ears`).
+    /// Nom ou début d'identifiant ambigu : `InvalidInput`.
     pub fn remove(&mut self, name_or_id: &str) -> io::Result<Option<EarRecord>> {
         let index = match self.ears.iter().position(|e| e.id.as_str() == name_or_id) {
             Some(i) => i,
-            None => {
-                let mut named = self
-                    .ears
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, e)| e.name == name_or_id);
-                match (named.next(), named.next()) {
-                    (None, _) => return Ok(None),
-                    (Some((i, _)), None) => i,
-                    (Some(_), Some(_)) => {
-                        return Err(io::Error::new(
-                            io::ErrorKind::InvalidInput,
-                            format!(
-                                "plusieurs oreilles s'appellent « {name_or_id} » : \
-                                 donnez son identifiant"
-                            ),
-                        ));
+            None => match self.unique(|e| e.name == name_or_id) {
+                Ok(Some(i)) => i,
+                Ok(None) if name_or_id.len() >= MIN_ID_PREFIX => {
+                    let prefix = name_or_id.to_ascii_lowercase();
+                    match self.unique(|e| e.id.as_str().starts_with(&prefix)) {
+                        Ok(Some(i)) => i,
+                        Ok(None) => return Ok(None),
+                        Err(()) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidInput,
+                                format!(
+                                    "plusieurs oreilles ont un identifiant qui commence par \
+                                     « {name_or_id} » : donnez-en plus"
+                                ),
+                            ));
+                        }
                     }
                 }
-            }
+                Ok(None) => return Ok(None),
+                Err(()) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "plusieurs oreilles s'appellent « {name_or_id} » : donnez son \
+                             identifiant (colonne Id de « jarvis ears »)"
+                        ),
+                    ));
+                }
+            },
         };
         let mut ears = self.ears.clone();
         let removed = ears.remove(index);
         self.replace(ears)?;
         Ok(Some(removed))
+    }
+
+    /// Seule oreille qui vérifie `matches` : `Ok(None)` si aucune, `Err` si plusieurs.
+    fn unique(&self, matches: impl Fn(&EarRecord) -> bool) -> Result<Option<usize>, ()> {
+        let mut found = self.ears.iter().enumerate().filter(|(_, e)| matches(e));
+        match (found.next(), found.next()) {
+            (None, _) => Ok(None),
+            (Some((i, _)), None) => Ok(Some(i)),
+            (Some(_), Some(_)) => Err(()),
+        }
     }
 
     pub fn list(&self) -> Vec<EarRecord> {
@@ -388,6 +413,41 @@ mod tests {
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(reg.list().len(), 2);
         assert_eq!(reg.remove(b.id.as_str()).unwrap(), Some(b));
+    }
+
+    #[test]
+    fn retrait_par_debut_d_identifiant() {
+        let (_dir, mut reg) = registry();
+        let (a, _) = reg.add("Téléphone", "android", false).unwrap();
+        let (b, _) = reg.add("Téléphone", "android", false).unwrap();
+        let short = |r: &EarRecord| r.id.as_str()[..8].to_string();
+        // Les 8 caractères montrés par `jarvis ears`, en majuscules ou non.
+        assert_eq!(
+            reg.remove(&short(&a).to_uppercase()).unwrap(),
+            Some(a.clone())
+        );
+        assert_eq!(reg.list(), vec![b.clone()]);
+        // Trop court, ou inconnu : rien.
+        assert_eq!(reg.remove(&b.id.as_str()[..3]).unwrap(), None);
+        assert_eq!(reg.remove("zzzzzzzz").unwrap(), None);
+        assert_eq!(reg.remove(&short(&b)).unwrap(), Some(b));
+    }
+
+    #[test]
+    fn retrait_par_debut_d_identifiant_ambigu_refuse() {
+        let (_dir, mut reg) = registry();
+        let (a, _) = reg.add("A", "linux", false).unwrap();
+        let (b, _) = reg.add("B", "linux", false).unwrap();
+        // Identifiants forcés au même début.
+        let mut ears = reg.list();
+        ears[0].id = EarId::new(format!("abcd{}", &a.id.as_str()[4..]));
+        ears[1].id = EarId::new(format!("abcd{}", &b.id.as_str()[4..]));
+        reg.replace(ears).unwrap();
+        let err = reg.remove("abcd").err().unwrap();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(reg.list().len(), 2);
+        // Un nom prime sur un début d'identifiant.
+        assert_eq!(reg.remove("B").unwrap().map(|r| r.name), Some("B".into()));
     }
 
     #[test]

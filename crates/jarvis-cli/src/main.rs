@@ -29,7 +29,7 @@ enum Command {
     Pair,
     /// Liste les oreilles appairées
     Ears,
-    /// Retire une oreille (nom ou identifiant)
+    /// Retire une oreille (nom, ou identifiant : la colonne Id de `jarvis ears` suffit)
     Unpair {
         #[arg(required = true, num_args = 1..)]
         ear: Vec<String>,

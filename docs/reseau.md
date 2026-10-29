@@ -71,9 +71,15 @@ voir plus bas). L'appairage est dans `~/.local/share/jarvis/ear/pairing.toml` (0
 ## Lister et retirer les oreilles
 
 ```bash
-jarvis ears              # nom, plateforme, connectée ou non
-jarvis unpair Salon      # par nom ou identifiant
+jarvis ears              # identifiant court, nom, plateforme, connectée ou non
+jarvis unpair Salon      # par nom
+jarvis unpair 3f9a1c07   # ou par identifiant (la colonne Id de jarvis ears suffit)
 ```
+
+Une machine réappairée sous le même nom laisse son ancienne fiche : le cerveau ne la remplace
+pas, deux téléphones du même modèle pouvant porter le même nom. Avec deux oreilles du même nom,
+`jarvis unpair <nom>` demande l'identifiant : retirez l'ancienne (« Connectée : non ») par sa
+colonne Id.
 
 Une oreille retirée est déconnectée tout de suite et refusée ensuite ; pour la reprendre,
 refaites l'appairage. L'oreille du PC, elle, se réappaire aussitôt par le socket Unix : pour

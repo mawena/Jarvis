@@ -204,8 +204,8 @@ fn ears_liste_les_oreilles() {
             Duration::ZERO,
             ControlResponse::Ears {
                 ears: vec![
-                    ear("a1", "PC", "linux", true, true),
-                    ear("b2", "Pixel 4 XL", "android", false, false),
+                    ear("a1b2c3d4e5f60718", "PC", "linux", true, true),
+                    ear("0f1e2d3c4b5a6978", "Pixel 4 XL", "android", false, false),
                 ],
             },
         )],
@@ -220,9 +220,9 @@ fn ears_liste_les_oreilles() {
     assert_eq!(
         lines,
         [
-            "Nom         Plateforme  Connectée  Locale",
-            "PC          linux       oui        oui",
-            "Pixel 4 XL  android     non        non",
+            "Id        Nom         Plateforme  Connectée  Locale",
+            "a1b2c3d4  PC          linux       oui        oui",
+            "0f1e2d3c  Pixel 4 XL  android     non        non",
         ]
     );
 }
