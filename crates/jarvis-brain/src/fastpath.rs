@@ -293,14 +293,97 @@ const VERBES_RECHERCHE: &[&[&str]] = &[&["cherche"], &["recherche"], &["google"]
 /// « … sur internet » en fin de phrase.
 const FIN_INTERNET: &[&[&str]] = &[&["sur", "internet"], &["sur", "le", "web"]];
 
+/// Premiers mots admis dans « X sur internet » sans verbe de recherche : articles,
+/// mots interrogatifs et noms de questions courantes.
+///
+/// Liste blanche plutôt que liste noire de verbes : les commandes à l'impératif
+/// sont innombrables (« coupe le son », « ferme la fenêtre »…) alors que les
+/// questions commencent par peu de mots. Une question absente de la liste passe
+/// par l'IA, qui sait aussi appeler `web_search` : un raccourci manqué coûte
+/// une seconde, un faux raccourci exécute la mauvaise action.
+const OUVREURS_QUESTION: &[&str] = &[
+    "le",
+    "la",
+    "les",
+    "l",
+    "un",
+    "une",
+    "des",
+    "du",
+    "de",
+    "d",
+    "quel",
+    "quelle",
+    "quels",
+    "quelles",
+    "qui",
+    "que",
+    "qu",
+    "quoi",
+    "ou",
+    "comment",
+    "combien",
+    "quand",
+    "pourquoi",
+    "prix",
+    "horaires",
+    "meteo",
+    "actualite",
+    "actualites",
+    "resultats",
+    "score",
+    "cours",
+    "recette",
+    "definition",
+    "adresse",
+];
+
+/// Noms composés avec « recherche » ou « google » en tête (« recherche vocale »,
+/// « google home ») : ce ne sont pas des demandes de recherche.
+const NOMS_COMPOSES: &[&str] = &[
+    "vocale",
+    "avancee",
+    "avancees",
+    "home",
+    "chrome",
+    "maps",
+    "drive",
+    "docs",
+    "assistant",
+    "lens",
+    "nest",
+    "play",
+];
+
+/// « recherche X » / « google X », X juste après le verbe : vrai si X fait plutôt
+/// de la phrase un nom (« recherche vocale », « google home »). Un mot seul n'est
+/// admis que s'il commence par une majuscule ou un chiffre (« google Mbappé ») :
+/// en minuscule, « recherche lomé » reste ambigu et passe par l'IA.
+fn nom_plutot_que_requete(a: &Analyse, m: &[&str], debut: usize, fin: usize) -> bool {
+    let Some(premier) = m.get(debut) else {
+        return false;
+    };
+    if NOMS_COMPOSES.contains(premier) {
+        return true;
+    }
+    fin - debut == 1
+        && !a
+            .origine(debut..fin)
+            .and_then(|t| t.chars().next())
+            .is_some_and(|c| c.is_uppercase() || c.is_numeric())
+}
+
 /// « cherche [moi] [sur internet] X », « fais une recherche sur X »,
-/// « trouve-moi des infos sur X », « X sur internet ».
+/// « trouve-moi des infos sur X », « <question> sur internet ».
 fn recherche(a: &Analyse) -> Option<Intent> {
     let mots = a.mots();
     let en_fin = FIN_INTERNET.iter().find(|s| mots.ends_with(s));
     let fin = mots.len() - en_fin.map_or(0, |s| s.len());
     let m = &mots[..fin];
     let debut = if let Some(i) = apres(m, 0, VERBES_RECHERCHE) {
+        if matches!(m[0], "recherche" | "google") && nom_plutot_que_requete(a, m, i, fin) {
+            return None;
+        }
         let i = facultatif(m, i, MOI);
         let i = facultatif(
             m,
@@ -328,18 +411,14 @@ fn recherche(a: &Analyse) -> Option<Intent> {
         )
         .or_else(|| en_fin.map(|_| i))?
     } else if en_fin.is_some() {
-        // « X sur internet » : sauf après un verbe de lancement (inchangé).
-        if apres(
-            m,
-            0,
-            &[&["lance"], &["ouvre"], &["demarre"], &["mets"], &["joue"]],
-        )
-        .is_some()
-        {
+        // « X sur internet » : seulement si X commence comme une question
+        // (« coupe le son sur internet » n'est pas une recherche).
+        let i = facultatif(m, 0, &[&["regarde"]]);
+        let i = facultatif(m, i, MOI);
+        if !m.get(i).is_some_and(|w| OUVREURS_QUESTION.contains(w)) {
             return None;
         }
-        let i = facultatif(m, 0, &[&["regarde"]]);
-        facultatif(m, i, MOI)
+        i
     } else {
         return None;
     };
@@ -952,6 +1031,81 @@ mod tests {
         ] {
             assert_eq!(match_fast(phrase), recherche(query), "phrase: {phrase}");
         }
+    }
+
+    fn est_une_recherche(phrase: &str) -> bool {
+        matches!(match_fast(phrase), Some(i) if i.tool == "web_search")
+    }
+
+    #[test]
+    fn commande_sur_internet_pas_une_recherche() {
+        for phrase in [
+            "coupe le son sur internet",
+            "monte le volume sur internet",
+            "baisse le son sur le web",
+            "mets la musique sur internet",
+            "arrête la musique sur internet",
+            "pause sur internet",
+            "reprends la lecture sur internet",
+            "ferme la fenêtre sur internet",
+            "Jarvis, ouvre Firefox sur internet",
+            "volume à fond sur internet",
+        ] {
+            assert!(!est_une_recherche(phrase), "phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn question_sur_internet_reste_une_recherche() {
+        for (phrase, query) in [
+            (
+                "quel temps fait-il à Lomé sur internet",
+                "quel temps fait-il à Lomé",
+            ),
+            (
+                "combien coûte un iPhone sur internet",
+                "combien coûte un iPhone",
+            ),
+            ("qui est Kofi Annan sur le web", "qui est Kofi Annan"),
+            ("où se trouve Kara sur internet", "où se trouve Kara"),
+            (
+                "comment cuire le fufu sur internet",
+                "comment cuire le fufu",
+            ),
+            ("les horaires du TER sur internet", "les horaires du TER"),
+            ("météo de Kpalimé sur internet", "météo de Kpalimé"),
+            ("prix du cacao sur le web", "prix du cacao"),
+            ("regarde-moi la météo sur internet", "la météo"),
+        ] {
+            assert_eq!(match_fast(phrase), recherche(query), "phrase: {phrase}");
+        }
+    }
+
+    #[test]
+    fn recherche_ou_google_suivi_d_un_nom_pas_une_recherche() {
+        for phrase in [
+            "recherche vocale",
+            "Recherche vocale activée",
+            "recherche avancée",
+            "google home",
+            "Google Home",
+            "google home ne marche plus",
+            "google chrome",
+            "google maps",
+            "recherche lomé",
+        ] {
+            assert!(!est_une_recherche(phrase), "phrase: {phrase}");
+        }
+        // Nom propre seul (majuscule) ou requête de plusieurs mots : recherche.
+        assert_eq!(match_fast("google Mbappé"), recherche("Mbappé"));
+        assert_eq!(match_fast("recherche Lomé"), recherche("Lomé"));
+        assert_eq!(match_fast("recherche 2024"), recherche("2024"));
+        assert_eq!(match_fast("recherche Rust 2024"), recherche("Rust 2024"));
+        assert_eq!(
+            match_fast("recherche le cours du cacao"),
+            recherche("le cours du cacao")
+        );
+        assert_eq!(match_fast("cherche lomé"), recherche("lomé"));
     }
 
     #[test]
