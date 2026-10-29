@@ -111,10 +111,10 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 - [x] 7.1 Rédiger le plan de la phase 7 ([plan](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md))
 - [x] 7.2 Liste des projets connus dans la configuration (`[[agent.projects]]`, nom dit à voix haute retrouvé, phrases de l'agent reconnues sans IA)
-- [ ] 7.3 Lancement de Claude Code en arrière-plan (`claude -p`), sans confirmation — brique prête (ligne de commande vérifiée sur `claude` 2.1.312, surveillance, délai, arrêt), reste le branchement (tâche 6)
-- [ ] 7.4 Garde-fous : branche `feature/*` dédiée, rien de poussé ni fusionné, refus si modifications non enregistrées — brique prête (worktree, `git push` bloqué, contrôle des branches après coup), reste le branchement (tâche 6)
-- [ ] 7.5 Suivi (« où en est la tâche ? ») et arrêt (« arrête la tâche ») — registre des tâches prêt (gardé au redémarrage), reste le branchement (tâche 6)
-- [ ] 7.6 Annonce de fin sur l'oreille la plus récemment active et notification de bureau — brique prête (tableau d'annonces, l'oreille les récupère et les dit), reste le branchement (tâche 6)
+- [x] 7.3 Lancement de Claude Code en arrière-plan (`claude -p`), sans confirmation — réponse immédiate, surveillance, délai de 45 min, ligne de commande vérifiée sur `claude` 2.1.312 ; jamais déclenché par l'IA (raccourci seul, outil inventé refusé)
+- [x] 7.4 Garde-fous : branche `feature/*` dédiée, rien de poussé ni fusionné, refus si modifications non enregistrées — worktree à part, `git push` bloqué, contrôle des branches après coup, commit à ton nom seulement si tout est propre
+- [x] 7.5 Suivi (« où en est la tâche ? ») et arrêt (« arrête la tâche ») — dernière action dite, registre gardé au redémarrage (tâches interrompues notifiées)
+- [x] 7.6 Annonce de fin sur l'oreille la plus récemment active et notification de bureau
 - [x] 7.7 Socle (tâche 1 du plan) : protocole (oreille d'origine de la phrase, annonces), réglages `[agent]`, raccourcis propres à une compétence jamais proposés à l'IA
 - [x] 7.8 `jarvisctl` : `doctor` vérifie Claude Code et les projets, avertissement au redémarrage si une tâche tourne, `docs/agent.md`
 - [ ] 7.9 Relecture de la phase 7 et corrections
