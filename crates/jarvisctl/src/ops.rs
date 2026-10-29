@@ -2288,12 +2288,12 @@ WantedBy=graphical-session.target
             "systemctl --user is-active jarvis-brain.service".into(),
             (0, "active\n".into()),
         );
-        running_task(&paths, "ailleurs", TaskState::Running);
+        running_task(&paths, "a11e", TaskState::Running);
         let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
         assert!(!o.contains("Attention"), "registre par défaut ignoré : {o}");
         save_task(
             &state.path().join("jarvis/tasks"),
-            "ici",
+            "1c1",
             TaskState::Running,
         );
         let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
@@ -2306,7 +2306,7 @@ WantedBy=graphical-session.target
         let (_home, paths, mut sys) = installed();
         enroll_wakeword(&paths);
         // Reste d'un cerveau planté : le service est inactif, rien ne tourne.
-        running_task(&paths, "orpheline", TaskState::Running);
+        running_task(&paths, "0f", TaskState::Running);
         sys.replies.insert(
             "systemctl --user is-active jarvis-brain.service".into(),
             (3, "inactive\n".into()),
