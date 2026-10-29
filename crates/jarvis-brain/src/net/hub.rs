@@ -856,19 +856,15 @@ impl State {
     }
 
     fn expire_captures(&mut self) {
+        // (oreille, phrase, sans fin depuis CAPTURE_TIMEOUT ; sinon : plus de son).
         let late: Vec<(EarId, u32, bool)> = self
             .captures
             .iter()
-            .filter(|(_, c)| {
-                c.ended.is_none()
-                    && (c.started.elapsed() > CAPTURE_TIMEOUT || c.heard.elapsed() > AUDIO_STALL)
-            })
-            .map(|(e, c)| {
-                (
-                    e.clone(),
-                    c.utterance,
-                    c.started.elapsed() > CAPTURE_TIMEOUT,
-                )
+            .filter(|(_, c)| c.ended.is_none())
+            .filter_map(|(e, c)| {
+                let endless = c.started.elapsed() > CAPTURE_TIMEOUT;
+                (endless || c.heard.elapsed() > AUDIO_STALL)
+                    .then(|| (e.clone(), c.utterance, endless))
             })
             .collect();
         for (ear, utterance, endless) in late {
