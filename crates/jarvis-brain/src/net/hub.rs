@@ -124,6 +124,7 @@ enum Command {
         token: String,
         offline_phrase: Option<String>,
         outbox: mpsc::Sender<BrainMessage>,
+        from: IpAddr,
         reply: oneshot::Sender<HelloOutcome>,
     },
     Pair {
@@ -226,20 +227,24 @@ impl Hub {
         rx.await.ok()
     }
 
-    /// Authentifie une oreille et ouvre sa session : `Welcome`, `Status` (et la
-    /// phrase hors ligne si besoin) sont déjà dans `outbox` au retour.
+    /// Authentifie une oreille venue de l'adresse `from` et ouvre sa session :
+    /// `Welcome`, `Status` (et la phrase hors ligne si besoin) sont déjà dans `outbox`
+    /// au retour. L'oreille du PC (enregistrement local) n'est acceptée que par la
+    /// boucle locale.
     pub async fn hello(
         &self,
         ear_id: EarId,
         token: String,
         offline_phrase: Option<String>,
         outbox: mpsc::Sender<BrainMessage>,
+        from: IpAddr,
     ) -> HelloOutcome {
         self.ask(|reply| Command::Hello {
             ear_id,
             token,
             offline_phrase,
             outbox,
+            from,
             reply,
         })
         .await
@@ -511,9 +516,10 @@ impl State {
                 token,
                 offline_phrase,
                 outbox,
+                from,
                 reply,
             } => {
-                let outcome = self.hello(ear_id, &token, offline_phrase, outbox);
+                let outcome = self.hello(ear_id, &token, offline_phrase, outbox, from);
                 let _ = reply.send(outcome);
             }
             Command::Pair {
@@ -607,6 +613,7 @@ impl State {
         token: &str,
         offline: Option<String>,
         outbox: mpsc::Sender<BrainMessage>,
+        from: IpAddr,
     ) -> HelloOutcome {
         let Some(record) = self.registry.authenticate(&ear_id, token) else {
             let reason = if self.registry.get(&ear_id).is_some() {
@@ -618,6 +625,12 @@ impl State {
             self.refused();
             return HelloOutcome::Rejected(reason);
         };
+        if record.local && !from.to_canonical().is_loopback() {
+            // Le jeton de l'oreille du PC n'a de valeur que sur le PC : venu d'ailleurs,
+            // il a fuité. La vraie session, elle, reste ouverte.
+            warn!(oreille = %ear_id, %from, "jeton de l'oreille du PC présenté depuis le réseau : refusé");
+            return HelloOutcome::Rejected(RejectReason::BadToken);
+        }
         let replaced = self.sessions.contains_key(&ear_id);
         if replaced {
             // Nouvelle connexion de la même oreille : l'ancienne est fermée.

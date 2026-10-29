@@ -264,7 +264,10 @@ async fn handshake(
                 return None;
             }
             let (tx, rx) = mpsc::channel(session::OUTBOX);
-            match hub.hello(ear_id.clone(), token, offline_phrase, tx).await {
+            match hub
+                .hello(ear_id.clone(), token, offline_phrase, tx, peer.ip())
+                .await
+            {
                 HelloOutcome::Accepted { record, session } => {
                     debug!(%peer, oreille = %record.id, "session ouverte");
                     Some(Opened {

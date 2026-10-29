@@ -645,6 +645,64 @@ async fn appairage_local_par_le_socket() {
 }
 
 #[tokio::test]
+async fn jeton_de_l_oreille_du_pc_seulement_par_la_boucle_locale() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::PairedLocal { ear_id, token, .. } = cli
+        .send(ControlRequest::PairLocal { name: "PC".into() })
+        .await
+    else {
+        panic!("appairage local attendu")
+    };
+    // L'oreille du PC connectée par la boucle locale.
+    let mut pc = session(&rig, &ear_id, &token).await;
+    let hello_from = |from: &str| {
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        rig.hub.hello(
+            ear_id.clone(),
+            token.clone(),
+            None,
+            tx,
+            from.parse().unwrap(),
+        )
+    };
+    // Son jeton, venu d'une autre machine : refusé…
+    assert!(matches!(
+        hello_from("192.168.1.66").await,
+        net::hub::HelloOutcome::Rejected(RejectReason::BadToken)
+    ));
+    // … sans fermer la vraie session.
+    send(&mut pc, &EarMessage::Status).await;
+    assert!(matches!(
+        next(&mut pc).await,
+        BrainMessage::Response {
+            utterance: None,
+            response: ControlResponse::Status { .. }
+        }
+    ));
+    // IPv4 dans IPv6 : la boucle locale reste reconnue.
+    assert!(matches!(
+        hello_from("::ffff:127.0.0.1").await,
+        net::hub::HelloOutcome::Accepted { .. }
+    ));
+    // Une oreille d'une autre machine se connecte de n'importe où.
+    let (tx, _rx) = tokio::sync::mpsc::channel(64);
+    let (salon, salon_token) = rig.salon.clone();
+    assert!(matches!(
+        rig.hub
+            .hello(
+                salon,
+                salon_token,
+                None,
+                tx,
+                "192.168.1.66".parse().unwrap()
+            )
+            .await,
+        net::hub::HelloOutcome::Accepted { .. }
+    ));
+}
+
+#[tokio::test]
 async fn reconnexion_remplace_l_ancienne_session() {
     let rig = rig().await;
     let mut old = salon(&rig).await;
