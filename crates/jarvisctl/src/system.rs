@@ -30,6 +30,8 @@ pub trait System {
     fn sleep(&self, d: Duration);
     /// Réponse `Status` du cerveau via son socket : (mode, version, modèle local).
     fn brain_status(&self) -> Option<(Mode, String, String)>;
+    /// Une requête au cerveau par son socket ; None s'il ne répond pas.
+    fn brain_request(&self, request: &ControlRequest) -> Option<ControlResponse>;
     fn env_var(&self, name: &str) -> Option<String>;
 }
 
@@ -70,13 +72,7 @@ impl System for RealSystem {
     }
 
     fn brain_status(&self) -> Option<(Mode, String, String)> {
-        let mut s = UnixStream::connect(jarvis_protocol::socket_path()).ok()?;
-        s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
-        let line = serde_json::to_string(&ControlRequest::Status).ok()?;
-        writeln!(s, "{line}").ok()?;
-        let mut reply = String::new();
-        BufReader::new(s).read_line(&mut reply).ok()?;
-        match serde_json::from_str(&reply).ok()? {
+        match self.brain_request(&ControlRequest::Status)? {
             ControlResponse::Status {
                 mode,
                 version,
@@ -84,6 +80,16 @@ impl System for RealSystem {
             } => Some((mode, version, local_model)),
             _ => None,
         }
+    }
+
+    fn brain_request(&self, request: &ControlRequest) -> Option<ControlResponse> {
+        let mut s = UnixStream::connect(jarvis_protocol::socket_path()).ok()?;
+        s.set_read_timeout(Some(Duration::from_secs(3))).ok()?;
+        let line = serde_json::to_string(request).ok()?;
+        writeln!(s, "{line}").ok()?;
+        let mut reply = String::new();
+        BufReader::new(s).read_line(&mut reply).ok()?;
+        serde_json::from_str(&reply).ok()
     }
 
     fn env_var(&self, name: &str) -> Option<String> {
@@ -126,6 +132,8 @@ pub mod fake {
         pub http_misses: Cell<u32>,
         pub sleeps: Cell<u32>,
         pub brain: Option<(Mode, String, String)>,
+        /// Réponse du cerveau à `ListEars` (None : cerveau injoignable).
+        pub ears: Option<ControlResponse>,
         pub path: Option<String>,
         /// Autres variables d'environnement (`PATH` : `path`).
         pub env: HashMap<String, String>,
@@ -160,6 +168,12 @@ pub mod fake {
         }
         fn brain_status(&self) -> Option<(Mode, String, String)> {
             self.brain.clone()
+        }
+        fn brain_request(&self, request: &ControlRequest) -> Option<ControlResponse> {
+            match request {
+                ControlRequest::ListEars => self.ears.clone(),
+                _ => None,
+            }
         }
         fn env_var(&self, name: &str) -> Option<String> {
             match name {
