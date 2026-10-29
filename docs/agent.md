@@ -3,7 +3,8 @@
 « Jarvis, finis les tests du projet Jarvis » lance aussitôt **Claude Code** en arrière-plan,
 sur une branche créée pour l'occasion dans un **worktree à part** : la copie de travail de
 Charles n'est jamais touchée. Jarvis répond « Bien. Je confie cela à Claude, sur une branche à
-part du projet Jarvis. Je vous préviens à la fin. », répond à « où en est la tâche ? » et à
+part de l'assistant. Je vous préviens à la fin. » (« …du projet Mawena… » pour un autre projet),
+répond à « où en est la tâche ? » et à
 « arrête la tâche », puis annonce la fin sur l'oreille la plus récemment active, avec une
 notification de bureau. Rien n'est poussé ni fusionné.
 
@@ -142,9 +143,14 @@ reste sur sa branche.
      `XDG_RUNTIME_DIR`, ni jeton (`GH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `AWS_*`…) ; chaque
      remote pousse vers une adresse sans transport, aucun assistant d'identifiants,
      `GIT_SSH_COMMAND=false` ;
-  3. vérification après coup : branches protégées inchangées, aucune nouvelle branche
-     distante, worktree toujours sur sa branche, partie de la base. Toute violation est annoncée en urgence
-     (« Attention : la branche develop a été modifiée. Vérifiez le projet Jarvis. »).
+  3. vérification après coup, avant **et après** le commit de Jarvis : toutes les branches
+     locales, étiquettes et branches distantes inchangées (sauf celle de la tâche), worktree
+     toujours sur sa branche, partie de la base, commit de Jarvis posé juste sur le travail de
+     l'agent. Toute anomalie est annoncée en urgence et empêche le commit (« Attention : la
+     branche develop a changé pendant la tâche. Si ce n'est pas vous, vérifiez l'assistant. »).
+     Ce que Charles fait lui-même pendant une tâche (fetch, commit sur develop, `git flow
+     finish`, étiquette) déclenche aussi cette alerte : le travail reste alors non enregistré
+     dans le worktree.
 - **Limites** : 45 minutes, 30 minutes sans sortie, 2 tâches en même temps, une par projet ;
   une commande de l'agent dure 15 minutes par défaut, 25 au plus. L'arrêt envoie `TERM` à
   Claude Code (qui arrête ses commandes), puis, 10 s plus tard, tue tout le groupe de
@@ -161,13 +167,25 @@ reste sur sa branche.
 À la fin d'une tâche **réussie** (sortie normale, aucune erreur, aucune violation, au moins un
 fichier modifié), Jarvis fait **un seul commit** dans le worktree, `wip(jarvis): <consigne>`,
 avec l'identité et la signature git de Charles, sans ligne d'attribution (l'agent lui-même ne
-commite jamais). Commit ou signature impossible : le travail reste non enregistré dans le
-worktree, et Jarvis le dit. `commit_at_end = false` : jamais de commit.
+commite jamais). Les hooks git du projet ne sont **jamais** lancés par Jarvis (ni au commit
+ni à la création du worktree), aucune question de mot de passe n'est posée, et chaque commande
+git a un délai (30 s, 60 s pour le commit). Commit ou signature impossible (clé SSH absente de
+l'agent SSH, par exemple) : le travail reste non enregistré dans le worktree, et Jarvis le dit
+(« Je n'ai pas pu enregistrer le travail : il reste dans le worktree. »).
+`commit_at_end = false` : jamais de commit.
 
-Annonce : « La tâche sur Jarvis est terminée : <résumé de l'agent>. 3 fichiers modifiés. »
-Échec, délai dépassé ou violation sont dits aussi ; un arrêt demandé ne donne qu'une
-notification. La notification indique la branche, le worktree, la commande de reprise et le
-journal.
+Annonce : « La tâche sur l'assistant est terminée : <résumé de l'agent>. 3 fichiers modifiés. »
+Échec, délai dépassé, tâche bloquée (plus de signe de vie) ou violation sont dits aussi ; un
+arrêt demandé ne donne qu'une notification. La notification indique le projet, la branche, le
+worktree, la commande de reprise et le journal.
+
+Jarvis ne prononce jamais « Jarvis » (il risquerait de se réveiller lui-même) : un projet dont
+le nom contient « Jarvis » est dit par son premier alias (« l'assistant »), sinon « votre
+projet ». Les notifications gardent le vrai nom.
+
+Si la réponse de départ arrive trop tard (au-delà de 20 s), Jarvis l'annonce ensuite à voix
+haute, départ ou refus. « Arrête la tâche » pendant la préparation annule tout : Claude n'est
+pas lancé, la branche et le worktree tout neufs sont retirés.
 
 ## Où trouver le travail, comment finir
 
