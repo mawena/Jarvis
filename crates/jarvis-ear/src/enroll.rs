@@ -17,8 +17,11 @@ use jarvis_ear_core::resample::f32_to_i16;
 use jarvis_ear_core::rustpotter::build_reference;
 use jarvis_protocol::{ControlRequest, ControlResponse, encode_pcm};
 
+use tokio::signal::unix::{SignalKind, signal};
+
 use crate::app::{Brain, SocketBrain};
 use crate::client::ClientError;
+use crate::service::{EarPause, RealSystemctl};
 
 /// Pause entre l'appui sur Entrée et le début de la prise (le bruit de la touche,
 /// puis le temps de se préparer, ne coupent pas le début de « Jarvis »).
@@ -326,10 +329,39 @@ pub fn run(count: usize, voice_only: bool) -> anyhow::Result<()> {
     let brain = SocketBrain {
         socket: jarvis_protocol::socket_path(),
     };
-    let runtime = tokio::runtime::Builder::new_current_thread()
+    // Un fil de travail : la tâche des signaux tourne pendant que le fil principal attend
+    // Entrée ou le micro.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
         .enable_all()
         .build()?;
-    runtime.block_on(run_with(&mut Terminal, &brain, &dir, count, voice_only))
+    // Le service de l'oreille entendrait les prises : arrêté pendant l'enrôlement, relancé
+    // à la fin (aussi après une erreur, ou par la tâche des signaux sur Ctrl-C).
+    let pause = Arc::new(EarPause::begin(Arc::new(RealSystemctl), &mut |l| {
+        println!("{l}")
+    })?);
+    let result = runtime.block_on(async {
+        // Les gestionnaires sont posés ici, avant la première prise.
+        let mut interrupt = signal(SignalKind::interrupt())?;
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
+        let on_signal = pause.clone();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = interrupt.recv() => {}
+                _ = terminate.recv() => {}
+                _ = hangup.recv() => {}
+            }
+            println!();
+            on_signal.resume_and_report();
+            std::process::exit(130);
+        });
+        run_with(&mut Terminal, &brain, &dir, count, voice_only).await
+    });
+    // Réussite ou erreur : relance tout de suite (la tâche des signaux garde une copie du
+    // garde, qui ne serait détruit qu'avec le runtime). Une panique passe par `Drop`.
+    pause.resume_and_report();
+    result
 }
 
 #[cfg(test)]

@@ -3,7 +3,7 @@ mod paths;
 mod system;
 
 use clap::{Parser, Subcommand};
-use paths::{Paths, SERVICE};
+use paths::{Paths, Service};
 use std::io::{self, BufRead, IsTerminal};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -40,20 +40,44 @@ enum Cmd {
         #[arg(long)]
         yes: bool,
     },
-    /// Démarre le service
-    Start,
-    /// Arrête le service
-    Stop,
-    /// Redémarre le service
-    Restart,
-    /// Active le démarrage automatique
-    Enable,
-    /// Désactive le démarrage automatique
-    Disable,
-    /// Affiche l'état du service, du cerveau et d'Ollama (code 3 si inactif)
-    Status,
-    /// Affiche les journaux du service
+    /// Démarre les services (cerveau et oreille, ou celui indiqué)
+    Start {
+        #[arg(value_enum)]
+        service: Option<Service>,
+    },
+    /// Arrête les services (cerveau et oreille, ou celui indiqué)
+    Stop {
+        #[arg(value_enum)]
+        service: Option<Service>,
+    },
+    /// Redémarre les services (cerveau et oreille, ou celui indiqué)
+    Restart {
+        #[arg(value_enum)]
+        service: Option<Service>,
+    },
+    /// Active le démarrage automatique (cerveau et oreille, ou celui indiqué)
+    Enable {
+        #[arg(value_enum)]
+        service: Option<Service>,
+    },
+    /// Désactive le démarrage automatique (cerveau et oreille, ou celui indiqué)
+    Disable {
+        #[arg(value_enum)]
+        service: Option<Service>,
+    },
+    /// Affiche l'état du cerveau, de l'oreille et d'Ollama (code 3 si le cerveau est inactif)
+    Status {
+        #[arg(value_enum)]
+        service: Option<Service>,
+    },
+    /// Affiche les journaux du cerveau (ou de l'oreille)
     Logs {
+        /// Service dont on lit le journal (cerveau par défaut)
+        #[arg(value_enum)]
+        service: Option<Service>,
+        /// Journaux de l'oreille (comme `logs oreille`)
+        #[arg(long, conflicts_with = "service")]
+        oreille: bool,
         /// Suit les journaux en direct
         #[arg(short, long)]
         follow: bool,
@@ -76,6 +100,25 @@ fn main() -> ExitCode {
             eprintln!("Erreur : {e:#}");
             ExitCode::from(1)
         }
+    }
+}
+
+fn verb(
+    paths: &Paths,
+    sys: &dyn System,
+    verb: &str,
+    service: Option<Service>,
+    out: &mut dyn io::Write,
+) -> anyhow::Result<i32> {
+    ops::service_verb(paths, sys, verb, &ops::targets(service), out)
+}
+
+/// Service des journaux : le cerveau sauf `--oreille` ou cible explicite.
+fn logs_service(service: Option<Service>, oreille: bool) -> Service {
+    match (service, oreille) {
+        (Some(s), _) => s,
+        (None, true) => Service::Ear,
+        (None, false) => Service::Brain,
     }
 }
 
@@ -123,12 +166,12 @@ fn run(cmd: Cmd) -> anyhow::Result<i32> {
             ops::uninstall(&paths, &sys, purge, yes, &mut io::stdin().lock(), &mut out)?;
             Ok(0)
         }
-        Cmd::Start => ops::service_verb(&sys, "start", &mut out),
-        Cmd::Stop => ops::service_verb(&sys, "stop", &mut out),
-        Cmd::Restart => ops::service_verb(&sys, "restart", &mut out),
-        Cmd::Enable => ops::service_verb(&sys, "enable", &mut out),
-        Cmd::Disable => ops::service_verb(&sys, "disable", &mut out),
-        Cmd::Status => ops::status(&paths, &sys, &mut out),
+        Cmd::Start { service } => verb(&paths, &sys, "start", service, &mut out),
+        Cmd::Stop { service } => verb(&paths, &sys, "stop", service, &mut out),
+        Cmd::Restart { service } => verb(&paths, &sys, "restart", service, &mut out),
+        Cmd::Enable { service } => verb(&paths, &sys, "enable", service, &mut out),
+        Cmd::Disable { service } => verb(&paths, &sys, "disable", service, &mut out),
+        Cmd::Status { service } => ops::status(&paths, &sys, &ops::targets(service), &mut out),
         Cmd::Doctor => ops::doctor(&paths, &sys, &mut out),
         Cmd::Update => {
             ops::update(&paths, &sys, &mut out)?;
@@ -142,14 +185,97 @@ fn run(cmd: Cmd) -> anyhow::Result<i32> {
             ops::set_api_key(&paths, &key, &mut out)?;
             Ok(0)
         }
-        Cmd::Logs { follow, lines } => {
+        Cmd::Logs {
+            service,
+            oreille,
+            follow,
+            lines,
+        } => {
+            let unit = logs_service(service, oreille).unit();
             let mut cmd = Command::new("journalctl");
-            cmd.args(["--user", "-u", SERVICE, "-n", &lines.to_string()]);
+            cmd.args(["--user", "-u", unit, "-n", &lines.to_string()]);
             if follow {
                 cmd.arg("-f");
             }
             let err = cmd.exec();
             Err(anyhow::anyhow!("impossible de lancer journalctl : {err}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(args: &[&str]) -> Cmd {
+        let mut full = vec!["jarvisctl"];
+        full.extend_from_slice(args);
+        Cli::try_parse_from(full).unwrap().command
+    }
+
+    #[test]
+    fn verbes_sans_cible_visent_les_deux_services() {
+        assert!(matches!(
+            parse(&["restart"]),
+            Cmd::Restart { service: None }
+        ));
+        assert!(matches!(parse(&["status"]), Cmd::Status { service: None }));
+        assert_eq!(ops::targets(None), vec![Service::Brain, Service::Ear]);
+        assert_eq!(ops::targets(Some(Service::Ear)), vec![Service::Ear]);
+    }
+
+    #[test]
+    fn cible_en_francais_ou_en_anglais() {
+        for (arg, attendu) in [
+            ("oreille", Service::Ear),
+            ("ear", Service::Ear),
+            ("cerveau", Service::Brain),
+            ("brain", Service::Brain),
+        ] {
+            let Cmd::Restart { service } = parse(&["restart", arg]) else {
+                panic!("{arg}")
+            };
+            assert_eq!(service, Some(attendu), "{arg}");
+        }
+        assert!(matches!(
+            parse(&["stop", "oreille"]),
+            Cmd::Stop {
+                service: Some(Service::Ear)
+            }
+        ));
+        assert!(Cli::try_parse_from(["jarvisctl", "start", "nez"]).is_err());
+    }
+
+    #[test]
+    fn journaux_du_cerveau_par_defaut_ou_de_l_oreille() {
+        let Cmd::Logs {
+            service,
+            oreille,
+            follow,
+            lines,
+        } = parse(&["logs", "--oreille", "-f"])
+        else {
+            panic!()
+        };
+        assert!(follow);
+        assert_eq!(lines, 50);
+        assert_eq!(logs_service(service, oreille), Service::Ear);
+
+        let Cmd::Logs {
+            service, oreille, ..
+        } = parse(&["logs", "-n", "10"])
+        else {
+            panic!()
+        };
+        assert_eq!(logs_service(service, oreille), Service::Brain);
+
+        let Cmd::Logs {
+            service, oreille, ..
+        } = parse(&["logs", "ear", "-f"])
+        else {
+            panic!()
+        };
+        assert_eq!(logs_service(service, oreille), Service::Ear);
+        assert!(Cli::try_parse_from(["jarvisctl", "logs", "cerveau", "--oreille"]).is_err());
     }
 }

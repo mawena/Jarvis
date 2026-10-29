@@ -7,8 +7,8 @@ en disant « Jarvis », que la veille demande bien confirmation, et que « rép�
 
 **Avant de commencer :**
 
-- [ ] La [mise à jour](README.md#avant-tout-essai--mise-à-jour) est faite : `jarvis-ear` tourne
-  et `jarvisctl logs -f` est ouvert dans un autre terminal.
+- [ ] La [mise à jour](README.md#avant-tout-essai--mise-à-jour) est faite : l'oreille tourne en
+  service (icône Jarvis en haut de l'écran) et `jarvisctl logs -f` est ouvert dans un terminal.
 - [ ] Spotify (ou un autre lecteur) joue de la musique, à un volume normal.
 - [ ] Tu es à ta distance habituelle du micro.
 - [ ] Ton travail est enregistré (à l'étape 5, tu pourras mettre le PC en veille pour de vrai,
