@@ -84,6 +84,13 @@ est gardé. Deux réglages par oreille s'y modifient cerveau arrêté : `duck = 
 baisser la musique du PC à son réveil) et `bias` (petit avantage dans le choix de l'oreille,
 `0.1` par exemple).
 
+## Mode en ligne depuis une oreille
+
+Seule l'oreille du PC (son icône) peut passer le cerveau en mode en ligne. Une oreille d'une
+autre machine peut le repasser en local ; pour le mode en ligne, elle reçoit « Le mode en
+ligne se demande à la voix (avec confirmation) ou depuis le PC. » (dans son journal) : dites-le
+à voix haute (la phrase de confirmation est demandée), ou `jarvis mode en-ligne` sur le PC.
+
 ## Adresse manuelle
 
 Si l'oreille ne trouve pas le PC (mDNS bloqué par le routeur, autre sous-réseau), donnez son

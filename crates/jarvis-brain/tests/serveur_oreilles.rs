@@ -848,6 +848,53 @@ async fn changement_de_mode_diffuse() {
 }
 
 #[tokio::test]
+async fn mode_en_ligne_seulement_depuis_l_oreille_du_pc() {
+    let rig = rig().await;
+    let mut salon = salon(&rig).await;
+    // Une oreille d'une autre machine : refusé, le mode ne change pas.
+    send(&mut salon, &EarMessage::SetMode { mode: Mode::Online }).await;
+    let BrainMessage::Response {
+        utterance: None,
+        response: ControlResponse::Error { message },
+    } = next(&mut salon).await
+    else {
+        panic!("erreur attendue")
+    };
+    assert!(message.contains("PC"), "{message}");
+    assert_eq!(
+        next_within(&mut salon, Duration::from_millis(300)).await,
+        Next::Silent
+    );
+    let mut cli = Cli::connect(&rig.socket).await;
+    assert!(matches!(
+        cli.send(ControlRequest::Status).await,
+        ControlResponse::Status {
+            mode: Mode::Local,
+            ..
+        }
+    ));
+    // L'oreille du PC (son icône) : accepté.
+    let ControlResponse::PairedLocal { ear_id, token, .. } = cli
+        .send(ControlRequest::PairLocal { name: "PC".into() })
+        .await
+    else {
+        panic!("appairage local attendu")
+    };
+    let mut pc = session(&rig, &ear_id, &token).await;
+    send(&mut pc, &EarMessage::SetMode { mode: Mode::Online }).await;
+    assert!(matches!(
+        next(&mut pc).await,
+        BrainMessage::Response {
+            utterance: None,
+            response: ControlResponse::Status {
+                mode: Mode::Online,
+                ..
+            }
+        }
+    ));
+}
+
+#[tokio::test]
 async fn retrait_deconnecte_l_oreille() {
     let rig = rig().await;
     let mut ws = salon(&rig).await;

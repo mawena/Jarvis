@@ -39,6 +39,10 @@ const COMMANDS: usize = 256;
 const MAX_NAME_CHARS: usize = 64;
 const MAX_PLATFORM_CHARS: usize = 32;
 
+/// Réponse à une oreille distante qui demande le mode en ligne.
+pub const ONLINE_FROM_PC_ONLY: &str =
+    "Le mode en ligne se demande à la voix (avec confirmation) ou depuis le PC.";
+
 /// Rappel de l'annonce mDNS : `true` pendant une fenêtre d'appairage.
 pub type PairingHook = Arc<dyn Fn(bool) + Send + Sync>;
 
@@ -789,6 +793,22 @@ impl State {
                 );
             }
             EarMessage::SetMode { mode } => {
+                let local = self.sessions.get(ear).is_some_and(|s| s.record.local);
+                if mode == Mode::Online && !local {
+                    // À la voix, le mode en ligne demande une confirmation exacte : une
+                    // oreille d'une autre machine ne peut pas s'en passer.
+                    warn!(oreille = %ear, "mode en ligne demandé par une oreille distante : refusé");
+                    self.send(
+                        ear,
+                        BrainMessage::Response {
+                            utterance: None,
+                            response: ControlResponse::Error {
+                                message: ONLINE_FROM_PC_ONLY.into(),
+                            },
+                        },
+                    );
+                    return;
+                }
                 let response = match self.services.brain.set_mode(mode) {
                     Ok(()) => {
                         info!(oreille = %ear, mode = %mode, "mode changé par une oreille");
