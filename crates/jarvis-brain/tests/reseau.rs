@@ -185,6 +185,11 @@ async fn rig() -> Rig {
 /// `skill_delay` : durée de la compétence « suivant » (traitement long) ; `window` :
 /// fenêtre de l'arbitre.
 async fn rig_with(skill_delay: Duration, window: Duration) -> Rig {
+    rig_full(skill_delay, window, FakeDucker::new()).await
+}
+
+/// Comme [`rig_with`], avec la fausse baisse du son.
+async fn rig_full(skill_delay: Duration, window: Duration, ducker: FakeDucker) -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let identity = BrainIdentity::load_or_create(&dir.path().join("tls")).unwrap();
     let mut registry = EarRegistry::load(&dir.path().join("ears.toml")).unwrap();
@@ -193,7 +198,7 @@ async fn rig_with(skill_delay: Duration, window: Duration) -> Rig {
     drop(registry);
     let fakes = Fakes {
         stt: Arc::new(Phrases::default()),
-        ducker: Arc::new(FakeDucker::new()),
+        ducker: Arc::new(ducker),
         media: Arc::new(
             FakeSkill::new(&["media_next"])
                 .with_shortcut("suivant", "media_next", serde_json::json!({}))
@@ -1123,4 +1128,19 @@ async fn abandon_d_une_phrase_deja_lancee_ignore() {
     salon.silent(Duration::from_millis(500)).await;
     assert_eq!(rig.fakes.stt.calls(), 1);
     assert_eq!(rig.fakes.media.calls().len(), 1);
+}
+
+#[tokio::test]
+async fn son_retabli_apres_une_baisse_lente() {
+    // `wpctl` lent : la baisse n'est pas finie quand la phrase arrive au traitement.
+    let ducker = FakeDucker::new().with_duck_delay(Duration::from_millis(800));
+    let rig = rig_full(Duration::ZERO, WINDOW, ducker).await;
+    let mut salon = ear(&rig, &rig.salon).await;
+    salon.wake(1, 0.9, -30.0).unwrap();
+    salon.speak(1, SUIVANT, 3).unwrap();
+    salon.end(1).unwrap();
+    assert_eq!(salon.msg().await, BrainMessage::Elected { utterance: 1 });
+    assert_eq!(heard_text(&salon.msg().await, 1), "suivant");
+    // Rétabli après la baisse, jamais avant (le son resterait baissé).
+    assert_eq!(rig.ducker(), ["duck", "restore"]);
 }

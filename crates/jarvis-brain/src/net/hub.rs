@@ -376,6 +376,10 @@ pub fn offline_phrase_id(text: &str, voice_tag: &str) -> String {
 enum SoundCmd {
     Duck,
     Restore,
+    /// Prévient quand tout ce qui précède est fait : le traitement d'une phrase
+    /// l'attend avant de rétablir le son lui-même (`ListenService::listen`), pour
+    /// qu'une baisse encore en file ne passe pas après (son laissé baissé).
+    Flush(oneshot::Sender<()>),
 }
 
 async fn sound_loop(listen: Arc<ListenService>, mut rx: mpsc::UnboundedReceiver<SoundCmd>) {
@@ -383,6 +387,9 @@ async fn sound_loop(listen: Arc<ListenService>, mut rx: mpsc::UnboundedReceiver<
         match cmd {
             SoundCmd::Duck => listen.wake().await,
             SoundCmd::Restore => listen.restore().await,
+            SoundCmd::Flush(done) => {
+                let _ = done.send(());
+            }
         }
     }
 }
@@ -1054,9 +1061,14 @@ impl State {
         let (ear, follow_up, muted) = (ear.clone(), capture.follow_up, end.muted);
         let me = self.me.clone();
         let limit = self.settings.process_timeout;
+        // La baisse du son de cette phrase peut être encore en file : `listen` ne
+        // rétablit le son qu'après elle.
+        let (flushed_tx, flushed) = oneshot::channel();
+        let _ = self.sound.send(SoundCmd::Flush(flushed_tx));
         tokio::spawn(async move {
             let (job_ear, job_listen) = (ear.clone(), listen.clone());
             let mut job = tokio::spawn(async move {
+                let _ = flushed.await;
                 let response = job_listen.listen(&job_ear, &audio, muted, follow_up).await;
                 voice.speak(response).await
             });
