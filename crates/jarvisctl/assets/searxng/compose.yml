@@ -1,0 +1,28 @@
+# Géré par jarvisctl : réécrit à chaque `jarvisctl searx up`, ne pas modifier.
+# Vos réglages vont dans settings.yml (jamais écrasé).
+services:
+  searxng:
+    image: docker.io/searxng/searxng:2026.10.28-c360868e5
+    container_name: jarvis-searxng
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8888:8080"
+    env_file: ./.env
+    environment:
+      - SEARXNG_BASE_URL=http://127.0.0.1:8888/
+      - FORCE_OWNERSHIP=false
+    volumes:
+      - ./settings.yml:/etc/searxng/settings.yml:ro
+      - cache:/var/cache/searxng/
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "1m"
+        max-file: "1"
+
+volumes:
+  cache:
