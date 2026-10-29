@@ -38,6 +38,14 @@ pub const MAX_HANDSHAKES: usize = 8;
 pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Son d'une phrase gardé au plus : 1 s de tête + 12 s, à 16 kHz.
 pub const MAX_PHRASE_SAMPLES: usize = 13 * 16_000;
+/// Fenêtre de l'arbitre au plus : l'oreille attend son élection 2 s après `wake`
+/// (`ELECTION_TIMEOUT` de `jarvis-ear-core`), puis tient le PC pour endormi.
+pub const MAX_ARBITER_WINDOW: Duration = Duration::from_secs(1);
+
+/// `[network] arbiter_window_ms`, bornée à [`MAX_ARBITER_WINDOW`].
+fn arbiter_window(ms: u64) -> Duration {
+    Duration::from_millis(ms).min(MAX_ARBITER_WINDOW)
+}
 
 /// Délais du serveur (raccourcis dans les tests).
 #[derive(Debug, Clone, Copy)]
@@ -393,13 +401,21 @@ pub async fn start(
         })
     };
 
+    let window = arbiter_window(config.arbiter_window_ms);
+    if window.as_millis() < u128::from(config.arbiter_window_ms) {
+        warn!(
+            demandee_ms = config.arbiter_window_ms,
+            retenue_ms = window.as_millis() as u64,
+            "[network] arbiter_window_ms trop grande (les oreilles attendent leur élection 2 s) : bornée"
+        );
+    }
     let settings = HubSettings {
         brain_id: identity.brain_id.clone(),
         brain_name: name,
         port,
         fingerprint: identity.fingerprint,
         hosts: lan_hosts(addr.ip()),
-        window: Duration::from_millis(config.arbiter_window_ms),
+        window,
         pairing_ttl: PAIRING_TTL,
     };
     let offline_text = services.brain.persona().addressed("Le PC est endormi.");
@@ -456,5 +472,22 @@ fn lan_hosts(listen: IpAddr) -> Vec<IpAddr> {
     match routed {
         Ok(ip) if !ip.is_unspecified() && !ip.is_loopback() => vec![ip],
         _ => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fenetre_de_l_arbitre_bornee_sous_le_delai_de_l_oreille() {
+        assert_eq!(arbiter_window(300), Duration::from_millis(300));
+        assert_eq!(arbiter_window(0), Duration::ZERO);
+        // Au-delà, l'oreille tiendrait le PC pour endormi avant son élection.
+        assert_eq!(arbiter_window(5_000), MAX_ARBITER_WINDOW);
+        // Marge d'au moins une seconde pour le réseau et le traitement.
+        assert!(
+            MAX_ARBITER_WINDOW + Duration::from_secs(1) <= jarvis_ear_core::net::ELECTION_TIMEOUT
+        );
     }
 }

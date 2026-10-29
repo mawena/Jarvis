@@ -1,7 +1,7 @@
 //! Client du socket de contrôle du cerveau (une connexion par requête). L'oreille ne
-//! s'en sert plus que pour l'appairage local (`PairLocal`), l'enrôlement vocal
-//! (`EnrollVoice`) et, en secours, la relève des annonces (`Announcements`) ; les
-//! phrases passent par le réseau (voir [`crate::link`]).
+//! s'en sert plus que pour l'appairage local (`PairLocal`) et l'enrôlement vocal
+//! (`EnrollVoice`) ; les phrases et les annonces passent par le réseau (voir
+//! [`crate::link`]).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
