@@ -81,6 +81,7 @@ mod tests {
             audio: String::new(),
             muted: false,
             follow_up: false,
+            ear: None,
         }
     }
 
