@@ -1,17 +1,29 @@
 use jarvis_protocol::Mode;
 use std::io;
 use std::path::PathBuf;
+use tokio::sync::watch;
 
 /// Mode persistant : un fichier contenant `local` ou `online`.
 #[derive(Debug, Clone)]
 pub struct ModeStore {
     pub path: PathBuf,
     pub initial: Mode,
+    /// Chaque mode enregistré (CLI, icône ou voix) y est publié.
+    changes: watch::Sender<Mode>,
 }
 
 impl ModeStore {
     pub fn new(path: PathBuf, initial: Mode) -> Self {
-        Self { path, initial }
+        Self {
+            path,
+            initial,
+            changes: watch::Sender::new(initial),
+        }
+    }
+
+    /// Changements de mode, après leur écriture sur disque.
+    pub fn subscribe(&self) -> watch::Receiver<Mode> {
+        self.changes.subscribe()
     }
 
     /// `~/.local/state/jarvis/mode`
@@ -46,7 +58,9 @@ impl ModeStore {
         std::fs::write(&tmp, format!("{word}\n"))?;
         std::fs::rename(&tmp, &self.path).inspect_err(|_| {
             let _ = std::fs::remove_file(&tmp);
-        })
+        })?;
+        self.changes.send_replace(mode);
+        Ok(())
     }
 }
 
@@ -75,6 +89,18 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "local\n");
         let names: Vec<_> = std::fs::read_dir(dir.path()).unwrap().collect();
         assert_eq!(names.len(), 1);
+    }
+
+    #[test]
+    fn changement_de_mode_publie() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ModeStore::new(dir.path().join("mode"), Mode::Local);
+        let mut rx = store.subscribe();
+        assert!(!rx.has_changed().unwrap());
+        // Une copie publie sur le même canal.
+        store.clone().set(Mode::Online).unwrap();
+        assert!(rx.has_changed().unwrap());
+        assert_eq!(*rx.borrow_and_update(), Mode::Online);
     }
 
     #[test]
