@@ -13,12 +13,14 @@ pub mod testing;
 pub mod types;
 
 pub use settings::{AgentSettings, DEFAULT_ALLOWED_TOOLS, DENIED_TOOLS, Project};
-pub use types::{AgentCommand, EndReason, Progress, RunResult, TaskId, TaskRecord, TaskState};
+pub use types::{
+    AgentCommand, EndReason, Progress, RunResult, SpokenName, TaskId, TaskRecord, TaskState,
+};
 
 use crate::{
     Announcer, CommandRunner, Notice, Outcome, Reply, Risk, Shortcut, Skill, SkillError, ToolSpec,
 };
-use git::{FlowNames, GitEnv, Prepared, RefSnapshot, Refusal, Violation};
+use git::{FlowNames, GitEnv, Prepared, RefSnapshot, Refusal, TaskTree, Violation};
 use projects::ProjectList;
 use registry::Registry;
 use serde_json::{Value, json};
@@ -27,7 +29,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use supervisor::{Limits, RunOutcome, Running, Stopper};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 use tracing::{info, warn};
 
 /// Source des identifiants de tâche.
@@ -45,16 +47,40 @@ const COMMIT_INSTRUCTION_MAX: usize = 60;
 /// Tâches citées au plus par le suivi.
 const STATUS_MAX: usize = 2;
 
+/// Références changées citées une à une au plus dans une annonce.
+const REFS_SPOKEN_MAX: usize = 3;
+
+/// Délais de la fin d'une tâche.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EndLimits {
+    /// Commit de fin, signature comprise (les autres git : `git::GIT_TIMEOUT`).
+    pub commit: Duration,
+    /// Filet de chaque étape (vérification, commit) : passé ce délai, la place
+    /// est rendue et l'échec dit, même si git ne rend pas la main.
+    pub step: Duration,
+}
+
+impl Default for EndLimits {
+    fn default() -> Self {
+        EndLimits {
+            commit: git::COMMIT_TIMEOUT,
+            step: Duration::from_secs(180),
+        }
+    }
+}
+
 /// Phrase de départ.
-fn started_phrase(project: &str) -> String {
+fn started_phrase(project: &SpokenName) -> String {
     format!(
-        "Bien. Je confie cela à Claude, sur une branche à part du projet {project}. \
-         Je vous préviens à la fin."
+        "Bien. Je confie cela à Claude, sur une branche à part {}. \
+         Je vous préviens à la fin.",
+        project.of_project()
     )
 }
 
 const CLAUDE_MISSING: &str = "Claude Code est introuvable : je ne lance rien.";
 const NO_TASK: &str = "Aucune tâche en cours.";
+const NOT_SAVED: &str = "Je n'ai pas pu enregistrer le travail : il reste dans le worktree.";
 
 /// Compétence `agent` : départ, suivi et arrêt des tâches de code.
 pub struct AgentSkill {
@@ -70,6 +96,7 @@ struct Inner {
     ids: IdSource,
     now: NowSource,
     limits: Limits,
+    end: EndLimits,
     active: Mutex<Vec<Active>>,
 }
 
@@ -80,8 +107,10 @@ struct Active {
     started_at: u64,
     /// Suivi et arrêt, une fois le processus lancé.
     run: Option<(watch::Receiver<Progress>, Stopper)>,
-    /// Arrêt demandé pendant la préparation.
+    /// Arrêt demandé (pendant la préparation, ou en cours).
     stop_requested: bool,
+    /// Processus fini : vérification et commit en cours.
+    finishing: bool,
 }
 
 impl AgentSkill {
@@ -104,6 +133,7 @@ impl AgentSkill {
                 ids: Arc::new(new_task_id),
                 now: Arc::new(unix_now),
                 limits,
+                end: EndLimits::default(),
                 active: Mutex::new(Vec::new()),
             }),
         }
@@ -128,6 +158,12 @@ impl AgentSkill {
     /// Remplace les limites de durée (tests).
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.inner_mut().limits = limits;
+        self
+    }
+
+    /// Remplace les délais de fin de tâche (tests).
+    pub fn with_end_limits(mut self, end: EndLimits) -> Self {
+        self.inner_mut().end = end;
         self
     }
 }
@@ -225,8 +261,25 @@ impl Skill for AgentSkill {
                 let project = inner.project(required(&args, "project")?)?.clone();
                 let instruction = required(&args, "instruction")?.to_string();
                 // Tâche à part : un appel abandonné ne laisse rien à moitié fait.
-                let task = tokio::spawn(inner.clone().start(project, instruction));
-                task.await
+                // Si le cerveau n'attend plus (délai), la réponse est annoncée.
+                let (tx, rx) = oneshot::channel();
+                let task = inner.clone();
+                tokio::spawn(async move {
+                    let title = format!("Tâche de code : {}", project.name);
+                    let reply = task.clone().start(project, instruction).await;
+                    if let Err(reply) = tx.send(reply) {
+                        info!("réponse du départ annoncée après le délai");
+                        task.announcer.announce(Notice {
+                            title,
+                            body: reply.speech.clone(),
+                            speech: reply.speech,
+                            outcome: reply.outcome,
+                            urgent: false,
+                            speak: true,
+                        });
+                    }
+                });
+                rx.await
                     .map_err(|e| SkillError::Failed(format!("départ interrompu : {e}")))
             }
             "agent_status" => {
@@ -259,11 +312,24 @@ fn optional<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+/// Résultat de l'étape de commit.
+enum CommitStep {
+    /// Commit fait ; problèmes vus à la relecture.
+    Done(Vec<Violation>),
+    /// Commit impossible : travail laissé dans le worktree.
+    Failed(String),
+}
+
 impl Inner {
     /// Projet connu, sinon une phrase qui cite les projets connus.
     fn project(&self, spoken: &str) -> Result<&Project, SkillError> {
         self.projects.resolve(spoken).ok_or_else(|| {
-            let names = self.projects.names();
+            let names: Vec<String> = self
+                .projects
+                .names()
+                .into_iter()
+                .map(|n| self.spoken(n).bare())
+                .collect();
             let known = if names.is_empty() {
                 "Aucun projet n'est configuré.".to_string()
             } else {
@@ -273,6 +339,14 @@ impl Inner {
         })
     }
 
+    /// Nom dit d'un projet (jamais le mot de réveil).
+    fn spoken(&self, name: &str) -> SpokenName {
+        match self.projects.resolve(name).filter(|p| p.name == name) {
+            Some(p) => SpokenName::of(&p.name, &p.aliases),
+            None => SpokenName::of(name, &[]),
+        }
+    }
+
     /// Départ d'une tâche : limites, garde-fous git, lancement, surveillance.
     async fn start(self: Arc<Self>, project: Project, instruction: String) -> Reply {
         let id = (self.ids)();
@@ -280,8 +354,12 @@ impl Inner {
         if let Err(refused) = self.reserve(&id, &project.name, started_at) {
             return refused;
         }
+        let spoken = self.spoken(&project.name);
         match self.launch(&id, &project, instruction, started_at).await {
-            Ok(()) => Reply::done(started_phrase(&project.name)),
+            Ok(Launched::Running) => Reply::done(started_phrase(&spoken)),
+            Ok(Launched::StoppedAtOnce) => {
+                Reply::new("Tâche annulée dès son départ. Sa branche reste en place.")
+            }
             Err(refused) => {
                 self.release(&id);
                 refused
@@ -294,7 +372,8 @@ impl Inner {
         let mut active = self.active.lock().unwrap();
         if active.iter().any(|a| a.project == project) {
             return Err(Reply::failed(format!(
-                "Une tâche tourne déjà sur le projet {project}."
+                "Une tâche tourne déjà sur {}.",
+                self.spoken(project).the_project()
             )));
         }
         let max = self.settings.max_tasks.max(1);
@@ -314,6 +393,7 @@ impl Inner {
             started_at,
             run: None,
             stop_requested: false,
+            finishing: false,
         });
         Ok(())
     }
@@ -322,13 +402,23 @@ impl Inner {
         self.active.lock().unwrap().retain(|a| &a.id != id);
     }
 
+    /// Arrêt demandé pour cette tâche ?
+    fn stop_requested(&self, id: &TaskId) -> bool {
+        self.active
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|a| &a.id == id && a.stop_requested)
+    }
+
     async fn launch(
         self: &Arc<Self>,
         id: &TaskId,
         project: &Project,
         instruction: String,
         started_at: u64,
-    ) -> Result<(), Reply> {
+    ) -> Result<Launched, Reply> {
+        let spoken = self.spoken(&project.name);
         if !is_executable(&self.settings.claude_path) {
             warn!(chemin = %self.settings.claude_path.display(), "claude introuvable");
             return Err(Reply::failed(CLAUDE_MISSING));
@@ -344,7 +434,8 @@ impl Inner {
             let r = runner.as_ref();
             let names = git::flow_names(r, &repo, base.as_deref());
             git::check_clean(r, &repo)?;
-            let before = git::snapshot(r, &repo, &names.protected);
+            let before = git::snapshot(r, &repo)
+                .ok_or_else(|| Refusal::Git("relevé des références impossible".into()))?;
             let prepared = git::prepare(r, &repo, &names, &slug, &worktree_dir, &task_id)?;
             let env = git::no_push_env(r, &repo);
             Ok::<_, Refusal>((names, before, prepared, env))
@@ -355,16 +446,32 @@ impl Inner {
                 Ok(Ok(p)) => p,
                 Ok(Err(refusal)) => {
                     warn!(projet = %project.name, refus = ?refusal, "tâche refusée");
-                    return Err(Reply::failed(refusal.phrase(&project.name)));
+                    return Err(Reply::failed(refusal.phrase(&spoken)));
                 }
                 Err(e) => {
                     warn!(erreur = %e, "préparation git interrompue");
-                    return Err(Reply::failed(
-                        Refusal::Git(String::new()).phrase(&project.name),
-                    ));
+                    return Err(Reply::failed(Refusal::Git(String::new()).phrase(&spoken)));
                 }
             };
 
+        // Arrêt demandé pendant la préparation : rien n'est lancé.
+        if self.stop_requested(id) {
+            info!(tache = %id, projet = %project.name, "tâche annulée avant son départ");
+            let runner = self.runner.clone();
+            let repo = project.path.clone();
+            let p = prepared.clone();
+            let removed =
+                tokio::task::spawn_blocking(move || git::discard(runner.as_ref(), &repo, &p)).await;
+            return Err(Reply::new(match removed {
+                Ok(Ok(())) => "Tâche annulée avant son départ : sa branche est retirée.",
+                other => {
+                    warn!(resultat = ?other.map(|r| r.err()), "worktree annulé non retiré");
+                    "Tâche annulée avant son départ : sa branche reste en place."
+                }
+            }));
+        }
+
+        let tree = prepared.tree();
         let mut record = TaskRecord {
             id: id.clone(),
             project: project.name.clone(),
@@ -400,28 +507,35 @@ impl Inner {
                 record.summary = Some(format!("lancement impossible : {e}"));
                 self.save(&record);
                 return Err(Reply::failed(format!(
-                    "Je n'ai pas pu lancer Claude sur le projet {}. La branche {} reste en place.",
-                    record.project, record.branch
+                    "Je n'ai pas pu lancer Claude sur {}. Sa branche reste en place.",
+                    spoken.the_project()
                 )));
             }
         };
-        self.attach(id, &running);
+        let stopped = self.attach(id, &running);
         tokio::spawn(
             self.clone()
-                .follow(record, project.path.clone(), before, running),
+                .follow(record, project.path.clone(), tree, before, running),
         );
-        Ok(())
+        Ok(if stopped {
+            Launched::StoppedAtOnce
+        } else {
+            Launched::Running
+        })
     }
 
-    /// Note le suivi et l'arrêt d'une tâche lancée.
-    fn attach(&self, id: &TaskId, running: &Running) {
+    /// Note le suivi et l'arrêt d'une tâche lancée. Vrai si l'arrêt avait été
+    /// demandé entre-temps (le processus est alors arrêté aussitôt).
+    fn attach(&self, id: &TaskId, running: &Running) -> bool {
         let mut active = self.active.lock().unwrap();
-        if let Some(a) = active.iter_mut().find(|a| &a.id == id) {
-            a.run = Some((running.progress_watch(), running.stopper()));
-            if a.stop_requested {
-                running.stopper().stop();
-            }
+        let Some(a) = active.iter_mut().find(|a| &a.id == id) else {
+            return false;
+        };
+        a.run = Some((running.progress_watch(), running.stopper()));
+        if a.stop_requested {
+            running.stopper().stop();
         }
+        a.stop_requested
     }
 
     fn save(&self, record: &TaskRecord) {
@@ -430,54 +544,117 @@ impl Inner {
         }
     }
 
-    /// Fin d'une tâche : vérification, commit, registre, annonce.
+    /// Travail git bloquant, borné par le filet `end.step` : la tâche tokio
+    /// reprend la main même si git ne la rend pas.
+    async fn blocking<T: Send + 'static>(
+        &self,
+        work: impl FnOnce() -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        match tokio::time::timeout(self.end.step, tokio::task::spawn_blocking(work)).await {
+            Ok(Ok(result)) => result,
+            Ok(Err(e)) => Err(format!("travail git interrompu : {e}")),
+            Err(_) => Err("délai dépassé".into()),
+        }
+    }
+
+    /// Fin d'une tâche : vérification, commit, relecture, registre, annonce.
     async fn follow(
         self: Arc<Self>,
         mut record: TaskRecord,
         repo: PathBuf,
+        tree: TaskTree,
         before: RefSnapshot,
         running: Running,
     ) {
         let outcome = running.wait().await;
+        if let Some(a) = self
+            .active
+            .lock()
+            .unwrap()
+            .iter_mut()
+            .find(|a| a.id == record.id)
+        {
+            a.finishing = true;
+        }
         let result = outcome.progress.result.clone();
         let exited_ok = outcome.reason == EndReason::Exited
             && outcome.exit_code == Some(0)
             && result.as_ref().is_some_and(|r| !r.is_error);
-
-        let runner = self.runner.clone();
-        let commit_at_end = self.settings.commit_at_end;
-        let message = commit_message(&record.instruction);
-        let (worktree, branch, base_sha) = (
-            record.worktree.clone(),
-            record.branch.clone(),
-            record.base_sha.clone(),
-        );
-        let checked = tokio::task::spawn_blocking(move || {
-            let r = runner.as_ref();
-            let violations = git::verify(r, &repo, &worktree, &before, &branch, &base_sha);
-            let files = git::changed_files(r, &worktree, &base_sha);
-            let commit = (exited_ok && violations.is_empty() && !files.is_empty() && commit_at_end)
-                .then(|| git::commit_all(r, &worktree, &message));
-            (violations, files, commit)
-        })
-        .await;
-        let (violations, files, commit) = checked.unwrap_or_else(|e| {
-            warn!(erreur = %e, "vérification après coup interrompue");
-            (Vec::new(), Vec::new(), None)
-        });
-        if let Some(Err(e)) = &commit {
-            warn!(tache = %record.id, erreur = %e, "commit de fin impossible");
-        }
-
         record.ended_at = Some((self.now)());
-        record.files_changed = Some(files.len());
-        record.violations = violations.iter().map(Violation::phrase).collect();
         record.cost_usd = result.as_ref().and_then(|r| r.cost_usd);
         record.summary = result.as_ref().and_then(|r| claude::summary(&r.text));
+        let before = Arc::new(before);
+
+        // Vérification après coup.
+        let checked = {
+            let (runner, repo, tree, before) = (
+                self.runner.clone(),
+                repo.clone(),
+                tree.clone(),
+                before.clone(),
+            );
+            let (branch, base_sha) = (record.branch.clone(), record.base_sha.clone());
+            self.blocking(move || {
+                let r = runner.as_ref();
+                let violations = git::verify(r, &repo, &tree, &before, &branch, &base_sha)?;
+                let files = git::changed_files(r, &tree, &base_sha)?;
+                Ok((violations, files))
+            })
+            .await
+        };
+        let (mut violations, files) = match checked {
+            Ok(checked) => checked,
+            Err(e) => return self.unverified(record, e),
+        };
+
+        // Commit de fin, puis relecture : parent, branche, références.
+        let mut commit = None;
+        if exited_ok && violations.is_empty() && !files.is_empty() && self.settings.commit_at_end {
+            let runner = self.runner.clone();
+            let message = commit_message(&record.instruction);
+            let (branch, base_sha) = (record.branch.clone(), record.base_sha.clone());
+            let limit = self.end.commit;
+            let tree = tree.clone();
+            let step = self
+                .blocking(move || {
+                    let r = runner.as_ref();
+                    let parent = match git::commit_all(r, &tree, &message, limit) {
+                        Ok(parent) => parent,
+                        Err(e) => return Ok(CommitStep::Failed(e)),
+                    };
+                    let mut problems = git::check_commit(r, &tree, &branch, &parent);
+                    for v in git::verify(r, &repo, &tree, &before, &branch, &base_sha)? {
+                        if !problems.contains(&v) {
+                            problems.push(v);
+                        }
+                    }
+                    Ok(CommitStep::Done(problems))
+                })
+                .await;
+            match step {
+                Ok(CommitStep::Done(problems)) => {
+                    violations = problems;
+                    commit = Some(Ok(()));
+                }
+                Ok(CommitStep::Failed(e)) => {
+                    warn!(tache = %record.id, erreur = %e, "commit de fin impossible");
+                    commit = Some(Err(e));
+                }
+                Err(e) => return self.unverified(record, e),
+            }
+        }
+
+        record.files_changed = Some(files.len());
+        record.violations = violations
+            .iter()
+            .map(|v| v.phrase(&record.branch))
+            .collect();
         record.state = match outcome.reason {
+            _ if !violations.is_empty() => TaskState::Failed,
             EndReason::Stopped => TaskState::Stopped,
-            EndReason::TimedOut | EndReason::Idle => TaskState::TimedOut,
-            EndReason::Exited if exited_ok && violations.is_empty() => TaskState::Succeeded,
+            EndReason::TimedOut => TaskState::TimedOut,
+            EndReason::Idle => TaskState::Stalled,
+            EndReason::Exited if exited_ok => TaskState::Succeeded,
             EndReason::Exited => TaskState::Failed,
         };
         info!(
@@ -487,7 +664,36 @@ impl Inner {
             fichiers = files.len(),
             "tâche d'agent terminée"
         );
-        let notice = self.notice(&record, &outcome, files.len(), commit.as_ref());
+        let stop_requested = self.stop_requested(&record.id);
+        let notice = self.notice(
+            &record,
+            &outcome,
+            &violations,
+            commit.as_ref(),
+            stop_requested,
+        );
+        self.save(&record);
+        self.release(&record.id);
+        self.announcer.announce(notice);
+    }
+
+    /// Vérification ou commit impossible (délai, git interrompu) : échec urgent.
+    fn unverified(&self, mut record: TaskRecord, error: String) {
+        warn!(tache = %record.id, erreur = %error, "vérification après coup impossible");
+        record.state = TaskState::Failed;
+        record.violations = vec!["vérification impossible".into()];
+        let speech = format!(
+            "Je n'ai pas pu vérifier la tâche sur {} : vérifiez le projet.",
+            self.spoken(&record.project).bare()
+        );
+        let notice = Notice {
+            title: format!("Attention : tâche sur {}", record.project),
+            body: details(&speech, &record),
+            speech,
+            outcome: Outcome::Failed,
+            urgent: true,
+            speak: true,
+        };
         self.save(&record);
         self.release(&record.id);
         self.announcer.announce(notice);
@@ -498,16 +704,26 @@ impl Inner {
         &self,
         record: &TaskRecord,
         outcome: &RunOutcome,
-        files: usize,
+        violations: &[Violation],
         commit: Option<&Result<(), String>>,
+        stop_requested: bool,
     ) -> Notice {
-        let p = &record.project;
-        let (title, speech, result_outcome, urgent, speak) = if !record.violations.is_empty() {
+        let real = &record.project;
+        let spoken = self.spoken(real);
+        let p = spoken.bare();
+        let files = record.files_changed.unwrap_or(0);
+        let mut body_extra = String::new();
+        let (title, speech, result_outcome, urgent, speak) = if !violations.is_empty() {
+            let details: Vec<String> = violations.iter().filter_map(Violation::detail).collect();
+            if !details.is_empty() {
+                body_extra = format!("\nChangements : {}", details.join(", "));
+            }
             (
-                format!("Attention : tâche sur {p}"),
+                format!("Attention : tâche sur {real}"),
                 format!(
-                    "Attention : {}. Vérifiez le projet {p}.",
-                    join_and(&record.violations)
+                    "Attention : {}. Si ce n'est pas vous, vérifiez {}.",
+                    violations_speech(violations, &record.branch),
+                    spoken.the_project()
                 ),
                 Outcome::Failed,
                 true,
@@ -516,14 +732,14 @@ impl Inner {
         } else {
             match outcome.reason {
                 EndReason::Stopped => (
-                    format!("Tâche arrêtée : {p}"),
+                    format!("Tâche arrêtée : {real}"),
                     format!("La tâche sur {p} a été arrêtée. Le travail reste sur sa branche."),
                     Outcome::Info,
                     false,
                     false,
                 ),
                 EndReason::TimedOut => (
-                    format!("Tâche trop longue : {p}"),
+                    format!("Tâche trop longue : {real}"),
                     format!(
                         "La tâche sur {p} a dépassé {} : je l'ai arrêtée.",
                         minutes(self.settings.max_minutes)
@@ -533,7 +749,7 @@ impl Inner {
                     true,
                 ),
                 EndReason::Idle => (
-                    format!("Tâche bloquée : {p}"),
+                    format!("Tâche bloquée : {real}"),
                     format!(
                         "La tâche sur {p} ne donnait plus signe de vie depuis {} : je l'ai arrêtée.",
                         minutes(self.settings.idle_minutes)
@@ -543,19 +759,24 @@ impl Inner {
                     true,
                 ),
                 EndReason::Exited if record.state == TaskState::Succeeded => {
+                    // Arrêt demandé trop tard : la fin est dite comme telle.
+                    let ended = if stop_requested {
+                        "s'est terminée avant l'arrêt"
+                    } else {
+                        "est terminée"
+                    };
                     let mut speech = match &record.summary {
-                        Some(s) => format!("La tâche sur {p} est terminée : {}.", sentence(s)),
-                        None => format!("La tâche sur {p} est terminée."),
+                        Some(s) => format!("La tâche sur {p} {ended} : {}.", sentence(s)),
+                        None => format!("La tâche sur {p} {ended}."),
                     };
                     speech.push(' ');
                     speech.push_str(&files_phrase(files));
                     if let Some(Err(_)) = commit {
-                        speech.push_str(
-                            " Je n'ai pas pu enregistrer le travail : il reste dans le worktree.",
-                        );
+                        speech.push(' ');
+                        speech.push_str(NOT_SAVED);
                     }
                     (
-                        format!("Tâche terminée : {p}"),
+                        format!("Tâche terminée : {real}"),
                         speech,
                         Outcome::Done,
                         false,
@@ -563,7 +784,7 @@ impl Inner {
                     )
                 }
                 EndReason::Exited => (
-                    format!("Échec de la tâche : {p}"),
+                    format!("Échec de la tâche : {real}"),
                     format!(
                         "L'agent a échoué sur {p} : {}.",
                         failure_reason(outcome, record)
@@ -576,7 +797,7 @@ impl Inner {
         };
         Notice {
             title,
-            body: details(&speech, record),
+            body: details(&speech, record) + &body_extra,
             speech,
             outcome: result_outcome,
             urgent,
@@ -594,6 +815,7 @@ impl Inner {
                 .filter(|a| project.is_none_or(|p| a.project == p))
                 .take(STATUS_MAX)
                 .map(|a| {
+                    let p = self.spoken(&a.project).bare();
                     let since = minutes_since(now.saturating_sub(a.started_at));
                     let action = a
                         .run
@@ -601,10 +823,9 @@ impl Inner {
                         .and_then(|(progress, _)| progress.borrow().last_action.clone());
                     match action {
                         Some(action) => format!(
-                            "La tâche sur {} tourne depuis {since} ; dernière action : {action}.",
-                            a.project
+                            "La tâche sur {p} tourne depuis {since} ; dernière action : {action}."
                         ),
-                        None => format!("La tâche sur {} tourne depuis {since}.", a.project),
+                        None => format!("La tâche sur {p} tourne depuis {since}."),
                     }
                 })
                 .collect()
@@ -613,7 +834,7 @@ impl Inner {
             return Reply::new(running.join(" "));
         }
         let mut speech = match project {
-            Some(p) => format!("Aucune tâche en cours sur {p}."),
+            Some(p) => format!("Aucune tâche en cours sur {}.", self.spoken(p).bare()),
             None => NO_TASK.to_string(),
         };
         let last = self
@@ -625,9 +846,31 @@ impl Inner {
             .max_by_key(|r| (r.ended_at.unwrap_or(r.started_at), r.started_at));
         if let Some(r) = last {
             speech.push(' ');
-            speech.push_str(&last_phrase(&r));
+            speech.push_str(&self.last_phrase(&r));
         }
         Reply::new(speech)
+    }
+
+    /// Phrase sur la dernière tâche terminée.
+    fn last_phrase(&self, r: &TaskRecord) -> String {
+        let p = self.spoken(&r.project).bare();
+        match r.state {
+            TaskState::Succeeded => match &r.summary {
+                Some(s) => format!("La dernière, sur {p}, est terminée : {}.", sentence(s)),
+                None => format!("La dernière, sur {p}, est terminée."),
+            },
+            TaskState::Failed => format!("La dernière, sur {p}, a échoué."),
+            TaskState::Stopped => format!("La dernière, sur {p}, a été arrêtée."),
+            TaskState::TimedOut => format!("La dernière, sur {p}, a dépassé le temps permis."),
+            TaskState::Stalled => format!(
+                "La dernière, sur {p}, a été arrêtée : plus de signe de vie depuis {}.",
+                minutes(self.settings.idle_minutes)
+            ),
+            TaskState::Interrupted => {
+                format!("La dernière, sur {p}, a été interrompue par un redémarrage.")
+            }
+            TaskState::Running => format!("La dernière, sur {p}, tourne encore."),
+        }
     }
 
     /// « Arrête la tâche. »
@@ -639,31 +882,83 @@ impl Inner {
             .collect();
         match matching.as_mut_slice() {
             [] => Reply::new(match project {
-                Some(p) => format!("Aucune tâche en cours sur {p}."),
+                Some(p) => format!("Aucune tâche en cours sur {}.", self.spoken(p).bare()),
                 None => NO_TASK.to_string(),
             }),
             [a] => {
-                a.stop_requested = true;
-                if let Some((_, stopper)) = &a.run {
-                    stopper.stop();
+                let p = self.spoken(&a.project).bare();
+                if a.finishing {
+                    return Reply::new(format!(
+                        "La tâche sur {p} vient de se terminer : je vous annonce le résultat \
+                         dans un instant."
+                    ));
                 }
+                a.stop_requested = true;
                 info!(tache = %a.id, projet = %a.project, "arrêt de la tâche demandé");
-                Reply::done(format!(
-                    "J'arrête la tâche sur {}. Le travail reste sur sa branche.",
-                    a.project
-                ))
+                match &a.run {
+                    Some((_, stopper)) => {
+                        stopper.stop();
+                        Reply::done(format!(
+                            "J'arrête la tâche sur {p}. Le travail reste sur sa branche."
+                        ))
+                    }
+                    None => Reply::done(format!("J'annule la tâche sur {p} avant son départ.")),
+                }
             }
             many => {
-                let names: Vec<String> = many.iter().map(|a| a.project.clone()).collect();
+                let names: Vec<SpokenName> = many.iter().map(|a| self.spoken(&a.project)).collect();
+                let bare: Vec<String> = names.iter().map(SpokenName::bare).collect();
+                // Exemple dicible : un projet appelé par son nom, sinon un alias.
+                let example = names
+                    .iter()
+                    .find(|n| matches!(n, SpokenName::Name(_)))
+                    .unwrap_or(&names[0])
+                    .bare();
                 Reply::new(format!(
-                    "{} tâches tournent, sur {} : dites « arrête la tâche {} », par exemple.",
+                    "{} tâches tournent, sur {} : dites « arrête la tâche {example} », par exemple.",
                     count_word(names.len()),
-                    join_and(&names),
-                    names[0]
+                    join_and(&bare),
                 ))
             }
         }
     }
+}
+
+/// Issue du lancement.
+enum Launched {
+    Running,
+    /// Arrêt demandé juste avant que le processus ne parte : arrêté aussitôt.
+    StoppedAtOnce,
+}
+
+/// Violations dites : les références changées groupées, puis le reste.
+fn violations_speech(violations: &[Violation], branch: &str) -> String {
+    let subjects: Vec<String> = violations
+        .iter()
+        .filter_map(|v| v.ref_subject(branch))
+        .collect();
+    let mut parts = Vec::new();
+    match subjects.len() {
+        0 => {}
+        1 => parts.push(format!("{} a changé pendant la tâche", subjects[0])),
+        n if n <= REFS_SPOKEN_MAX => parts.push(format!(
+            "{} ont changé pendant la tâche",
+            join_and(&subjects)
+        )),
+        n => parts.push(format!(
+            "{}, {} et {} autres références ont changé pendant la tâche",
+            subjects[0],
+            subjects[1],
+            n - 2
+        )),
+    }
+    parts.extend(
+        violations
+            .iter()
+            .filter(|v| v.ref_subject(branch).is_none())
+            .map(|v| v.phrase(branch)),
+    );
+    join_and(&parts)
 }
 
 /// Raison courte d'un échec.
@@ -683,28 +978,11 @@ fn failure_reason(outcome: &RunOutcome, record: &TaskRecord) -> String {
     }
 }
 
-/// Phrase sur la dernière tâche terminée.
-fn last_phrase(r: &TaskRecord) -> String {
-    let p = &r.project;
-    match r.state {
-        TaskState::Succeeded => match &r.summary {
-            Some(s) => format!("La dernière, sur {p}, est terminée : {}.", sentence(s)),
-            None => format!("La dernière, sur {p}, est terminée."),
-        },
-        TaskState::Failed => format!("La dernière, sur {p}, a échoué."),
-        TaskState::Stopped => format!("La dernière, sur {p}, a été arrêtée."),
-        TaskState::TimedOut => format!("La dernière, sur {p}, a dépassé le temps permis."),
-        TaskState::Interrupted => {
-            format!("La dernière, sur {p}, a été interrompue par un redémarrage.")
-        }
-        TaskState::Running => format!("La dernière, sur {p}, tourne encore."),
-    }
-}
-
 /// Corps de la notification : la phrase, puis où trouver le travail.
 fn details(speech: &str, r: &TaskRecord) -> String {
     format!(
-        "{speech}\nBranche : {}\nDossier : {}\nReprendre : claude --resume {}\nJournal : {}",
+        "{speech}\nProjet : {}\nBranche : {}\nDossier : {}\nReprendre : claude --resume {}\nJournal : {}",
+        r.project,
         r.branch,
         r.worktree.display(),
         r.id,
@@ -840,16 +1118,37 @@ mod tests {
     }
 
     fn bench_with(body: &str, tweak: impl FnOnce(&mut AgentSettings), limits: Limits) -> Bench {
+        bench_full(
+            body,
+            tweak,
+            limits,
+            Arc::new(SystemRunner),
+            EndLimits::default(),
+        )
+    }
+
+    /// Banc avec un exécutant de commandes au choix (git ralenti, en panne…).
+    fn bench_runner(body: &str, runner: Arc<dyn CommandRunner>, end: EndLimits) -> Bench {
+        bench_full(body, |_| {}, short_limits(), runner, end)
+    }
+
+    fn bench_full(
+        body: &str,
+        tweak: impl FnOnce(&mut AgentSettings),
+        limits: Limits,
+        runner: Arc<dyn CommandRunner>,
+        end: EndLimits,
+    ) -> Bench {
         let (dir_j, jarvis) = temp_repo();
         let (dir_m, mawena) = temp_repo();
         let work = tempfile::tempdir().unwrap();
         let claude_dir = work.path().join("claude");
         std::fs::create_dir(&claude_dir).unwrap();
         let claude_path = fake_claude(&claude_dir, body);
-        let project = |name: &str, path: &Path| Project {
+        let project = |name: &str, path: &Path, aliases: &[&str]| Project {
             name: name.into(),
             path: path.to_path_buf(),
-            aliases: Vec::new(),
+            aliases: aliases.iter().map(|a| a.to_string()).collect(),
             base: None,
             extra_allowed_tools: Vec::new(),
         };
@@ -858,7 +1157,11 @@ mod tests {
             worktree_dir: work.path().join("worktrees"),
             cargo_target_dir: work.path().join("target"),
             extra_path: Vec::new(),
-            projects: vec![project("Jarvis", &jarvis), project("Mawena", &mawena)],
+            // Comme la config par défaut : le projet Jarvis se dit « l'assistant ».
+            projects: vec![
+                project("Jarvis", &jarvis, &["l'assistant"]),
+                project("Mawena", &mawena, &[]),
+            ],
             ..AgentSettings::default()
         };
         tweak(&mut settings);
@@ -867,18 +1170,14 @@ mod tests {
         let clock = Arc::new(AtomicU64::new(T0));
         let counter = Arc::new(AtomicU64::new(0));
         let now = clock.clone();
-        let skill = AgentSkill::new(
-            settings,
-            Arc::new(SystemRunner),
-            announcer.clone(),
-            registry,
-        )
-        .with_ids(Arc::new(move || {
-            let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            TaskId(format!("{n:08x}-0000-4000-8000-000000000000"))
-        }))
-        .with_now(Arc::new(move || now.load(Ordering::SeqCst)))
-        .with_limits(limits);
+        let skill = AgentSkill::new(settings, runner, announcer.clone(), registry)
+            .with_ids(Arc::new(move || {
+                let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
+                TaskId(format!("{n:08x}-0000-4000-8000-000000000000"))
+            }))
+            .with_now(Arc::new(move || now.load(Ordering::SeqCst)))
+            .with_limits(limits)
+            .with_end_limits(end);
         Bench {
             _repos: (dir_j, dir_m),
             jarvis,
@@ -994,8 +1293,8 @@ mod tests {
         )
     }
 
-    const STARTED: &str = "Bien. Je confie cela à Claude, sur une branche à part du projet \
-                           Jarvis. Je vous préviens à la fin.";
+    const STARTED: &str = "Bien. Je confie cela à Claude, sur une branche à part de l'assistant. \
+                           Je vous préviens à la fin.";
 
     #[tokio::test]
     async fn demarrage_repond_tout_de_suite() {
@@ -1031,9 +1330,7 @@ mod tests {
         let r = b.start("Jarvis").await;
         assert_eq!(
             r,
-            Reply::failed(
-                "Le projet Jarvis a des modifications non enregistrées : je ne lance rien."
-            )
+            Reply::failed("L'assistant a des modifications non enregistrées : je ne lance rien.")
         );
         assert!(b.worktrees().is_empty());
         assert_eq!(branches(&b.jarvis), ["develop", "main"]);
@@ -1057,7 +1354,7 @@ mod tests {
         match b.skill.call(&s.tool, s.args).await {
             Err(SkillError::NotFound(m)) => assert_eq!(
                 m,
-                "Je ne connais pas le projet « Zorglub ». Projets connus : Jarvis, Mawena."
+                "Je ne connais pas le projet « Zorglub ». Projets connus : l'assistant, Mawena."
             ),
             other => panic!("{other:?}"),
         }
@@ -1095,7 +1392,7 @@ mod tests {
         assert_eq!(b.start("Jarvis").await.outcome, Outcome::Done);
         assert_eq!(
             b.start("Jarvis").await,
-            Reply::failed("Une tâche tourne déjà sur le projet Jarvis.")
+            Reply::failed("Une tâche tourne déjà sur l'assistant.")
         );
         assert_eq!(b.worktrees().len(), 1);
         // Un autre projet peut partir.
@@ -1139,7 +1436,7 @@ mod tests {
         let n = b.notice(1).await;
         assert_eq!(
             n.speech,
-            "La tâche sur Jarvis est terminée : J'ai fini les tests. 2 fichiers modifiés."
+            "La tâche sur l'assistant est terminée : J'ai fini les tests. 2 fichiers modifiés."
         );
         assert_eq!(n.outcome, Outcome::Done);
         assert!(n.speak && !n.urgent);
@@ -1178,7 +1475,7 @@ mod tests {
         let n = b.notice(1).await;
         assert_eq!(
             n.speech,
-            "L'agent a échoué sur Jarvis : Les tests ne compilent pas."
+            "L'agent a échoué sur l'assistant : Les tests ne compilent pas."
         );
         assert_eq!(n.outcome, Outcome::Failed);
         assert!(n.speak && !n.urgent);
@@ -1192,7 +1489,7 @@ mod tests {
         let n = b.notice(1).await;
         assert_eq!(
             n.speech,
-            "L'agent a échoué sur Jarvis : il s'est arrêté avec le code 3."
+            "L'agent a échoué sur l'assistant : il s'est arrêté avec le code 3."
         );
     }
 
@@ -1222,7 +1519,7 @@ mod tests {
         let n = b.notice(1).await;
         assert_eq!(
             n.speech,
-            "La tâche sur Jarvis a dépassé 45 minutes : je l'ai arrêtée."
+            "La tâche sur l'assistant a dépassé 45 minutes : je l'ai arrêtée."
         );
         assert_eq!(n.outcome, Outcome::Failed);
         assert!(n.speak);
@@ -1236,7 +1533,7 @@ mod tests {
         b.status_contains("dernière action").await;
         assert_eq!(
             b.stop(None).await,
-            Reply::done("J'arrête la tâche sur Jarvis. Le travail reste sur sa branche.")
+            Reply::done("J'arrête la tâche sur l'assistant. Le travail reste sur sa branche.")
         );
         let n = b.notice(1).await;
         assert!(!n.speak);
@@ -1244,7 +1541,7 @@ mod tests {
         assert_eq!(b.records()[0].state, TaskState::Stopped);
         assert_eq!(
             b.status().await,
-            "Aucune tâche en cours. La dernière, sur Jarvis, a été arrêtée."
+            "Aucune tâche en cours. La dernière, sur l'assistant, a été arrêtée."
         );
     }
 
@@ -1266,8 +1563,8 @@ mod tests {
         assert_eq!(
             b.stop(None).await,
             Reply::new(
-                "Deux tâches tournent, sur Jarvis et Mawena : \
-                 dites « arrête la tâche Jarvis », par exemple."
+                "Deux tâches tournent, sur l'assistant et Mawena : \
+                 dites « arrête la tâche Mawena », par exemple."
             )
         );
         assert!(b.announcer.notices().is_empty());
@@ -1292,13 +1589,13 @@ mod tests {
         b.start("Jarvis").await;
         assert_eq!(
             b.status_contains("dernière action").await,
-            "La tâche sur Jarvis tourne depuis moins d'une minute ; \
+            "La tâche sur l'assistant tourne depuis moins d'une minute ; \
              dernière action : lance « cargo test --workspace »."
         );
         b.clock.store(T0 + 12 * 60 + 5, Ordering::SeqCst);
         assert_eq!(
             b.status().await,
-            "La tâche sur Jarvis tourne depuis 12 minutes ; \
+            "La tâche sur l'assistant tourne depuis 12 minutes ; \
              dernière action : lance « cargo test --workspace »."
         );
         b.stop(None).await;
@@ -1312,7 +1609,7 @@ mod tests {
         b.notice(1).await;
         assert_eq!(
             b.status().await,
-            "Aucune tâche en cours. La dernière, sur Jarvis, est terminée : J'ai fini les tests."
+            "Aucune tâche en cours. La dernière, sur l'assistant, est terminée : J'ai fini les tests."
         );
     }
 
@@ -1332,13 +1629,16 @@ mod tests {
         let n = b.notice(1).await;
         assert_eq!(
             n.speech,
-            "Attention : la branche develop a été modifiée. Vérifiez le projet Jarvis."
+            "Attention : la branche develop a changé pendant la tâche. Si ce n'est pas vous, vérifiez l'assistant."
         );
         assert!(n.urgent && n.speak);
         assert_eq!(n.outcome, Outcome::Failed);
         let r = &b.records()[0];
         assert_eq!(r.state, TaskState::Failed);
-        assert_eq!(r.violations, ["la branche develop a été modifiée"]);
+        assert_eq!(
+            r.violations,
+            ["la branche develop a changé pendant la tâche"]
+        );
         // Aucun commit de Jarvis par-dessus.
         assert_eq!(
             git(&b.jarvis, &["log", "-1", "--format=%s", &r.branch]),
@@ -1381,6 +1681,409 @@ mod tests {
         assert!(notices[0].body.contains("claude --resume abc"));
         assert_eq!(reg.load_all()[0].state, TaskState::Interrupted);
         assert_eq!(recover_interrupted(&reg, &a, 100), 0);
+    }
+
+    /// Exécutant qui montre chaque commande à `hook` avant de la lancer pour de vrai.
+    struct HookRunner<F>(F);
+
+    impl<F: Fn(&[String]) + Send + Sync> CommandRunner for HookRunner<F> {
+        fn run(&self, program: &str, args: &[String]) -> std::io::Result<crate::CommandOutput> {
+            (self.0)(args);
+            SystemRunner.run(program, args)
+        }
+
+        fn spawn_detached(&self, program: &str, args: &[String]) -> std::io::Result<()> {
+            SystemRunner.spawn_detached(program, args)
+        }
+    }
+
+    fn hooked(hook: impl Fn(&[String]) + Send + Sync + 'static) -> Arc<dyn CommandRunner> {
+        Arc::new(HookRunner(hook))
+    }
+
+    /// Sous-commande git (`commit`, `for-each-ref`…) et dossier `-C`.
+    fn sub(args: &[String]) -> Option<(&str, &str)> {
+        let i = args.iter().position(|a| a == "-C")?;
+        Some((args.get(i + 2)?.as_str(), args.get(i + 1)?.as_str()))
+    }
+
+    fn is_sub(args: &[String], name: &str) -> bool {
+        sub(args).is_some_and(|(s, _)| s == name)
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[tokio::test]
+    async fn hooks_du_projet_jamais_lances() {
+        let hooks = tempfile::tempdir().unwrap();
+        let marker = hooks.path().join("lance");
+        let hook = hooks.path().join("hook.sh");
+        std::fs::write(
+            &hook,
+            format!(
+                "#!/bin/sh\necho \"$0\" >> {}\n",
+                shell_quote(&marker.display().to_string())
+            ),
+        )
+        .unwrap();
+        // L'agent ajoute des hooks suivis (comme .husky) et réussit.
+        let body = format!(
+            "mkdir -p .githooks\n\
+             for h in pre-commit prepare-commit-msg commit-msg post-commit; do\n\
+               install -m 755 {} .githooks/$h\n\
+             done\n{}",
+            shell_quote(&hook.display().to_string()),
+            successful_agent()
+        );
+        let b = bench(&body);
+        git(&b.jarvis, &["config", "core.hooksPath", ".githooks"]);
+        b.start("Jarvis").await;
+        let n = b.notice(1).await;
+        assert_eq!(n.outcome, Outcome::Done, "{}", n.speech);
+        assert!(
+            !marker.exists(),
+            "{}",
+            std::fs::read_to_string(&marker).unwrap()
+        );
+        let r = &b.records()[0];
+        assert_eq!(
+            git(&b.jarvis, &["log", "-1", "--format=%s", &r.branch]),
+            "wip(jarvis): finis les tests du projet Jarvis"
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_relu_voit_une_branche_deplacee() {
+        // Pendant le commit, quelque chose déplace develop.
+        let moved = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = moved.clone();
+        let runner = hooked(move |args| {
+            if let Some(("rev-list", dir)) = sub(args)
+                && !flag.swap(true, Ordering::SeqCst)
+            {
+                git(
+                    Path::new(dir),
+                    &["update-ref", "refs/heads/develop", "HEAD"],
+                );
+            }
+        });
+        let b = bench_runner(&successful_agent(), runner, EndLimits::default());
+        b.start("Jarvis").await;
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            "Attention : la branche develop a changé pendant la tâche. \
+             Si ce n'est pas vous, vérifiez l'assistant."
+        );
+        assert!(n.urgent && n.speak);
+        assert!(
+            n.body.contains("Changements : refs/heads/develop"),
+            "{}",
+            n.body
+        );
+        let r = &b.records()[0];
+        assert_eq!(r.state, TaskState::Failed);
+        assert_eq!(
+            git(&b.jarvis, &["log", "-1", "--format=%s", &r.branch]),
+            "wip(jarvis): finis les tests du projet Jarvis"
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_interrompue_annoncee_en_urgence() {
+        // La vérification après coup plante (JoinError).
+        let calls = Arc::new(AtomicU64::new(0));
+        let count = calls.clone();
+        let runner = hooked(move |args| {
+            if is_sub(args, "for-each-ref") && count.fetch_add(1, Ordering::SeqCst) == 1 {
+                panic!("git en panne (test)");
+            }
+        });
+        let b = bench_runner(&successful_agent(), runner, EndLimits::default());
+        b.start("Jarvis").await;
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            "Je n'ai pas pu vérifier la tâche sur l'assistant : vérifiez le projet."
+        );
+        assert!(n.urgent && n.speak);
+        assert_eq!(n.outcome, Outcome::Failed);
+        assert_eq!(b.records()[0].state, TaskState::Failed);
+        assert_eq!(
+            b.status().await,
+            "Aucune tâche en cours. La dernière, sur l'assistant, a échoué."
+        );
+        // Aucun commit sans vérification.
+        let r = &b.records()[0];
+        assert_eq!(git(&b.jarvis, &["rev-parse", &r.branch]), r.base_sha);
+    }
+
+    /// Chaque pid (un par ligne) disparaît (le temps d'être récolté).
+    fn assert_dead(pids: &str) {
+        for pid in pids.lines() {
+            let alive = || {
+                std::process::Command::new("kill")
+                    .args(["-0", pid])
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            };
+            let mut tries = 0;
+            while alive() && tries < 300 {
+                std::thread::sleep(ms(10));
+                tries += 1;
+            }
+            assert!(!alive(), "processus {pid} encore là");
+        }
+    }
+
+    #[tokio::test]
+    async fn commit_trop_long_libere_la_place() {
+        let end = EndLimits {
+            commit: ms(500),
+            ..EndLimits::default()
+        };
+        let b = bench_runner(&successful_agent(), Arc::new(SystemRunner), end);
+        // Signature qui ne rend jamais la main.
+        let pids = b.work.path().join("pids");
+        let signer = b.work.path().join("signe.sh");
+        std::fs::write(
+            &signer,
+            format!(
+                "#!/bin/sh\necho $$ >> '{0}'\nsleep 1000 &\necho $! >> '{0}'\nwait\n",
+                pids.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&signer, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for (k, v) in [
+            ("commit.gpgsign", "true"),
+            ("gpg.format", "ssh"),
+            ("user.signingkey", "/dev/null"),
+            ("gpg.ssh.program", signer.to_str().unwrap()),
+        ] {
+            git(&b.jarvis, &["config", k, v]);
+        }
+        b.start("Jarvis").await;
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            format!(
+                "La tâche sur l'assistant est terminée : J'ai fini les tests. 2 fichiers modifiés. {NOT_SAVED}"
+            )
+        );
+        assert_dead(&std::fs::read_to_string(&pids).unwrap());
+        // La place est rendue.
+        assert_eq!(b.start("Jarvis").await.outcome, Outcome::Done);
+        b.notice(2).await;
+    }
+
+    #[tokio::test]
+    async fn filet_rend_la_place_si_git_ne_repond_plus() {
+        let runner = hooked(|args| {
+            if is_sub(args, "commit") {
+                std::thread::sleep(ms(1500));
+            }
+        });
+        let end = EndLimits {
+            step: ms(300),
+            ..EndLimits::default()
+        };
+        let b = bench_runner(&successful_agent(), runner, end);
+        b.start("Jarvis").await;
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            "Je n'ai pas pu vérifier la tâche sur l'assistant : vérifiez le projet."
+        );
+        assert!(n.urgent);
+        assert!(b.status().await.starts_with("Aucune tâche en cours."));
+    }
+
+    #[tokio::test]
+    async fn depart_tardif_annonce() {
+        let runner = hooked(|args| {
+            if is_sub(args, "worktree") {
+                std::thread::sleep(ms(300));
+            }
+        });
+        let b = bench_runner(&long_agent(), runner, EndLimits::default());
+        let call = b.skill.call(
+            "agent_start",
+            json!({"project": "Jarvis", "instruction": "finis les tests du projet Jarvis"}),
+        );
+        // Le cerveau abandonne l'appel (délai des compétences).
+        assert!(tokio::time::timeout(ms(50), call).await.is_err());
+        let n = b.notice(1).await;
+        assert_eq!(n.speech, STARTED);
+        assert!(n.speak && !n.urgent);
+        assert_eq!(n.outcome, Outcome::Done);
+        b.stop(None).await;
+        b.notice(2).await;
+    }
+
+    #[tokio::test]
+    async fn refus_tardif_annonce() {
+        let runner = hooked(|args| {
+            if is_sub(args, "status") {
+                std::thread::sleep(ms(300));
+            }
+        });
+        let b = bench_runner(&successful_agent(), runner, EndLimits::default());
+        std::fs::write(b.jarvis.join("lib.rs"), "modifié\n").unwrap();
+        let call = b.skill.call(
+            "agent_start",
+            json!({"project": "Jarvis", "instruction": "finis les tests"}),
+        );
+        assert!(tokio::time::timeout(ms(50), call).await.is_err());
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            "L'assistant a des modifications non enregistrées : je ne lance rien."
+        );
+        assert_eq!(n.outcome, Outcome::Failed);
+        assert!(n.speak);
+    }
+
+    #[tokio::test]
+    async fn arret_pendant_la_preparation() {
+        let runner = hooked(|args| {
+            if is_sub(args, "worktree") && args.iter().any(|a| a == "add") {
+                std::thread::sleep(ms(400));
+            }
+        });
+        let b = bench_runner(&long_agent(), runner, EndLimits::default());
+        let (started, stopped) = tokio::join!(b.start("Jarvis"), async {
+            tokio::time::sleep(ms(150)).await;
+            b.stop(None).await
+        });
+        assert_eq!(
+            stopped,
+            Reply::done("J'annule la tâche sur l'assistant avant son départ.")
+        );
+        assert_eq!(
+            started,
+            Reply::new("Tâche annulée avant son départ : sa branche est retirée.")
+        );
+        assert!(!b.claude_ran());
+        assert!(b.worktrees().is_empty(), "{:?}", b.worktrees());
+        assert_eq!(branches(&b.jarvis), ["develop", "main"]);
+        assert!(b.records().is_empty());
+        assert!(b.announcer.notices().is_empty());
+        // Place rendue.
+        assert_eq!(b.start("Jarvis").await, Reply::done(STARTED));
+        b.stop(None).await;
+        b.notice(1).await;
+    }
+
+    #[tokio::test]
+    async fn arret_apres_la_fin_du_processus() {
+        // Le processus a fini ; la vérification traîne.
+        let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let calls = Arc::new(AtomicU64::new(0));
+        let (flag, count) = (entered.clone(), calls.clone());
+        let runner = hooked(move |args| {
+            if is_sub(args, "for-each-ref") && count.fetch_add(1, Ordering::SeqCst) == 1 {
+                flag.store(true, Ordering::SeqCst);
+                std::thread::sleep(ms(500));
+            }
+        });
+        let b = bench_runner(&successful_agent(), runner, EndLimits::default());
+        b.start("Jarvis").await;
+        for _ in 0..500 {
+            if entered.load(Ordering::SeqCst) {
+                break;
+            }
+            tokio::time::sleep(ms(10)).await;
+        }
+        assert!(entered.load(Ordering::SeqCst));
+        assert_eq!(
+            b.stop(None).await,
+            Reply::new(
+                "La tâche sur l'assistant vient de se terminer : \
+                 je vous annonce le résultat dans un instant."
+            )
+        );
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            "La tâche sur l'assistant est terminée : J'ai fini les tests. 2 fichiers modifiés."
+        );
+    }
+
+    #[tokio::test]
+    async fn silence_trop_long_dit_dans_le_suivi() {
+        let limits = Limits {
+            idle: ms(300),
+            ..short_limits()
+        };
+        let b = bench_with(&long_agent(), |s| s.idle_minutes = 30, limits);
+        b.start("Jarvis").await;
+        let n = b.notice(1).await;
+        assert_eq!(
+            n.speech,
+            "La tâche sur l'assistant ne donnait plus signe de vie depuis 30 minutes : \
+             je l'ai arrêtée."
+        );
+        assert_eq!(b.records()[0].state, TaskState::Stalled);
+        assert_eq!(
+            b.status().await,
+            "Aucune tâche en cours. La dernière, sur l'assistant, a été arrêtée : \
+             plus de signe de vie depuis 30 minutes."
+        );
+    }
+
+    #[tokio::test]
+    async fn nom_dit_jamais_le_mot_de_reveil() {
+        let b = bench(&successful_agent());
+        let n = {
+            b.start("Jarvis").await;
+            b.notice(1).await
+        };
+        assert!(!types::has_wake_word(&n.speech), "{}", n.speech);
+        assert!(!types::has_wake_word(&b.status().await));
+        // Le titre de la notification garde le vrai nom.
+        assert_eq!(n.title, "Tâche terminée : Jarvis");
+        assert!(n.body.contains("Projet : Jarvis"), "{}", n.body);
+        // Les autres projets gardent leur nom.
+        assert_eq!(
+            b.start("Mawena").await,
+            Reply::done(
+                "Bien. Je confie cela à Claude, sur une branche à part du projet Mawena. \
+                 Je vous préviens à la fin."
+            )
+        );
+        b.notice(2).await;
+    }
+
+    #[test]
+    fn violations_groupees_a_voix_haute() {
+        let v = |r: &str| Violation::RefChanged(r.into());
+        let b = "feature/jarvis-x";
+        assert_eq!(
+            violations_speech(
+                &[
+                    v("refs/heads/develop"),
+                    v("refs/tags/v1"),
+                    Violation::BaseLost
+                ],
+                b
+            ),
+            "la branche develop et le tag v1 ont changé pendant la tâche et \
+             la branche de la tâche ne part plus de sa base"
+        );
+        let many: Vec<Violation> = (0..5).map(|i| v(&format!("refs/heads/b{i}"))).collect();
+        assert_eq!(
+            violations_speech(&many, b),
+            "la branche b0, la branche b1 et 3 autres références ont changé pendant la tâche"
+        );
+        assert_eq!(
+            violations_speech(&[v("refs/remotes/origin/feature/jarvis-x")], b),
+            "la branche de la tâche a été poussée sur origin"
+        );
     }
 
     #[test]

@@ -2,12 +2,18 @@
 //!
 //! Fonctions synchrones (à appeler dans `spawn_blocking`), toujours `git -C <dossier>`.
 //! Rien n'est jamais poussé ni fusionné ; la copie de travail de Charles n'est pas touchée.
+//!
+//! Chaque git de Jarvis passe par `timeout` (tout le groupe est tué au délai),
+//! sans hooks ni fsmonitor du dépôt, sans demande de mot de passe. Dans le worktree
+//! d'une tâche, le dossier git est celui relevé à sa création : un fichier `.git`
+//! réécrit par l'agent n'est jamais suivi.
 
-use crate::agent::types::TaskId;
+use crate::agent::types::{TaskId, has_wake_word};
 use crate::runner::{CommandOutput, CommandRunner};
 use crate::text::fold;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// Adresse de push qui ne mène nulle part : aucun transport ne la connaît.
 const NO_PUSH_URL: &str = "jarvis-push-interdit://";
@@ -22,6 +28,23 @@ const REMOVED_VARS: &[&str] = &[
     "GIT_SSH",
     "GIT_CONFIG_PARAMETERS",
 ];
+
+/// Délai d'une commande git de Jarvis.
+pub const GIT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Délai du commit de fin (signature comprise).
+pub const COMMIT_TIMEOUT: Duration = Duration::from_secs(60);
+/// Après le délai : `TERM` au groupe, puis `KILL` après ce répit.
+const KILL_AFTER: &str = "--kill-after=5";
+
+/// Options de chaque git de Jarvis : ni hooks ni fsmonitor venus du dépôt.
+pub const SAFE_CONFIG: &[&str] = &[
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+];
+/// Environnement de chaque git de Jarvis : aucune demande qui bloque.
+const QUIET_ENV: &[&str] = &["GIT_TERMINAL_PROMPT=0", "SSH_ASKPASS_REQUIRE=never"];
 
 /// Mots retirés du nom de branche.
 const STOP_WORDS: &[&str] = &[
@@ -46,20 +69,24 @@ pub enum Refusal {
 
 impl Refusal {
     /// Phrase dite à Charles.
-    pub fn phrase(&self, project: &str) -> String {
+    pub fn phrase(&self, project: &crate::agent::types::SpokenName) -> String {
         match self {
-            Refusal::NotARepo => {
-                format!("Le dossier du projet {project} n'est pas un dépôt git : je ne lance rien.")
-            }
-            Refusal::Dirty { .. } => format!(
-                "Le projet {project} a des modifications non enregistrées : je ne lance rien."
+            Refusal::NotARepo => format!(
+                "Le dossier {} n'est pas un dépôt git : je ne lance rien.",
+                project.of_project()
             ),
-            Refusal::NoBase(base) => {
-                format!("Le projet {project} n'a pas de branche {base} : je ne lance rien.")
-            }
-            Refusal::Git(_) => {
-                format!("Git a échoué sur le projet {project} : je ne lance rien.")
-            }
+            Refusal::Dirty { .. } => format!(
+                "{} a des modifications non enregistrées : je ne lance rien.",
+                project.the_project_capitalized()
+            ),
+            Refusal::NoBase(base) => format!(
+                "{} n'a pas de branche {base} : je ne lance rien.",
+                project.the_project_capitalized()
+            ),
+            Refusal::Git(_) => format!(
+                "Git a échoué sur {} : je ne lance rien.",
+                project.the_project()
+            ),
         }
     }
 }
@@ -71,23 +98,64 @@ pub struct FlowNames {
     pub base: String,
     /// Préfixe des branches de fonctionnalité (`feature/`).
     pub prefix: String,
-    /// Branches que l'agent ne doit jamais déplacer.
+    /// Branches git flow principales (base, develop, main).
     pub protected: Vec<String>,
 }
 
-/// Lance `git -C dir args…`.
-fn git(r: &dyn CommandRunner, dir: &Path, args: &[&str]) -> std::io::Result<CommandOutput> {
-    let mut all = vec!["-C".to_string(), dir.display().to_string()];
+/// Worktree d'une tâche et son dossier git, relevé à la création.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskTree {
+    pub worktree: PathBuf,
+    pub git_dir: PathBuf,
+}
+
+/// Arguments de `timeout … env … git <options sûres> [extra] -C dir args…`.
+fn command(dir: &Path, limit: Duration, extra: &[String], args: &[&str]) -> Vec<String> {
+    let mut all = vec![
+        KILL_AFTER.to_string(),
+        format!("{:.3}s", limit.as_secs_f64()),
+        "env".to_string(),
+    ];
+    all.extend(QUIET_ENV.iter().map(|v| v.to_string()));
+    all.push("git".into());
+    all.extend(SAFE_CONFIG.iter().map(|v| v.to_string()));
+    all.extend(extra.iter().cloned());
+    all.push("-C".into());
+    all.push(dir.display().to_string());
     all.extend(args.iter().map(|a| a.to_string()));
-    r.run("git", &all)
+    all
+}
+
+/// Lance git dans `dir` (dépôt principal), borné par `GIT_TIMEOUT`.
+fn git(r: &dyn CommandRunner, dir: &Path, args: &[&str]) -> std::io::Result<CommandOutput> {
+    r.run("timeout", &command(dir, GIT_TIMEOUT, &[], args))
+}
+
+/// Lance git dans le worktree d'une tâche, avec son dossier git fixé.
+fn tree_git(
+    r: &dyn CommandRunner,
+    tree: &TaskTree,
+    limit: Duration,
+    args: &[&str],
+) -> std::io::Result<CommandOutput> {
+    let extra = [
+        format!("--git-dir={}", tree.git_dir.display()),
+        format!("--work-tree={}", tree.worktree.display()),
+    ];
+    r.run("timeout", &command(&tree.worktree, limit, &extra, args))
+}
+
+/// Sortie si la commande réussit, sans espaces finaux.
+fn ok_out(out: std::io::Result<CommandOutput>) -> Option<String> {
+    match out {
+        Ok(out) if out.success => Some(out.stdout.trim_end().to_string()),
+        _ => None,
+    }
 }
 
 /// Sortie de git si la commande réussit, sans espaces finaux.
 fn git_ok(r: &dyn CommandRunner, dir: &Path, args: &[&str]) -> Option<String> {
-    match git(r, dir, args) {
-        Ok(out) if out.success => Some(out.stdout.trim_end().to_string()),
-        _ => None,
-    }
+    ok_out(git(r, dir, args))
 }
 
 /// Valeur de config non vide.
@@ -199,8 +267,19 @@ fn ascii_word(word: &str) -> String {
 pub struct Prepared {
     pub branch: String,
     pub worktree: PathBuf,
+    /// Dossier git du worktree, relevé avant que l'agent n'y touche.
+    pub git_dir: PathBuf,
     /// SHA de la base au départ.
     pub base_sha: String,
+}
+
+impl Prepared {
+    pub fn tree(&self) -> TaskTree {
+        TaskTree {
+            worktree: self.worktree.clone(),
+            git_dir: self.git_dir.clone(),
+        }
+    }
 }
 
 /// Crée la branche `<prefix><slug>` (suffixe `-2`, `-3`… si elle existe) depuis
@@ -262,59 +341,78 @@ pub fn prepare(
     if !out.success {
         return Err(Refusal::Git("git worktree add a échoué".into()));
     }
+    let git_dir = git_ok(r, &worktree, &["rev-parse", "--absolute-git-dir"])
+        .filter(|d| !d.is_empty())
+        .map(PathBuf::from)
+        .ok_or_else(|| Refusal::Git("dossier git du worktree introuvable".into()))?;
     Ok(Prepared {
         branch,
         worktree,
+        git_dir,
         base_sha,
     })
+}
+
+/// Retire un worktree tout juste créé et sa branche, si elle n'a pas bougé de
+/// la base (tâche annulée avant son départ).
+pub fn discard(r: &dyn CommandRunner, repo: &Path, prepared: &Prepared) -> Result<(), String> {
+    let wt = prepared.worktree.display().to_string();
+    let full = format!("refs/heads/{}", prepared.branch);
+    for (args, what) in [
+        (
+            &["worktree", "remove", "--force", wt.as_str()][..],
+            "git worktree remove",
+        ),
+        (
+            &[
+                "update-ref",
+                "-d",
+                full.as_str(),
+                prepared.base_sha.as_str(),
+            ][..],
+            "git update-ref -d",
+        ),
+    ] {
+        let out = git(r, repo, args).map_err(|e| format!("git introuvable : {e}"))?;
+        if !out.success {
+            return Err(format!("{what} a échoué"));
+        }
+    }
+    Ok(())
 }
 
 /// Références relevées avant le lancement.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RefSnapshot {
-    /// Branche protégée → SHA (absente : `None`).
-    pub protected: BTreeMap<String, Option<String>>,
-    /// `refs/remotes/**` → SHA.
-    pub remotes: BTreeMap<String, String>,
+    /// `refs/heads/**`, `refs/tags/**` et `refs/remotes/**` → SHA.
+    pub refs: BTreeMap<String, String>,
 }
 
-/// SHA des branches protégées et références distantes.
-pub fn snapshot(r: &dyn CommandRunner, repo: &Path, protected: &[String]) -> RefSnapshot {
-    let protected = protected
-        .iter()
-        .map(|b| {
-            let full = format!("refs/heads/{b}");
-            let sha = git_ok(r, repo, &["rev-parse", "--verify", "--quiet", &full])
-                .filter(|s| !s.is_empty());
-            (b.clone(), sha)
-        })
-        .collect();
-    let remotes = git_ok(
+/// Toutes les branches, tags et références distantes ; `None` si git échoue.
+pub fn snapshot(r: &dyn CommandRunner, repo: &Path) -> Option<RefSnapshot> {
+    let out = git_ok(
         r,
         repo,
         &[
             "for-each-ref",
             "--format=%(refname) %(objectname)",
+            "refs/heads/",
+            "refs/tags/",
             "refs/remotes/",
         ],
-    )
-    .map(|out| {
-        lines(&out)
-            .filter_map(|l| l.split_once(' '))
-            .map(|(name, sha)| (name.to_string(), sha.to_string()))
-            .collect()
-    })
-    .unwrap_or_default();
-    RefSnapshot { protected, remotes }
+    )?;
+    let refs = lines(&out)
+        .filter_map(|l| l.split_once(' '))
+        .map(|(name, sha)| (name.to_string(), sha.to_string()))
+        .collect();
+    Some(RefSnapshot { refs })
 }
 
 /// Garde-fou enfreint pendant la tâche.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
-    /// Branche protégée déplacée, créée ou supprimée.
-    ProtectedMoved(String),
-    /// Référence distante nouvelle ou déplacée (`origin/…`) : poussée.
-    Pushed(String),
+    /// Branche, tag ou branche distante créé, déplacé ou supprimé (nom complet).
+    RefChanged(String),
     /// Le worktree n'est plus sur sa branche (`None` : HEAD détachée).
     BranchChanged {
         expected: String,
@@ -322,62 +420,123 @@ pub enum Violation {
     },
     /// La base n'est plus un ancêtre de la branche.
     BaseLost,
+    /// Le commit de Jarvis n'a pas la forme attendue (parent, branche).
+    CommitUnexpected,
 }
 
 impl Violation {
-    /// Phrase courte, sans majuscule ni point (« Attention : <phrase>. »).
-    pub fn phrase(&self) -> String {
+    /// Sujet dit pour une référence changée (« la branche develop »).
+    pub fn ref_subject(&self, task_branch: &str) -> Option<String> {
+        let Violation::RefChanged(full) = self else {
+            return None;
+        };
+        if let Some(b) = full.strip_prefix("refs/heads/") {
+            return Some(match speakable(b) {
+                Some(b) => format!("la branche {b}"),
+                None => "une branche d'une autre tâche".into(),
+            });
+        }
+        if let Some(t) = full.strip_prefix("refs/tags/") {
+            return Some(match speakable(t) {
+                Some(t) => format!("le tag {t}"),
+                None => "un tag".into(),
+            });
+        }
+        let short = full.strip_prefix("refs/remotes/").unwrap_or(full);
+        // Branche de la tâche sur un remote : poussée, traitée à part.
+        if short.split_once('/').is_some_and(|(_, b)| b == task_branch) {
+            return None;
+        }
+        Some(match speakable(short) {
+            Some(s) => format!("la branche distante {s}"),
+            None => "une branche distante".into(),
+        })
+    }
+
+    /// Phrase courte, sans majuscule ni point (« Attention : <phrase>. »),
+    /// jamais avec le mot de réveil.
+    pub fn phrase(&self, task_branch: &str) -> String {
+        if let Some(subject) = self.ref_subject(task_branch) {
+            return format!("{subject} a changé pendant la tâche");
+        }
         match self {
-            Violation::ProtectedMoved(b) => format!("la branche {b} a été modifiée"),
-            Violation::Pushed(r) => format!("la branche {r} a été poussée"),
+            Violation::RefChanged(full) => {
+                let short = full.strip_prefix("refs/remotes/").unwrap_or(full);
+                let remote = short.split_once('/').map_or(short, |(r, _)| r);
+                match speakable(remote) {
+                    Some(remote) => format!("la branche de la tâche a été poussée sur {remote}"),
+                    None => "la branche de la tâche a été poussée".into(),
+                }
+            }
             Violation::BranchChanged {
-                expected,
-                actual: Some(a),
-            } => format!("l'agent a quitté la branche {expected} pour {a}"),
-            Violation::BranchChanged {
-                expected,
-                actual: None,
-            } => format!("l'agent a quitté la branche {expected}"),
+                actual: Some(a), ..
+            } => match speakable(a) {
+                Some(a) => format!("l'agent a quitté la branche de la tâche pour {a}"),
+                None => "l'agent a quitté la branche de la tâche".into(),
+            },
+            Violation::BranchChanged { actual: None, .. } => {
+                "l'agent a quitté la branche de la tâche".into()
+            }
             Violation::BaseLost => "la branche de la tâche ne part plus de sa base".into(),
+            Violation::CommitUnexpected => {
+                "le commit de fin n'est pas celui que j'attendais".into()
+            }
+        }
+    }
+
+    /// Détail écrit (notification) : nom complet de la référence.
+    pub fn detail(&self) -> Option<String> {
+        match self {
+            Violation::RefChanged(full) => Some(full.clone()),
+            Violation::BranchChanged {
+                actual: Some(a), ..
+            } => Some(format!("HEAD : {a}")),
+            _ => None,
         }
     }
 }
 
-/// Vérification après coup : branches protégées, références distantes, branche
-/// du worktree, base toujours ancêtre.
+/// Nom dicible : `None` s'il contient le mot de réveil.
+fn speakable(name: &str) -> Option<&str> {
+    (!has_wake_word(name)).then_some(name)
+}
+
+/// Vérification après coup : toute branche, tag ou branche distante changé (sauf
+/// la branche de la tâche), branche du worktree, base toujours ancêtre. `Err` si
+/// la vérification n'a pas pu se faire.
 pub fn verify(
     r: &dyn CommandRunner,
     repo: &Path,
-    worktree: &Path,
+    tree: &TaskTree,
     before: &RefSnapshot,
     branch: &str,
     base_sha: &str,
-) -> Vec<Violation> {
-    let protected: Vec<String> = before.protected.keys().cloned().collect();
-    let after = snapshot(r, repo, &protected);
-    let mut out = Vec::new();
-    for (b, sha) in &before.protected {
-        if after.protected.get(b) != Some(sha) {
-            out.push(Violation::ProtectedMoved(b.clone()));
-        }
-    }
-    for (name, sha) in &after.remotes {
-        if before.remotes.get(name) != Some(sha) {
-            let short = name.strip_prefix("refs/remotes/").unwrap_or(name);
-            out.push(Violation::Pushed(short.to_string()));
-        }
-    }
-    let actual = git_ok(r, worktree, &["symbolic-ref", "--quiet", "--short", "HEAD"])
-        .filter(|s| !s.is_empty());
+) -> Result<Vec<Violation>, String> {
+    let after = snapshot(r, repo).ok_or("relecture des références impossible")?;
+    let own = format!("refs/heads/{branch}");
+    let names: BTreeSet<&String> = before.refs.keys().chain(after.refs.keys()).collect();
+    let mut out: Vec<Violation> = names
+        .into_iter()
+        .filter(|name| **name != own && before.refs.get(*name) != after.refs.get(*name))
+        .map(|name| Violation::RefChanged(name.clone()))
+        .collect();
+    let actual = ok_out(tree_git(
+        r,
+        tree,
+        GIT_TIMEOUT,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    ))
+    .filter(|s| !s.is_empty());
     if actual.as_deref() != Some(branch) {
         out.push(Violation::BranchChanged {
             expected: branch.to_string(),
             actual,
         });
     }
-    let ancestor = git(
+    let ancestor = tree_git(
         r,
-        worktree,
+        tree,
+        GIT_TIMEOUT,
         &["merge-base", "--is-ancestor", base_sha, "HEAD"],
     )
     .map(|o| o.success)
@@ -385,7 +544,7 @@ pub fn verify(
     if !ancestor {
         out.push(Violation::BaseLost);
     }
-    out
+    Ok(out)
 }
 
 /// Environnement git de l'agent.
@@ -434,53 +593,131 @@ pub fn no_push_env(r: &dyn CommandRunner, repo: &Path) -> GitEnv {
 }
 
 /// Fichiers changés depuis la base (enregistrés ou non) et nouveaux fichiers non
-/// ignorés, triés.
-pub fn changed_files(r: &dyn CommandRunner, worktree: &Path, base_sha: &str) -> Vec<String> {
+/// ignorés, triés. `Err` si git échoue.
+pub fn changed_files(
+    r: &dyn CommandRunner,
+    tree: &TaskTree,
+    base_sha: &str,
+) -> Result<Vec<String>, String> {
     let mut files = BTreeSet::new();
     for args in [
         &["diff", "--name-only", "-z", base_sha][..],
         &["ls-files", "-z", "--others", "--exclude-standard"][..],
     ] {
-        if let Ok(out) = git(r, worktree, args)
-            && out.success
-        {
-            files.extend(
+        match tree_git(r, tree, GIT_TIMEOUT, args) {
+            Ok(out) if out.success => files.extend(
                 out.stdout
                     .split('\0')
                     .filter(|f| !f.is_empty())
                     .map(str::to_string),
-            );
+            ),
+            _ => return Err(format!("git {} a échoué", args[0])),
         }
     }
-    files.into_iter().collect()
+    Ok(files.into_iter().collect())
 }
 
-/// Un seul commit de tout le travail, avec la config git du dépôt (identité et
-/// signature comprises), sans ligne d'attribution.
-pub fn commit_all(r: &dyn CommandRunner, worktree: &Path, message: &str) -> Result<(), String> {
-    for (args, what) in [
-        (&["add", "-A"][..], "git add"),
-        (&["commit", "-q", "-m", message][..], "git commit"),
+/// Un seul commit de tout le travail, avec la config git de Charles (identité et
+/// signature comprises), sans hooks ni ligne d'attribution. Le commit est borné
+/// par `limit`. Renvoie le SHA de HEAD avant le commit.
+pub fn commit_all(
+    r: &dyn CommandRunner,
+    tree: &TaskTree,
+    message: &str,
+    limit: Duration,
+) -> Result<String, String> {
+    let parent = ok_out(tree_git(
+        r,
+        tree,
+        GIT_TIMEOUT,
+        &["rev-parse", "--verify", "--quiet", "HEAD"],
+    ))
+    .filter(|s| !s.is_empty())
+    .ok_or("HEAD introuvable")?;
+    for (args, what, limit) in [
+        (&["add", "-A"][..], "git add", GIT_TIMEOUT),
+        (
+            &["commit", "-q", "--no-verify", "-m", message][..],
+            "git commit",
+            limit,
+        ),
     ] {
-        let out = git(r, worktree, args).map_err(|e| format!("git introuvable : {e}"))?;
+        let out = tree_git(r, tree, limit, args).map_err(|e| format!("git introuvable : {e}"))?;
         if !out.success {
             return Err(format!("{what} a échoué"));
         }
     }
-    Ok(())
+    Ok(parent)
+}
+
+/// Après le commit de Jarvis : la branche de la tâche porte un nouveau commit
+/// dont le seul parent est `parent`, et le worktree est toujours dessus.
+pub fn check_commit(
+    r: &dyn CommandRunner,
+    tree: &TaskTree,
+    branch: &str,
+    parent: &str,
+) -> Vec<Violation> {
+    let mut out = Vec::new();
+    let full = format!("refs/heads/{branch}");
+    let parents = ok_out(tree_git(
+        r,
+        tree,
+        GIT_TIMEOUT,
+        &["rev-list", "--parents", "-n", "1", &full],
+    ))
+    .unwrap_or_default();
+    let shas: Vec<&str> = parents.split_whitespace().collect();
+    if !matches!(shas.as_slice(), [new, p] if *new != parent && *p == parent) {
+        out.push(Violation::CommitUnexpected);
+    }
+    let actual = ok_out(tree_git(
+        r,
+        tree,
+        GIT_TIMEOUT,
+        &["symbolic-ref", "--quiet", "--short", "HEAD"],
+    ))
+    .filter(|s| !s.is_empty());
+    if actual.as_deref() != Some(branch) {
+        out.push(Violation::BranchChanged {
+            expected: branch.to_string(),
+            actual,
+        });
+    }
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent::testing::{git, temp_repo};
+    use crate::agent::types::SpokenName;
     use crate::runner::{CommandOutput, FakeRunner, SystemRunner};
+    use std::os::unix::fs::PermissionsExt;
     use std::process::Command;
 
     const R: SystemRunner = SystemRunner;
 
     fn id() -> TaskId {
         TaskId("0123abcd-4567-89ef".into())
+    }
+
+    fn named(name: &str) -> SpokenName {
+        SpokenName::Name(name.into())
+    }
+
+    /// Script exécutable `path` (`#!/bin/sh` + `body`).
+    fn script(path: &Path, body: &str) {
+        std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn snap(repo: &Path) -> RefSnapshot {
+        snapshot(&R, repo).expect("relevé des références")
+    }
+
+    fn check(repo: &Path, p: &Prepared, before: &RefSnapshot) -> Vec<Violation> {
+        verify(&R, repo, &p.tree(), before, &p.branch, &p.base_sha).unwrap()
     }
 
     /// Dépôt temporaire et son worktree de tâche.
@@ -555,8 +792,12 @@ mod tests {
         let refusal = check_clean(&R, &repo).unwrap_err();
         assert_eq!(refusal, Refusal::Dirty { files: 2 });
         assert_eq!(
-            refusal.phrase("Jarvis"),
-            "Le projet Jarvis a des modifications non enregistrées : je ne lance rien."
+            refusal.phrase(&named("Mawena")),
+            "Le projet Mawena a des modifications non enregistrées : je ne lance rien."
+        );
+        assert_eq!(
+            refusal.phrase(&SpokenName::Article("l'assistant".into())),
+            "L'assistant a des modifications non enregistrées : je ne lance rien."
         );
     }
 
@@ -580,7 +821,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let refusal = check_clean(&R, dir.path()).unwrap_err();
         assert_eq!(refusal, Refusal::NotARepo);
-        assert!(refusal.phrase("Mawena").contains("Mawena"));
+        assert_eq!(
+            refusal.phrase(&named("Mawena")),
+            "Le dossier du projet Mawena n'est pas un dépôt git : je ne lance rien."
+        );
         let absent = dir.path().join("absent");
         assert_eq!(check_clean(&R, &absent), Err(Refusal::NotARepo));
     }
@@ -592,7 +836,7 @@ mod tests {
         let worktrees = dir.path().join("worktrees");
         let refusal = prepare(&R, &repo, &names, "jarvis-x", &worktrees, &id()).unwrap_err();
         assert_eq!(refusal, Refusal::NoBase("inexistante".into()));
-        assert!(refusal.phrase("Jarvis").contains("inexistante"));
+        assert!(refusal.phrase(&named("Mawena")).contains("inexistante"));
         assert!(!worktrees.exists() || std::fs::read_dir(&worktrees).unwrap().count() == 0);
         assert_eq!(git(&repo, &["branch", "--list", "feature/*"]), "");
     }
@@ -778,7 +1022,7 @@ mod tests {
     fn environnement_neutralise_les_identifiants() {
         let r = FakeRunner::new();
         r.respond(
-            "git",
+            "timeout",
             CommandOutput {
                 success: true,
                 stdout: "origin\namont\n".into(),
@@ -812,15 +1056,18 @@ mod tests {
     #[test]
     fn violation_develop_deplacee_signalee() {
         let (_dir, repo, p) = prepared();
-        let names = flow_names(&R, &repo, None);
-        let before = snapshot(&R, &repo, &names.protected);
+        let before = snap(&repo);
         std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
         git(&p.worktree, &["commit", "-qam", "travail"]);
         let head = git(&p.worktree, &["rev-parse", "HEAD"]);
         git(&repo, &["update-ref", "refs/heads/develop", &head]);
-        let v = verify(&R, &repo, &p.worktree, &before, &p.branch, &p.base_sha);
-        assert_eq!(v, vec![Violation::ProtectedMoved("develop".into())]);
-        assert_eq!(v[0].phrase(), "la branche develop a été modifiée");
+        let v = check(&repo, &p, &before);
+        assert_eq!(v, vec![Violation::RefChanged("refs/heads/develop".into())]);
+        assert_eq!(
+            v[0].phrase(&p.branch),
+            "la branche develop a changé pendant la tâche"
+        );
+        assert_eq!(v[0].detail().as_deref(), Some("refs/heads/develop"));
     }
 
     #[test]
@@ -829,21 +1076,72 @@ mod tests {
         let bare = local_remote(dir.path(), &repo);
         let names = flow_names(&R, &repo, None);
         let p = prepare(&R, &repo, &names, "jarvis-p", &dir.path().join("w"), &id()).unwrap();
-        let before = snapshot(&R, &repo, &names.protected);
+        let before = snap(&repo);
         git(&p.worktree, &["push", "-q", "origin", &p.branch]);
         assert!(branch_exists(&bare, &p.branch));
-        let v = verify(&R, &repo, &p.worktree, &before, &p.branch, &p.base_sha);
-        assert_eq!(v, vec![Violation::Pushed("origin/feature/jarvis-p".into())]);
-        assert!(v[0].phrase().contains("origin/feature/jarvis-p"));
+        let v = check(&repo, &p, &before);
+        assert_eq!(
+            v,
+            vec![Violation::RefChanged(
+                "refs/remotes/origin/feature/jarvis-p".into()
+            )]
+        );
+        // Jamais le mot de réveil dans la phrase dite.
+        assert_eq!(
+            v[0].phrase(&p.branch),
+            "la branche de la tâche a été poussée sur origin"
+        );
+    }
+
+    #[test]
+    fn toutes_les_branches_et_tags_surveilles() {
+        let (_dir, repo, p) = prepared();
+        git(&repo, &["branch", "release/x"]);
+        git(&repo, &["branch", "feature/jarvis-ancienne"]);
+        git(&repo, &["branch", "hotfix/vieux"]);
+        let before = snap(&repo);
+        assert!(before.refs.contains_key("refs/heads/release/x"));
+        // Travail normal sur la branche de la tâche : rien.
+        std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
+        git(&p.worktree, &["commit", "-qam", "travail"]);
+        assert_eq!(check(&repo, &p, &before), vec![]);
+        // Branche release déplacée, tag créé, branches supprimées.
+        let head = git(&p.worktree, &["rev-parse", "HEAD"]);
+        git(&repo, &["update-ref", "refs/heads/release/x", &head]);
+        git(&repo, &["tag", "v9.9", &head]);
+        git(&repo, &["branch", "-D", "hotfix/vieux"]);
+        git(&repo, &["branch", "-D", "feature/jarvis-ancienne"]);
+        let v = check(&repo, &p, &before);
+        assert_eq!(
+            v,
+            vec![
+                Violation::RefChanged("refs/heads/feature/jarvis-ancienne".into()),
+                Violation::RefChanged("refs/heads/hotfix/vieux".into()),
+                Violation::RefChanged("refs/heads/release/x".into()),
+                Violation::RefChanged("refs/tags/v9.9".into()),
+            ]
+        );
+        let phrases: Vec<String> = v.iter().map(|x| x.phrase(&p.branch)).collect();
+        assert_eq!(
+            phrases,
+            [
+                "une branche d'une autre tâche a changé pendant la tâche",
+                "la branche hotfix/vieux a changé pendant la tâche",
+                "la branche release/x a changé pendant la tâche",
+                "le tag v9.9 a changé pendant la tâche",
+            ]
+        );
+        for phrase in &phrases {
+            assert!(!has_wake_word(phrase), "{phrase}");
+        }
     }
 
     #[test]
     fn violation_changement_de_branche() {
         let (_dir, repo, p) = prepared();
-        let names = flow_names(&R, &repo, None);
-        let before = snapshot(&R, &repo, &names.protected);
+        let before = snap(&repo);
         git(&p.worktree, &["switch", "-q", "--orphan", "ailleurs"]);
-        let v = verify(&R, &repo, &p.worktree, &before, &p.branch, &p.base_sha);
+        let v = check(&repo, &p, &before);
         assert!(
             v.contains(&Violation::BranchChanged {
                 expected: p.branch.clone(),
@@ -853,8 +1151,26 @@ mod tests {
         );
         assert!(v.contains(&Violation::BaseLost), "{v:?}");
         for x in &v {
-            assert!(!x.phrase().is_empty());
+            assert!(!x.phrase(&p.branch).is_empty());
+            assert!(!has_wake_word(&x.phrase(&p.branch)));
         }
+    }
+
+    #[test]
+    fn verification_impossible_signalee() {
+        let (_dir, repo, p) = prepared();
+        let before = snap(&repo);
+        let r = FakeRunner::new();
+        r.respond(
+            "timeout",
+            CommandOutput {
+                success: false,
+                stdout: String::new(),
+            },
+        );
+        assert!(verify(&r, &repo, &p.tree(), &before, &p.branch, &p.base_sha).is_err());
+        assert!(changed_files(&r, &p.tree(), &p.base_sha).is_err());
+        assert!(snapshot(&r, &repo).is_none());
     }
 
     #[test]
@@ -863,20 +1179,20 @@ mod tests {
         local_remote(dir.path(), &repo);
         let names = flow_names(&R, &repo, None);
         let p = prepare(&R, &repo, &names, "jarvis-n", &dir.path().join("w"), &id()).unwrap();
-        let before = snapshot(&R, &repo, &names.protected);
+        let before = snap(&repo);
         std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
         std::fs::write(p.worktree.join("neuf.rs"), "// neuf\n").unwrap();
-        commit_all(&R, &p.worktree, "wip(jarvis): essai").unwrap();
-        assert_eq!(
-            verify(&R, &repo, &p.worktree, &before, &p.branch, &p.base_sha),
-            vec![]
-        );
+        let parent = commit_all(&R, &p.tree(), "wip(jarvis): essai", COMMIT_TIMEOUT).unwrap();
+        assert_eq!(parent, p.base_sha);
+        assert_eq!(check_commit(&R, &p.tree(), &p.branch, &parent), vec![]);
+        assert_eq!(check(&repo, &p, &before), vec![]);
     }
 
     #[test]
     fn fichiers_modifies_comptes() {
         let (_dir, _repo, p) = prepared();
-        assert!(changed_files(&R, &p.worktree, &p.base_sha).is_empty());
+        let tree = p.tree();
+        assert!(changed_files(&R, &tree, &p.base_sha).unwrap().is_empty());
         std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
         git(&p.worktree, &["commit", "-qam", "un"]);
         std::fs::write(p.worktree.join("README.md"), "changé\n").unwrap();
@@ -886,7 +1202,7 @@ mod tests {
         std::fs::create_dir(p.worktree.join("cible")).unwrap();
         std::fs::write(p.worktree.join("cible/ignoré.o"), "x").unwrap();
         assert_eq!(
-            changed_files(&R, &p.worktree, &p.base_sha),
+            changed_files(&R, &tree, &p.base_sha).unwrap(),
             [".gitignore", "README.md", "lib.rs", "src/neuf.rs"]
         );
     }
@@ -896,7 +1212,13 @@ mod tests {
         let (_dir, repo, p) = prepared();
         std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
         std::fs::write(p.worktree.join("neuf.rs"), "// neuf\n").unwrap();
-        commit_all(&R, &p.worktree, "wip(jarvis): finis les tests").unwrap();
+        commit_all(
+            &R,
+            &p.tree(),
+            "wip(jarvis): finis les tests",
+            COMMIT_TIMEOUT,
+        )
+        .unwrap();
         let body = git(&p.worktree, &["log", "-1", "--format=%B"]);
         assert_eq!(body, "wip(jarvis): finis les tests");
         assert!(!body.to_lowercase().contains("co-authored-by"));
@@ -910,34 +1232,243 @@ mod tests {
             git(&repo, &["rev-parse", "develop"])
         );
         // Rien à enregistrer : erreur dite, pas de commit vide.
-        assert!(commit_all(&R, &p.worktree, "vide").is_err());
+        assert!(commit_all(&R, &p.tree(), "vide", COMMIT_TIMEOUT).is_err());
     }
 
     #[test]
-    fn commandes_toujours_avec_dossier() {
+    fn commit_final_sans_hooks_ni_fsmonitor() {
+        let (dir, repo, p) = prepared();
+        let marker = dir.path().join("hook-lance");
+        let mark = format!("echo \"$0\" >> '{}'", marker.display());
+        // Hooks suivis par le dépôt (comme .husky), écrits par l'agent.
+        let hooks = p.worktree.join(".githooks");
+        std::fs::create_dir(&hooks).unwrap();
+        for hook in [
+            "pre-commit",
+            "prepare-commit-msg",
+            "commit-msg",
+            "post-commit",
+            "post-index-change",
+        ] {
+            script(&hooks.join(hook), &mark);
+        }
+        git(&repo, &["config", "core.hooksPath", ".githooks"]);
+        let fsmonitor = dir.path().join("fsmonitor.sh");
+        script(&fsmonitor, &mark);
+        git(
+            &repo,
+            &["config", "core.fsmonitor", fsmonitor.to_str().unwrap()],
+        );
+        std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
+        let tree = p.tree();
+        changed_files(&R, &tree, &p.base_sha).unwrap();
+        commit_all(&R, &tree, "wip(jarvis): un", COMMIT_TIMEOUT).unwrap();
+        let ran = || std::fs::read_to_string(&marker).unwrap_or_default();
+        assert_eq!(ran(), "");
+
+        // Hook planté dans le dossier git du dépôt principal.
+        git(&repo, &["config", "--unset", "core.hooksPath"]);
+        git(&repo, &["config", "--unset", "core.fsmonitor"]);
+        script(&repo.join(".git/hooks/pre-commit"), &mark);
+        std::fs::write(p.worktree.join("lib.rs"), "encore\n").unwrap();
+        commit_all(&R, &tree, "wip(jarvis): deux", COMMIT_TIMEOUT).unwrap();
+        assert_eq!(ran(), "");
+
+        // Témoin : un commit ordinaire lance bien le hook.
+        std::fs::write(p.worktree.join("lib.rs"), "témoin\n").unwrap();
+        git(&p.worktree, &["commit", "-qam", "témoin"]);
+        assert!(ran().contains("pre-commit"), "{}", ran());
+    }
+
+    #[test]
+    fn dossier_git_fixe_au_depart() {
+        let (dir, repo, p) = prepared();
+        assert!(
+            p.git_dir.starts_with(repo.join(".git/worktrees")),
+            "{}",
+            p.git_dir.display()
+        );
+        // L'agent réécrit `.git` vers un faux dépôt.
+        let faux = dir.path().join("faux.git");
+        let out = Command::new("git")
+            .args(["init", "-q", "--bare"])
+            .arg(&faux)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        std::fs::write(
+            p.worktree.join(".git"),
+            format!("gitdir: {}\n", faux.display()),
+        )
+        .unwrap();
+        std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
+        let parent = commit_all(&R, &p.tree(), "wip(jarvis): vrai", COMMIT_TIMEOUT).unwrap();
+        assert_eq!(parent, p.base_sha);
+        assert_eq!(
+            git(&repo, &["log", "-1", "--format=%s", &p.branch]),
+            "wip(jarvis): vrai"
+        );
+        assert_eq!(check_commit(&R, &p.tree(), &p.branch, &parent), vec![]);
+    }
+
+    #[test]
+    fn commit_verifie_par_son_parent() {
+        let (_dir, repo, p) = prepared();
+        let tree = p.tree();
+        std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
+        let parent = commit_all(&R, &tree, "wip(jarvis): un", COMMIT_TIMEOUT).unwrap();
+        assert_eq!(check_commit(&R, &tree, &p.branch, &parent), vec![]);
+        // Pas de nouveau commit : inattendu.
+        let head = git(&p.worktree, &["rev-parse", "HEAD"]);
+        assert_eq!(
+            check_commit(&R, &tree, &p.branch, &head),
+            vec![Violation::CommitUnexpected]
+        );
+        // Un commit de plus glissé par-dessus : inattendu.
+        std::fs::write(p.worktree.join("lib.rs"), "glissé\n").unwrap();
+        git(&p.worktree, &["commit", "-qam", "glissé"]);
+        assert_eq!(
+            check_commit(&R, &tree, &p.branch, &parent),
+            vec![Violation::CommitUnexpected]
+        );
+        // Worktree sorti de sa branche.
+        git(&p.worktree, &["switch", "-q", "--detach"]);
+        let v = check_commit(&R, &tree, &p.branch, &head);
+        assert!(
+            v.contains(&Violation::BranchChanged {
+                expected: p.branch.clone(),
+                actual: None
+            }),
+            "{v:?}"
+        );
+        // Branche déplacée ensuite : la vérification refaite la voit.
+        let before = snap(&repo);
+        git(&repo, &["update-ref", "refs/heads/main", &head]);
+        assert!(
+            check(&repo, &p, &before).contains(&Violation::RefChanged("refs/heads/main".into()))
+        );
+    }
+
+    #[test]
+    fn commit_borne_par_le_delai() {
+        let (dir, repo, p) = prepared();
+        // Signature qui ne rend jamais la main (demande de phrase de passe…).
+        let pids = dir.path().join("pids");
+        let signer = dir.path().join("signe.sh");
+        script(
+            &signer,
+            &format!(
+                "echo $$ >> '{0}'\nsleep 1000 &\necho $! >> '{0}'\nwait",
+                pids.display()
+            ),
+        );
+        for (k, v) in [
+            ("commit.gpgsign", "true"),
+            ("gpg.format", "ssh"),
+            ("user.signingkey", "/dev/null"),
+            ("gpg.ssh.program", signer.to_str().unwrap()),
+        ] {
+            git(&repo, &["config", k, v]);
+        }
+        std::fs::write(p.worktree.join("lib.rs"), "changé\n").unwrap();
+        let begin = std::time::Instant::now();
+        let r = commit_all(&R, &p.tree(), "wip(jarvis): x", Duration::from_millis(500));
+        assert_eq!(r, Err("git commit a échoué".into()));
+        assert!(
+            begin.elapsed() < Duration::from_secs(5),
+            "{:?}",
+            begin.elapsed()
+        );
+        // Aucun processus laissé derrière.
+        let pids = std::fs::read_to_string(&pids).unwrap();
+        assert_eq!(pids.lines().count(), 2, "{pids}");
+        assert_dead(&pids);
+        assert_eq!(git(&repo, &["rev-parse", &p.branch]), p.base_sha);
+    }
+
+    /// Chaque pid (un par ligne) disparaît (le temps d'être récolté).
+    fn assert_dead(pids: &str) {
+        for pid in pids.lines() {
+            let alive = || {
+                Command::new("kill")
+                    .args(["-0", pid])
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .unwrap()
+                    .success()
+            };
+            let mut tries = 0;
+            while alive() && tries < 300 {
+                std::thread::sleep(Duration::from_millis(10));
+                tries += 1;
+            }
+            assert!(!alive(), "processus {pid} encore là");
+        }
+    }
+
+    #[test]
+    fn annulation_retire_worktree_et_branche() {
+        let (_dir, repo, p) = prepared();
+        discard(&R, &repo, &p).unwrap();
+        assert!(!p.worktree.exists());
+        assert!(!branch_exists(&repo, &p.branch));
+        assert_eq!(git(&repo, &["worktree", "list"]).lines().count(), 1);
+    }
+
+    #[test]
+    fn commandes_toujours_bornees_sans_hooks() {
         let r = FakeRunner::new();
-        check_clean(&r, Path::new("/depot")).unwrap();
-        commit_all(&r, Path::new("/w"), "message").unwrap();
+        r.respond(
+            "timeout",
+            CommandOutput {
+                success: true,
+                stdout: "0123\n".into(),
+            },
+        );
+        check_clean(&r, Path::new("/depot")).unwrap_err();
+        let tree = TaskTree {
+            worktree: "/w".into(),
+            git_dir: "/depot/.git/worktrees/w".into(),
+        };
+        commit_all(&r, &tree, "message", COMMIT_TIMEOUT).unwrap();
         let calls = r.calls();
         assert!(!calls.is_empty());
         for (program, args) in &calls {
-            assert_eq!(program, "git");
-            assert_eq!(args[0], "-C");
-            assert!(
-                !args
-                    .iter()
-                    .any(|a| a == "--no-gpg-sign" || a == "--no-verify")
+            assert_eq!(program, "timeout");
+            assert_eq!(args[0], "--kill-after=5");
+            assert_eq!(
+                args[2..10],
+                [
+                    "env",
+                    "GIT_TERMINAL_PROMPT=0",
+                    "SSH_ASKPASS_REQUIRE=never",
+                    "git",
+                    "-c",
+                    "core.fsmonitor=false",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ]
             );
+            assert!(args.iter().any(|a| a == "-C"));
+            assert!(!args.iter().any(|a| a == "--no-gpg-sign"));
         }
-        assert!(
-            calls
-                .iter()
-                .any(|(_, a)| a[2..] == ["status", "--porcelain", "--untracked-files=no"])
+        let tail = |a: &[String], n: usize| a[a.len() - n..].to_vec();
+        assert!(calls.iter().any(|(_, a)| a[1] == "30.000s"
+            && tail(a, 3) == ["status", "--porcelain", "--untracked-files=no"]));
+        let commit = calls
+            .iter()
+            .find(|(_, a)| a.contains(&"commit".to_string()))
+            .unwrap();
+        assert_eq!(commit.1[1], "60.000s");
+        assert_eq!(
+            tail(&commit.1, 5),
+            ["commit", "-q", "--no-verify", "-m", "message"]
         );
         assert!(
-            calls
-                .iter()
-                .any(|(_, a)| a[2..] == ["commit", "-q", "-m", "message"])
+            commit
+                .1
+                .contains(&"--git-dir=/depot/.git/worktrees/w".to_string())
         );
+        assert!(commit.1.contains(&"--work-tree=/w".to_string()));
     }
 }

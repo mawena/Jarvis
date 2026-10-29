@@ -124,9 +124,25 @@ fn read_records(dir: &Path) -> Vec<TaskRecord> {
                 .inspect_err(|e| tracing::warn!("tâche illisible {} : {e}", p.display()))
                 .ok()
         })
+        .filter(|r: &TaskRecord| {
+            let ok = valid_id(&r.id);
+            if !ok {
+                tracing::warn!("tâche ignorée : identifiant invalide {:?}", r.id.as_str());
+            }
+            ok
+        })
         .collect();
     records.sort_by(|a, b| (a.started_at, &a.id).cmp(&(b.started_at, &b.id)));
     records
+}
+
+/// Identifiant sûr dans un nom de fichier : forme d'UUID (`[0-9a-f-]`).
+fn valid_id(id: &TaskId) -> bool {
+    let s = id.as_str();
+    !s.is_empty()
+        && s.len() <= 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-')
 }
 
 #[cfg(test)]
@@ -226,23 +242,47 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let reg = Registry::open(tmp.path()).unwrap();
         let taches = [
-            tache(&reg, "en-cours", 1, TaskState::Running),
-            tache(&reg, "vieille", 10, TaskState::Succeeded),
-            tache(&reg, "moyenne", 20, TaskState::Failed),
-            tache(&reg, "recente", 30, TaskState::Stopped),
+            tache(&reg, "e0-c0", 1, TaskState::Running),
+            tache(&reg, "01d", 10, TaskState::Succeeded),
+            tache(&reg, "02d", 20, TaskState::Failed),
+            tache(&reg, "03d", 30, TaskState::Stopped),
         ];
         for t in &taches {
             reg.save(t).unwrap();
             std::fs::write(&t.log, "journal").unwrap();
         }
         assert_eq!(reg.prune(2), 1);
-        assert_eq!(ids(&reg.load_all()), ["en-cours", "moyenne", "recente"]);
+        assert_eq!(ids(&reg.load_all()), ["e0-c0", "02d", "03d"]);
         assert!(!taches[1].log.exists());
         assert!(taches[0].log.exists());
         assert_eq!(reg.prune(0), 2);
-        assert_eq!(ids(&reg.load_all()), ["en-cours"]);
+        assert_eq!(ids(&reg.load_all()), ["e0-c0"]);
         assert!(taches[0].log.exists());
         assert_eq!(reg.prune(0), 0);
+    }
+
+    #[test]
+    fn identifiant_invalide_ignore_par_la_purge() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = Registry::open(tmp.path().join("tasks")).unwrap();
+        // Fichier hors du registre que l'identifiant viserait.
+        let victime = tmp.path().join("victime.log");
+        std::fs::write(&victime, "à garder").unwrap();
+        for (file, id) in [
+            ("piege.json", "../victime"),
+            ("majuscules.json", "ABC"),
+            ("vide.json", ""),
+        ] {
+            let mut t = tache(&reg, "0a", 1, TaskState::Succeeded);
+            t.id = TaskId(id.into());
+            std::fs::write(reg.dir().join(file), serde_json::to_vec(&t).unwrap()).unwrap();
+        }
+        reg.save(&tache(&reg, "0b", 5, TaskState::Running)).unwrap();
+        assert_eq!(ids(&reg.load_all()), ["0b"]);
+        assert_eq!(reg.prune(0), 0);
+        assert!(reg.recover(9).iter().all(|r| r.id.as_str() == "0b"));
+        assert!(victime.exists());
+        assert!(!tmp.path().join("victime.json").exists());
     }
 
     #[test]

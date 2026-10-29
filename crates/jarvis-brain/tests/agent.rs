@@ -22,8 +22,8 @@ use tempfile::TempDir;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 
-const STARTED: &str = "Bien. Je confie cela à Claude, sur une branche à part du projet \
-                       Jarvis. Je vous préviens à la fin.";
+const STARTED: &str = "Bien. Je confie cela à Claude, sur une branche à part de l'assistant. \
+                       Je vous préviens à la fin.";
 
 struct Setup {
     _repo: TempDir,
@@ -57,7 +57,7 @@ fn setup(body: &str, announcer: Arc<dyn Announcer>, llm: Understanding) -> Setup
         projects: vec![Project {
             name: "Jarvis".into(),
             path: repo.clone(),
-            aliases: Vec::new(),
+            aliases: vec!["l'assistant".into()],
             base: None,
             extra_allowed_tools: Vec::new(),
         }],
@@ -186,7 +186,7 @@ async fn jarvis_say_lance_l_agent() {
     assert_eq!(items.len(), 1, "aucune annonce de fin");
     assert_eq!(
         items[0].speech,
-        "La tâche sur Jarvis est terminée : J'ai fini les tests. Un fichier modifié."
+        "La tâche sur l'assistant est terminée : J'ai fini les tests. Un fichier modifié."
     );
     let calls = notify.calls();
     assert_eq!(calls.len(), 1, "{calls:?}");
@@ -219,7 +219,8 @@ async fn changer_de_mode_n_arrete_pas_les_taches() {
     b.set_mode(Mode::Online).unwrap();
     let r = b.handle_text("Jarvis, où en est la tâche ?").await;
     assert!(
-        r.speech.starts_with("La tâche sur Jarvis tourne depuis"),
+        r.speech
+            .starts_with("La tâche sur l'assistant tourne depuis"),
         "{}",
         r.speech
     );
@@ -229,7 +230,7 @@ async fn changer_de_mode_n_arrete_pas_les_taches() {
     assert!(announcer.notices().is_empty());
     assert_eq!(
         b.handle_text("arrête la tâche").await.speech,
-        "J'arrête la tâche sur Jarvis. Le travail reste sur sa branche."
+        "J'arrête la tâche sur l'assistant. Le travail reste sur sa branche."
     );
     until(|| !announcer.notices().is_empty()).await;
     assert!(!announcer.notices()[0].speak);
