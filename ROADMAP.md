@@ -72,7 +72,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 3.8 Essai réel avec Charles : réponse parlée, bips, coupure par « Jarvis », veille puis « non », « répète » (Charles) — [fiche d'essai](docs/essais/essai-3.8-voix.md)
 
 ## Phase 4 : oreilles en réseau
-- [ ] 4.1 Rédiger le plan de la phase 4 (en cours)
+- [x] 4.1 Rédiger le plan de la phase 4 ([plan](docs/superpowers/plans/2026-10-29-phase-4-oreilles-reseau.md))
 - [ ] 4.2 Protocole oreille ↔ cerveau versionné (`jarvis-protocol`)
 - [ ] 4.3 Cœur commun des oreilles (`jarvis-ear-core`) et binaire `jarvis-ear` séparé du cerveau
 - [ ] 4.4 Serveur WebSocket + TLS avec certificat épinglé
@@ -92,14 +92,14 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 5.7 Essai de bout en bout depuis une autre pièce
 
 ## Phase 6 : recherche et vidéos
-- [ ] 6.1 Rédiger le plan de la phase 6 (en cours)
+- [x] 6.1 Rédiger le plan de la phase 6 ([plan](docs/superpowers/plans/2026-10-29-phase-6-recherche.md))
 - [ ] 6.2 SearXNG auto-hébergé dans Docker
 - [ ] 6.3 Compétence recherche avec résumé vocal court (IA du mode actif)
 - [ ] 6.4 « Ouvre les résultats » dans le navigateur du PC
 - [ ] 6.5 « Lance la vidéo de… » (`yt-dlp` ou SearXNG vidéos)
 
 ## Phase 7 : agent de code
-- [ ] 7.1 Rédiger le plan de la phase 7 (en cours)
+- [x] 7.1 Rédiger le plan de la phase 7 ([plan](docs/superpowers/plans/2026-10-29-phase-7-agent-de-code.md))
 - [ ] 7.2 Liste des projets connus dans la configuration
 - [ ] 7.3 Lancement de Claude Code en arrière-plan (`claude -p`), sans confirmation
 - [ ] 7.4 Garde-fous : branche `feature/*` dédiée, rien de poussé ni fusionné, refus si modifications non enregistrées
