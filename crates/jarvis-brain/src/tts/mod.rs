@@ -11,7 +11,7 @@ use tracing::{debug, warn};
 /// Au-delà, seul le début de la réponse est dit (le texte reste entier).
 pub const MAX_SPOKEN_CHARS: usize = 400;
 
-/// Attente maximale (place libre + synthèse) : l'oreille abandonne à 30 s, et le LLM
+/// Attente maximale (place libre + synthèse) : l'oreille abandonne une phrase à 50 s, et le LLM
 /// et la transcription ont déjà pris leur part.
 const SYNTH_DEADLINE: Duration = Duration::from_secs(8);
 
