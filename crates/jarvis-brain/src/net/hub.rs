@@ -577,7 +577,7 @@ impl State {
             } else {
                 RejectReason::UnknownEar
             };
-            info!(oreille = %ear_id, raison = ?reason, "oreille refusée");
+            info!(oreille = shown(&ear_id), raison = ?reason, "oreille refusée");
             return HelloOutcome::Rejected(reason);
         };
         let replaced = self.sessions.contains_key(&ear_id);
@@ -1220,6 +1220,16 @@ fn without_cut(mut samples: Vec<i16>, cut: Option<(u32, u32)>) -> Vec<i16> {
     let to = (to as usize).clamp(from, len);
     samples.drain(from..to);
     samples
+}
+
+/// Identifiant donné par une oreille pas encore authentifiée, sûr à journaliser.
+fn shown(id: &EarId) -> &str {
+    let s = id.as_str();
+    if s.len() <= 64 && s.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        s
+    } else {
+        "(identifiant invalide)"
+    }
 }
 
 /// Texte d'une oreille : sans caractère de contrôle, borné ; vide : `fallback`.

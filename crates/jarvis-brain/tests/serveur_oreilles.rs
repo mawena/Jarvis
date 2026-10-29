@@ -25,7 +25,7 @@ use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{
     ControlRequest, ControlResponse, EarId, Fingerprint, Mode, SpeechAudio, encode_pcm,
 };
-use jarvis_skills::SystemRunner;
+use jarvis_skills::{Announcer, FakeRunner, Notice, Outcome};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,6 +46,7 @@ struct Rig {
     ducker: Arc<FakeDucker>,
     stt: Arc<FakeTranscriber>,
     skill: Arc<FakeSkill>,
+    board: Arc<AnnouncementBoard>,
     socket: PathBuf,
     /// Oreille appairée d'avance : (id, jeton).
     salon: (EarId, String),
@@ -83,9 +84,10 @@ async fn rig() -> Rig {
         ducker.clone(),
     ));
     let board = Arc::new(AnnouncementBoard::new(
-        Arc::new(SystemRunner),
+        Arc::new(FakeRunner::new()),
         Arc::new(SystemClock),
     ));
+    let board_handle = board.clone();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -133,6 +135,7 @@ async fn rig() -> Rig {
         ducker,
         stt,
         skill,
+        board: board_handle,
         socket,
         salon: (salon.id, token),
     }
@@ -703,6 +706,35 @@ async fn phrase_close_avant_la_reponse() {
 }
 
 #[tokio::test]
+async fn annonce_poussee_a_l_oreille_connectee() {
+    let rig = rig().await;
+    let mut ws = salon(&rig).await;
+    rig.board.announce(Notice {
+        title: "Agent".into(),
+        speech: "Tâche finie.".into(),
+        body: String::new(),
+        outcome: Outcome::Done,
+        urgent: false,
+        speak: true,
+    });
+    let BrainMessage::Response {
+        utterance: None,
+        response: ControlResponse::Announcements { items },
+    } = next(&mut ws).await
+    else {
+        panic!("annonces attendues")
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].speech, "Tâche finie.");
+    assert_eq!(items[0].sound, Some(jarvis_protocol::Sound::Success));
+    // Relevées une seule fois.
+    assert_eq!(
+        next_within(&mut ws, Duration::from_millis(300)).await,
+        Next::Silent
+    );
+}
+
+#[tokio::test]
 async fn changement_de_mode_diffuse() {
     let rig = rig().await;
     let (cuisine, token) = pair_ear(&rig, "Cuisine").await;
@@ -837,7 +869,7 @@ async fn unix_only(dir: &Path) -> PathBuf {
         Arc::new(FakeDucker::new()),
     ));
     let board = Arc::new(AnnouncementBoard::new(
-        Arc::new(SystemRunner),
+        Arc::new(FakeRunner::new()),
         Arc::new(SystemClock),
     ));
     let socket = dir.join("run/brain.sock");
@@ -875,7 +907,7 @@ fn services(dir: &Path) -> Services {
         brain,
         voice: Voice::none(),
         board: Arc::new(AnnouncementBoard::new(
-            Arc::new(SystemRunner),
+            Arc::new(FakeRunner::new()),
             Arc::new(SystemClock),
         )),
         modes: None,
