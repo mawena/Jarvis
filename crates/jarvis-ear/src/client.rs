@@ -68,6 +68,13 @@ pub async fn request(socket: &Path, req: &ControlRequest) -> Result<ControlRespo
 }
 
 async fn exchange(socket: &Path, req: &ControlRequest) -> Result<ControlResponse, ClientError> {
+    // Dossier à soi et fermé aux autres : sinon, ce qui répond pourrait ne pas être le
+    // cerveau (et l'appairage local lui ferait confiance).
+    match jarvis_protocol::check_socket_dir(socket) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::NotFound => return Err(ClientError::BrainUnreachable),
+        Err(e) => return Err(e.into()),
+    }
     let stream = match UnixStream::connect(socket).await {
         Ok(s) => s,
         Err(e) if matches!(e.kind(), ErrorKind::NotFound | ErrorKind::ConnectionRefused) => {
@@ -91,7 +98,15 @@ async fn exchange(socket: &Path, req: &ControlRequest) -> Result<ControlResponse
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
+
+    /// Dossier fermé aux autres, comme celui du vrai cerveau.
+    fn private_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        dir
+    }
 
     #[test]
     fn attente_de_la_reponse_cinquante_secondes() {
@@ -101,7 +116,7 @@ mod tests {
 
     #[tokio::test]
     async fn socket_absent_cerveau_injoignable() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_dir();
         let err = request(&dir.path().join("absent.sock"), &ControlRequest::Status)
             .await
             .unwrap_err();
@@ -109,8 +124,24 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dossier_du_socket_ouvert_aux_autres_refuse() {
+        let dir = private_dir();
+        let path = dir.path().join("b.sock");
+        let _listener = UnixListener::bind(&path).unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = request(&path, &ControlRequest::PairLocal { name: "PC".into() })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, ClientError::Io(e) if e.kind() == ErrorKind::PermissionDenied),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("peu sûr"), "{err}");
+    }
+
+    #[tokio::test]
     async fn aller_retour_sur_un_faux_serveur() {
-        let dir = tempfile::tempdir().unwrap();
+        let dir = private_dir();
         let path = dir.path().join("b.sock");
         let listener = UnixListener::bind(&path).unwrap();
         tokio::spawn(async move {

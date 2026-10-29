@@ -144,7 +144,10 @@ fn fail(message: &str, code: u8) -> ExitCode {
 }
 
 fn send(request: &ControlRequest) -> std::io::Result<BufReader<UnixStream>> {
-    let mut stream = UnixStream::connect(jarvis_protocol::socket_path())?;
+    let socket = jarvis_protocol::socket_path();
+    // Dossier à soi et fermé aux autres, sinon rien n'est envoyé.
+    jarvis_protocol::check_socket_dir(&socket)?;
+    let mut stream = UnixStream::connect(socket)?;
     let mut line = serde_json::to_string(request).map_err(std::io::Error::other)?;
     line.push('\n');
     stream.write_all(line.as_bytes())?;
