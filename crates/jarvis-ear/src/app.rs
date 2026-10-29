@@ -82,6 +82,10 @@ pub struct App<W: WakeDetector, V: Vad, C: Capture> {
     election: Option<(u32, Instant)>,
     election_timeout: Duration,
     awaited: Option<Awaited>,
+    /// Réponse attendue mise de côté par un nouveau réveil, le temps de la décision du
+    /// cerveau : `elected` l'oublie (la nouvelle phrase la remplace), `stop` la rétablit
+    /// (cerveau occupé par cette phrase : sa réponse viendra et sera jouée).
+    superseded: Option<Awaited>,
     /// Une question attend la fin de la lecture pour écouter la réponse.
     awaiting_reply: bool,
     player: Box<dyn Player>,
@@ -127,6 +131,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             election: None,
             election_timeout: ELECTION_TIMEOUT,
             awaited: None,
+            superseded: None,
             awaiting_reply: false,
             player: Box::new(player),
             playing,
@@ -279,6 +284,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             LinkEvent::Disconnected => {
                 // La réponse attendue ne viendra plus.
                 self.awaited = None;
+                self.superseded = None;
                 if self.current.is_some() || self.election.is_some() {
                     tracing::warn!("connexion au cerveau perdue pendant la phrase");
                     self.abandon();
@@ -294,20 +300,36 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
                 if self.election.is_some_and(|(u, _)| u == utterance) {
                     tracing::debug!("oreille élue (phrase {utterance})");
                     self.election = None;
+                    // La nouvelle phrase est prise : la réponse de la précédente n'est
+                    // plus jouée.
+                    self.superseded = None;
                 }
             }
             BrainMessage::Stop { utterance } => {
-                if self.election.is_some_and(|(u, _)| u == utterance) {
+                let refused = self.election.is_some_and(|(u, _)| u == utterance);
+                if refused {
                     self.election = None;
                 }
                 if self.awaited.is_some_and(|a| a.utterance == utterance) {
                     self.awaited = None;
+                }
+                if self.superseded.is_some_and(|a| a.utterance == utterance) {
+                    self.superseded = None;
                 }
                 if self.current.is_some_and(|c| c.utterance == utterance) {
                     tracing::info!("capture arrêtée par le cerveau (autre oreille ou phrase)");
                     self.current = None;
                     self.batcher = AudioBatcher::new();
                     self.listener.reset();
+                }
+                // Réveil refusé pendant que le cerveau traite la phrase précédente :
+                // sa réponse reste attendue, et sera jouée. Pas de bip d'échec : `stop`
+                // est aussi ce que reçoit l'oreille perdante d'un réveil entendu par
+                // deux oreilles, que rien ne distingue d'un refus ; sans réponse en
+                // attente ici, la phrase en cours est celle d'une autre oreille, qui
+                // répondra.
+                if refused && self.awaited.is_none() {
+                    self.awaited = self.superseded.take();
                 }
             }
             BrainMessage::Response {
@@ -399,8 +421,6 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             self.player.stop();
         }
         self.awaiting_reply = false;
-        // Nouvelle phrase : la réponse de la précédente n'est plus jouée.
-        self.awaited = None;
         self.utterance = self.utterance.wrapping_add(1);
         let utterance = self.utterance;
         let wake = EarMessage::Wake {
@@ -416,6 +436,11 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
             self.say_asleep();
             self.link.nudge();
             return;
+        }
+        // Nouvelle phrase : la réponse de la précédente est mise de côté jusqu'à la
+        // décision du cerveau (élue : oubliée ; refusée car il est occupé : rétablie).
+        if let Some(previous) = self.awaited.take() {
+            self.superseded = Some(previous);
         }
         // Écoute coupée : pas de bip (le mot d'éveil n'est là que pour réactiver).
         if !self.muted {
@@ -481,6 +506,7 @@ impl<W: WakeDetector, V: Vad, C: Capture> App<W, V, C> {
         self.current = None;
         self.election = None;
         self.awaited = None;
+        self.superseded = None;
         self.batcher = AudioBatcher::new();
         self.listener.reset();
         self.say_asleep();
@@ -1460,6 +1486,81 @@ mod tests {
         });
         h.wait_for("dernière jouée", |h| {
             h.tray.borrow().last_heard.as_deref() == Some("dernière")
+        })
+        .await;
+    }
+
+    /// Première phrase finie, réponse en attente ; le cerveau la traite encore : il
+    /// arrête tout nouveau réveil.
+    async fn first_phrase_then_busy(h: &Harness) {
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("première phrase", |h| h.listens().len() == 1)
+            .await;
+        h.link.stop.store(true, Ordering::SeqCst);
+    }
+
+    #[tokio::test]
+    async fn reveil_refuse_cerveau_occupe_la_reponse_attendue_est_jouee() {
+        let h = Setup {
+            wakes: 2,
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        first_phrase_then_busy(&h).await;
+        // « Jarvis » redit pendant le traitement : arrêté aussitôt.
+        h.feed(vec![0.0; 3_200]).await;
+        h.wait_for("second réveil", |h| h.wakes() == 2).await;
+        h.wait_for("capture arrêtée", |h| !h.tray.borrow().capturing)
+            .await;
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("suivant", None, Some(Sound::Success)),
+        });
+        h.wait_for("réponse de la première phrase jouée", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("suivant")
+        })
+        .await;
+        // Ni bip d'échec ni « PC endormi » pour le réveil refusé.
+        assert_eq!(
+            h.played(),
+            vec![
+                wake_beep(),
+                Played::Stop,
+                wake_beep(),
+                success_beep(),
+                voice_played()
+            ]
+        );
+        tokio::time::sleep(ELECTION_TIMEOUT).await;
+        assert_eq!(h.played().len(), 5, "{:?}", h.played());
+    }
+
+    #[tokio::test]
+    async fn reveil_refuse_apres_la_fin_de_sa_phrase_la_reponse_attendue_est_jouee() {
+        let h = Setup {
+            wakes: 2,
+            ..Setup::default()
+        }
+        .answer(|_| None)
+        .start();
+        h.started().await;
+        h.feed(wake_then_silence()).await;
+        h.wait_for("première phrase", |h| h.listens().len() == 1)
+            .await;
+        // Le cerveau tarde à trancher : la seconde phrase (courte) finit avant.
+        h.link.elect.store(false, Ordering::SeqCst);
+        let speech = [vec![0.0; 1_600], vec![0.6; 8_000], vec![0.0; 16_000]].concat();
+        h.feed(speech).await;
+        h.wait_for("seconde fin", |h| h.listens().len() == 2).await;
+        h.link.reply(BrainMessage::Stop { utterance: 2 });
+        h.link.reply(BrainMessage::Response {
+            utterance: Some(1),
+            response: heard("suivant", None, None),
+        });
+        h.wait_for("réponse de la première phrase jouée", |h| {
+            h.tray.borrow().last_heard.as_deref() == Some("suivant")
         })
         .await;
     }
