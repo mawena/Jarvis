@@ -174,6 +174,34 @@ Puis, pour chaque autre oreille : `jarvis pair` sur le PC, `jarvis-ear pair …`
   ears` et `jarvis unpair` répondent « Le réseau des oreilles est désactivé (voir les journaux
   du cerveau). ». La cause est dans `jarvisctl logs`.
 
+## Sécurité
+
+- **Le réseau est ouvert par défaut, sur toutes les interfaces** : `listen = "0.0.0.0:7341"`
+  écoute aussi sur le VPN, les réseaux docker et tout Wi-Fi où se trouve le PC. Pour
+  restreindre, au choix :
+  - le pare-feu (`ufw`, voir « Mise en route ») : seul le réseau de la maison passe ;
+  - `listen = "127.0.0.1:7341"` : seule l'oreille du PC passe ;
+  - `[network] enabled = false` : plus aucune oreille, **celle du PC comprise**.
+- **Sur un Wi-Fi public** (gare, café, hôtel), les autres voient le cerveau annoncé par mDNS
+  (son nom, son port) et peuvent tenter de s'y connecter. Sans le code, ils ne peuvent pas
+  s'appairer : la fenêtre ne s'ouvre qu'avec `jarvis pair`, 2 minutes, 3 essais par machine,
+  20 en tout. Une connexion sans `hello` valide est fermée au bout de 3 s, 2 à la fois au plus
+  par machine, et des places restent toujours libres pour l'oreille du PC. Le plus simple
+  reste de restreindre (ci-dessus) hors de chez soi.
+- **Téléphone ou oreille volé·e** : `jarvis unpair <nom>` tout de suite. Son jeton suffit pour
+  se connecter comme elle et envoyer du son, par exemple un enregistrement de votre voix pour
+  donner des ordres.
+- Le jeton de l'oreille du PC ne vaut que depuis le PC lui-même (`127.0.0.1`), et seule elle
+  peut passer le cerveau en mode en ligne (sinon : à la voix, avec confirmation).
+- **Annonces** (fin de tâche d'un agent…) : elles vont à l'oreille de la dernière phrase, ou, si
+  elle n'est plus connectée, à une autre oreille connectée. Elles peuvent donc être dites dans
+  une autre pièce, ou sur le téléphone.
+- **Socket du cerveau** : `jarvis`, `jarvisctl` et `jarvis-ear` refusent de lui parler si son
+  dossier (`$XDG_RUNTIME_DIR/jarvis`, sinon `/tmp/jarvis-<uid>`) n'est pas à vous et fermé aux
+  autres : « dossier du socket du cerveau peu sûr ». Si `/tmp/jarvis-<uid>` appartient à un
+  autre utilisateur, quelqu'un a tenté de se faire passer pour le cerveau : arrêtez Jarvis,
+  faites-le supprimer par l'administrateur, puis relancez.
+
 ## Dépannage
 
 `jarvisctl doctor` vérifie le réseau (lignes `!` : avertissements, pas d'échec) :
