@@ -64,6 +64,11 @@ impl Paths {
         }
     }
 
+    /// Registre des tâches de l'agent de code, tenu par le cerveau.
+    pub fn tasks_dir(&self) -> PathBuf {
+        self.state_dir.join("tasks")
+    }
+
     /// Le modèle du mot d'éveil existe : la condition de démarrage de l'oreille est remplie.
     pub fn wakeword_enrolled(&self) -> bool {
         self.data_dir.join(WAKEWORD_FILE).is_file()
