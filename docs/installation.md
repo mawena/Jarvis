@@ -57,6 +57,7 @@ services. Avec une cible, sur un seul : `cerveau` (ou `brain`), `oreille` (ou `e
 | `jarvisctl doctor` | diagnostic avec conseils de correction |
 | `jarvisctl update` | recompile depuis le dépôt source, réinstalle, redémarre les deux services |
 | `jarvisctl set-api-key [CLÉ]` | enregistre la clé Claude |
+| `jarvisctl searx up` / `down` / `status` | moteur de recherche SearXNG (voir plus bas) |
 
 Les journaux sont aussi lisibles directement : `journalctl --user -u jarvis-brain -f` et
 `journalctl --user -u jarvis-ear -f`.
@@ -64,6 +65,33 @@ Les journaux sont aussi lisibles directement : `journalctl --user -u jarvis-brai
 Une installation antérieure à l'oreille en service n'a que l'unité du cerveau :
 `jarvisctl update` ajoute et active celle de l'oreille. Quitte d'abord une oreille lancée à la
 main dans un terminal, sinon deux oreilles tourneraient.
+
+## Recherche (SearXNG)
+
+La recherche (« cherche… », « lance la vidéo de… ») passe par un SearXNG local, dans Docker.
+Elle est facultative : sans elle, le reste de Jarvis marche.
+
+Il faut Docker et Compose (`sudo apt install docker.io docker-compose-v2`) et être dans le
+groupe `docker`. Pour les vidéos, `yt-dlp` sert de secours (`sudo apt install yt-dlp`).
+
+```bash
+jarvisctl searx up       # écrit les fichiers, démarre le conteneur, attend qu'il réponde (60 s)
+jarvisctl searx status   # état (code 3 s'il ne répond pas)
+jarvisctl searx down     # arrête le conteneur, garde le cache et les réglages
+```
+
+- SearXNG écoute sur `http://127.0.0.1:8888`, sur le PC seulement.
+- Les fichiers sont dans `~/.config/jarvis/searxng/` :
+  - `compose.yml` est réécrit à chaque `up`, ne le modifiez pas ;
+  - `settings.yml` est créé une seule fois, puis vos changements sont gardés. Appliquez-les avec
+    `docker restart jarvis-searxng`. Gardez `json` dans `search.formats` : Jarvis en a besoin ;
+  - `.env` contient le secret de SearXNG (droits 0600), créé une fois et jamais affiché.
+- Docker relance le conteneur à son démarrage (`restart: unless-stopped`) : aucun service
+  systemd en plus.
+- L'image est épinglée (`docker.io/searxng/searxng:2026.10.28-c360868e5`). Le premier `up` la
+  télécharge et affiche la progression.
+- `jarvisctl doctor` vérifie Docker, le conteneur, `/healthz`, le format JSON, le port (lié à
+  `127.0.0.1` seulement), `yt-dlp` et `xdg-open`. Ce ne sont que des avertissements.
 
 ## Clé API Claude
 

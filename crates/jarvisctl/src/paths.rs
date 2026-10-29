@@ -18,6 +18,12 @@ pub const SPEAKER_MODEL: &str = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.on
 /// Dossier de la voix de Jarvis (un `.onnx` et `tokens.txt`).
 pub const VOICE_DIR: &str = "vits-piper-fr_FR-upmc-medium";
 pub const DEFAULT_MODEL: &str = "llama3.2:3b";
+/// Image SearXNG épinglée : la mettre à jour = changer cette constante (et `compose.yml`).
+pub const SEARXNG_IMAGE: &str = "docker.io/searxng/searxng:2026.10.28-c360868e5";
+/// Adresse de SearXNG, sur la machine seulement (8080 est déjà pris).
+pub const SEARXNG_ADDR: &str = "127.0.0.1:8888";
+pub const SEARXNG_CONTAINER: &str = "jarvis-searxng";
+pub const SEARXNG_PROJECT: &str = "jarvis-searxng";
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -33,6 +39,8 @@ pub struct Paths {
     pub install_file: PathBuf,
     pub state_dir: PathBuf,
     pub data_dir: PathBuf,
+    /// Fichiers de SearXNG (`compose.yml`, `settings.yml`, `.env`).
+    pub searx_dir: PathBuf,
 }
 
 impl Paths {
@@ -47,6 +55,7 @@ impl Paths {
             unit_path: units.join(SERVICE),
             ear_unit_path: units.join(EAR_SERVICE),
             config_file: config_dir.join("config.toml"),
+            searx_dir: config_dir.join("searxng"),
             env_file: config_dir.join("env"),
             install_file: config_dir.join("install.toml"),
             config_dir,
