@@ -7,7 +7,7 @@ use crate::speaker::SpeakerGate;
 use crate::tts::Voice;
 use anyhow::{Context, bail};
 use jarvis_protocol::{
-    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm,
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, EarId, Sound, decode_pcm,
 };
 use jarvis_skills::{Outcome, SystemRunner};
 use std::io::{self, ErrorKind};
@@ -230,8 +230,9 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
         } => match decode_pcm(&audio) {
             Ok(samples) => {
                 board.touch(ear.as_deref().unwrap_or(DEFAULT_EAR));
+                let ear = EarId::unix_socket(ear.as_deref());
                 voice
-                    .speak(listen.listen(&samples, muted, follow_up).await)
+                    .speak(listen.listen(&ear, &samples, muted, follow_up).await)
                     .await
             }
             Err(_) => ControlResponse::Error {
@@ -247,6 +248,13 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
             Err(e) => ControlResponse::Error {
                 message: format!("Impossible d'enregistrer le mode : {e}."),
             },
+        },
+        // Branchés en tâche 6 (fenêtre d'appairage, registre des oreilles).
+        ControlRequest::PairStart
+        | ControlRequest::PairLocal { .. }
+        | ControlRequest::ListEars
+        | ControlRequest::Unpair { .. } => ControlResponse::Error {
+            message: "L'appairage des oreilles n'est pas encore disponible.".into(),
         },
     }
 }

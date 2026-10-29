@@ -8,7 +8,7 @@ use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::mode_store::ModeStore;
 use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
-use jarvis_protocol::Mode;
+use jarvis_protocol::{EarId, Mode};
 use jarvis_skills::{Outcome, Reply, Risk, Skill, SkillError, ToolSpec};
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -197,15 +197,15 @@ impl Brain {
 
     /// Phrase complète d'une voix reconnue par son empreinte : commande du cerveau,
     /// raccourci, sinon IA. Toute nouvelle commande efface l'action en attente (sauf
-    /// « annule » et « répète »).
-    pub async fn answer_text(&self, text: &str) -> Answer {
-        self.answer_voice(text, true).await
+    /// « annule » et « répète »). `ear` : oreille qui a entendu la phrase.
+    pub async fn answer_text(&self, ear: &EarId, text: &str) -> Answer {
+        self.answer_voice(ear, text, true).await
     }
 
     /// Comme [`Self::answer_text`] ; `verified` faux (aucune empreinte enregistrée,
     /// vérification désactivée) : tout reste permis sauf les raccourcis des
     /// compétences, refusés d'une phrase sans repli sur l'IA.
-    pub async fn answer_voice(&self, text: &str, verified: bool) -> Answer {
+    pub async fn answer_voice(&self, _ear: &EarId, text: &str, verified: bool) -> Answer {
         self.answer(text, Source::Voice { verified }).await
     }
 
@@ -292,8 +292,8 @@ impl Brain {
     }
 
     /// Comme [`Self::answer_fast`], sans l'attente de réponse.
-    pub async fn handle_fast(&self, text: &str) -> Option<Reply> {
-        self.answer_fast(text).await.map(|a| a.reply)
+    pub async fn handle_fast(&self, ear: &EarId, text: &str) -> Option<Reply> {
+        self.answer_fast(ear, text).await.map(|a| a.reply)
     }
 
     /// Raccourcis seuls, sans jamais consulter l'IA (voix non vérifiée). `None` : aucun
@@ -302,7 +302,7 @@ impl Brain {
     /// question reposée, donc pas de délai prolongé, ni dernière réponse redite).
     /// Les raccourcis propres aux compétences (`Skill::shortcut`) ne sont jamais
     /// consultés : l'agent de code, par exemple, exige une voix vérifiée.
-    pub async fn answer_fast(&self, text: &str) -> Option<Answer> {
+    pub async fn answer_fast(&self, _ear: &EarId, text: &str) -> Option<Answer> {
         let answer = match match_brain_command(text) {
             Some(BrainCommand::Repeat) => {
                 info!("« répète » d'une voix non vérifiée : ignoré");
@@ -348,6 +348,7 @@ impl Brain {
     /// délai repart alors. Dans les autres cas, l'attente est effacée.
     pub async fn answer_follow_up(
         &self,
+        _ear: &EarId,
         text: &str,
         spoken_at: Instant,
         voice: ReplyVoice,
@@ -604,6 +605,11 @@ mod tests {
     use super::*;
     use crate::testing::{FakeLlm, FakeSkill, tool_understanding};
 
+    /// Oreille des tests (une seule).
+    fn ear() -> EarId {
+        EarId::new("test")
+    }
+
     struct Setup {
         brain: Brain,
         local: Arc<FakeLlm>,
@@ -651,8 +657,16 @@ mod tests {
     #[tokio::test]
     async fn raccourci_seul_n_appelle_jamais_l_ia() {
         let s = setup(answer("x"), answer("y"));
-        assert_eq!(s.brain.handle_fast("suivant").await.unwrap().speech, "ok");
-        assert!(s.brain.handle_fast("quel temps fait-il").await.is_none());
+        assert_eq!(
+            s.brain.handle_fast(&ear(), "suivant").await.unwrap().speech,
+            "ok"
+        );
+        assert!(
+            s.brain
+                .handle_fast(&ear(), "quel temps fait-il")
+                .await
+                .is_none()
+        );
         // Cible introuvable : le message est dit, sans repli sur l'IA.
         let skill = FakeSkill::new(&["media_next"])
             .with_result(Err(SkillError::NotFound("Aucun lecteur.".into())));
@@ -663,7 +677,7 @@ mod tests {
             Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
         );
         assert_eq!(
-            brain.handle_fast("suivant").await.unwrap().speech,
+            brain.handle_fast(&ear(), "suivant").await.unwrap().speech,
             "Aucun lecteur."
         );
         assert_eq!(s.local.calls() + s.online.calls(), 0);
@@ -918,7 +932,7 @@ mod tests {
 
     impl Power {
         async fn ask(&self) {
-            let a = self.brain.answer_text("mets le PC en veille").await;
+            let a = self.brain.answer_text(&ear(), "mets le PC en veille").await;
             assert_eq!(a.reply.speech, "Je mets le PC en veille, Monsieur ?");
             assert!(a.awaits_reply);
         }
@@ -929,7 +943,7 @@ mod tests {
 
         async fn reply_as(&self, text: &str, voice: ReplyVoice) -> Answer {
             self.brain
-                .answer_follow_up(text, self.brain.now(), voice)
+                .answer_follow_up(&ear(), text, self.brain.now(), voice)
                 .await
         }
 
@@ -949,7 +963,7 @@ mod tests {
         assert!(p.brain.has_pending());
         // Par l'IA aussi.
         let p = power_with(FakeLlm::new(Ok(tool_understanding("shutdown"))));
-        let a = p.brain.answer_text("coupe tout, j'ai fini").await;
+        let a = p.brain.answer_text(&ear(), "coupe tout, j'ai fini").await;
         assert_eq!(a.reply.speech, "J'éteins le PC, Monsieur ?");
         assert!(a.awaits_reply);
         assert!(p.ran().await.is_empty());
@@ -1000,7 +1014,7 @@ mod tests {
         p.clock.advance(REPLY_WINDOW + Duration::from_secs(1));
         let started = p.brain.now() - Duration::from_secs(2);
         p.brain
-            .answer_follow_up("oui", started, ReplyVoice::Verified)
+            .answer_follow_up(&ear(), "oui", started, ReplyVoice::Verified)
             .await;
         assert_eq!(p.ran().await, suspend_call());
     }
@@ -1021,17 +1035,17 @@ mod tests {
     async fn nouvelle_commande_efface_l_attente() {
         let p = power();
         p.ask().await;
-        p.brain.answer_text("suivant").await;
+        p.brain.answer_text(&ear(), "suivant").await;
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
         assert!(p.ran().await.is_empty());
         // Une question libre (IA) aussi.
         p.ask().await;
-        p.brain.answer_text("quel temps fait-il").await;
+        p.brain.answer_text(&ear(), "quel temps fait-il").await;
         assert!(!p.brain.has_pending());
         // Et une nouvelle action risquée remplace la première.
         p.ask().await;
-        p.brain.answer_text("redémarre le PC").await;
+        p.brain.answer_text(&ear(), "redémarre le PC").await;
         p.reply("oui").await;
         assert_eq!(
             p.ran().await,
@@ -1042,10 +1056,10 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn annule_sans_attente() {
         let p = power();
-        let a = p.brain.answer_text("annule").await;
+        let a = p.brain.answer_text(&ear(), "annule").await;
         assert_eq!(a.reply, Reply::new("Il n'y a rien à annuler, Monsieur."));
         p.ask().await;
-        let a = p.brain.answer_text("Jarvis, annule.").await;
+        let a = p.brain.answer_text(&ear(), "Jarvis, annule.").await;
         assert_eq!(a.reply, Reply::new("Entendu, j'annule."));
         assert!(!p.brain.has_pending());
         p.reply("oui").await;
@@ -1055,17 +1069,17 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn repete_la_derniere_reponse() {
         let p = power();
-        let a = p.brain.answer_text("répète").await;
+        let a = p.brain.answer_text(&ear(), "répète").await;
         assert_eq!(a.reply, Reply::new("Je n'ai encore rien dit."));
-        p.brain.answer_text("suivant").await;
-        let a = p.brain.answer_text("tu peux répéter").await;
+        p.brain.answer_text(&ear(), "suivant").await;
+        let a = p.brain.answer_text(&ear(), "tu peux répéter").await;
         // Redit sans réexécuter, et sans bip de réussite.
         assert_eq!(a.reply, Reply::new("Bien."));
         assert_eq!(p.skill.calls().len(), 1);
         // Question en attente : elle est reposée, le délai repart.
         p.ask().await;
         p.clock.advance(Duration::from_secs(10));
-        let a = p.brain.answer_text("répète").await;
+        let a = p.brain.answer_text(&ear(), "répète").await;
         assert_eq!(a.reply.speech, "Je mets le PC en veille, Monsieur ?");
         assert!(a.awaits_reply);
         p.clock.advance(Duration::from_secs(10));
@@ -1077,31 +1091,36 @@ mod tests {
     async fn nom_d_adresse_configurable() {
         let p = power();
         let brain = p.brain.with_persona(Persona::new("Charles"));
-        let a = brain.answer_text("annule").await;
+        let a = brain.answer_text(&ear(), "annule").await;
         assert_eq!(a.reply.speech, "Il n'y a rien à annuler, Charles.");
-        let a = brain.answer_text("mets le PC en veille").await;
+        let a = brain.answer_text(&ear(), "mets le PC en veille").await;
         assert_eq!(a.reply.speech, "Je mets le PC en veille, Charles ?");
         // Avec parcimonie : pas dans toutes les phrases.
         let a = brain
-            .answer_follow_up("non", brain.now(), ReplyVoice::Verified)
+            .answer_follow_up(&ear(), "non", brain.now(), ReplyVoice::Verified)
             .await;
         assert_eq!(a.reply.speech, "Entendu, j'annule.");
         // Nom vide : jamais nommé.
         let p = power();
         let brain = p.brain.with_persona(Persona::new(""));
-        let a = brain.answer_text("annule").await;
+        let a = brain.answer_text(&ear(), "annule").await;
         assert_eq!(a.reply.speech, "Il n'y a rien à annuler.");
     }
 
     #[tokio::test(start_paused = true)]
     async fn voix_non_verifiee_sans_action_risquee() {
         let p = power();
-        assert!(p.brain.answer_fast("mets le PC en veille").await.is_none());
+        assert!(
+            p.brain
+                .answer_fast(&ear(), "mets le PC en veille")
+                .await
+                .is_none()
+        );
         assert!(!p.brain.has_pending());
         // « annule » reste permis ; « répète » est ignoré (ni question reposée, ni
         // dernière réponse redite).
-        assert!(p.brain.answer_fast("annule").await.is_some());
-        assert!(p.brain.answer_fast("répète").await.is_none());
+        assert!(p.brain.answer_fast(&ear(), "annule").await.is_some());
+        assert!(p.brain.answer_fast(&ear(), "répète").await.is_none());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1110,7 +1129,7 @@ mod tests {
         p.ask().await;
         p.clock.advance(Duration::from_secs(10));
         // « Jarvis, répète » court, non vérifié : ignoré, le délai ne repart pas.
-        assert!(p.brain.answer_fast("répète").await.is_none());
+        assert!(p.brain.answer_fast(&ear(), "répète").await.is_none());
         p.clock.advance(Duration::from_secs(5));
         let a = p.reply("oui").await;
         assert_eq!(a.reply, Reply::new("Le délai est passé, je ne fais rien."));
@@ -1126,8 +1145,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn voix_non_verifiee_ne_repete_pas() {
         let p = power();
-        p.brain.answer_text("suivant").await;
-        assert!(p.brain.answer_fast("tu peux répéter").await.is_none());
+        p.brain.answer_text(&ear(), "suivant").await;
+        assert!(
+            p.brain
+                .answer_fast(&ear(), "tu peux répéter")
+                .await
+                .is_none()
+        );
         let a = p.reply_as("répète", ReplyVoice::Unverified).await;
         assert_eq!(a.reply.speech, "");
     }
@@ -1204,8 +1228,8 @@ mod tests {
         assert!(!p.brain.has_pending());
         // Avec le mot d'éveil aussi.
         p.ask().await;
-        assert!(p.brain.answer_text("répète").await.awaits_reply);
-        assert_eq!(p.brain.answer_text("répète").await.reply, refus);
+        assert!(p.brain.answer_text(&ear(), "répète").await.awaits_reply);
+        assert_eq!(p.brain.answer_text(&ear(), "répète").await.reply, refus);
         assert!(!p.brain.has_pending());
         // Le budget est partagé avec la vérification stricte d'un « oui » court.
         p.ask().await;
@@ -1379,12 +1403,12 @@ mod tests {
     #[tokio::test]
     async fn voix_non_verifiee_ignore_les_raccourcis_de_competence() {
         let a = agent();
-        assert!(a.brain.answer_fast(PHRASE_AGENT).await.is_none());
-        assert!(a.brain.handle_fast(PHRASE_AGENT).await.is_none());
+        assert!(a.brain.answer_fast(&ear(), PHRASE_AGENT).await.is_none());
+        assert!(a.brain.handle_fast(&ear(), PHRASE_AGENT).await.is_none());
         assert!(a.agent.calls().is_empty());
         assert_eq!(a.llm.calls(), 0);
         // La voix vérifiée, elle, lance l'outil.
-        a.brain.answer_text(PHRASE_AGENT).await;
+        a.brain.answer_text(&ear(), PHRASE_AGENT).await;
         assert_eq!(a.agent.calls().len(), 1);
     }
 
@@ -1411,7 +1435,7 @@ mod tests {
     #[tokio::test]
     async fn voix_non_reconnue_refuse_les_raccourcis_de_competence() {
         let a = agent();
-        let r = a.brain.answer_voice(PHRASE_AGENT, false).await;
+        let r = a.brain.answer_voice(&ear(), PHRASE_AGENT, false).await;
         assert_eq!(
             (r.reply.speech.as_str(), r.reply.outcome),
             (NEEDS_KNOWN_VOICE, Outcome::Failed)
@@ -1421,14 +1445,20 @@ mod tests {
         assert_eq!(a.llm.calls(), 0, "pas de repli sur l'IA");
         // Raccourcis du cerveau et IA : comme avant.
         assert_eq!(
-            a.brain.answer_voice("suivant", false).await.reply.speech,
+            a.brain
+                .answer_voice(&ear(), "suivant", false)
+                .await
+                .reply
+                .speech,
             "Bien."
         );
         assert_eq!(a.media.calls().len(), 1);
-        a.brain.answer_voice("quel temps fait-il", false).await;
+        a.brain
+            .answer_voice(&ear(), "quel temps fait-il", false)
+            .await;
         assert_eq!(a.llm.calls(), 1);
         // Voix reconnue : l'outil part.
-        a.brain.answer_voice(PHRASE_AGENT, true).await;
+        a.brain.answer_voice(&ear(), PHRASE_AGENT, true).await;
         assert_eq!(a.agent.calls().len(), 1);
     }
 
@@ -1459,7 +1489,7 @@ mod tests {
                 Arc::new(FakeDucker::new()),
             )
             .with_speaker_state(state);
-            let r = svc.listen(&[0; 3 * 16_000], false, false).await;
+            let r = svc.listen(&ear(), &[0; 3 * 16_000], false, false).await;
             let jarvis_protocol::ControlResponse::Heard { speech, .. } = r else {
                 panic!("{r:?}");
             };
@@ -1475,7 +1505,7 @@ mod tests {
             Arc::new(FakeDucker::new()),
         )
         .with_speaker(Some(known_voice(voices.path())));
-        svc.listen(&[0; 3 * 16_000], false, false).await;
+        svc.listen(&ear(), &[0; 3 * 16_000], false, false).await;
         assert_eq!(agent.calls().len(), 1);
     }
 
@@ -1504,7 +1534,7 @@ mod tests {
         };
         let skill = fake_agent().with_result(Ok(Reply::done(depart)));
         let a = agent_with(skill, persona.clone());
-        let r = a.brain.answer_text(PHRASE_AGENT).await;
+        let r = a.brain.answer_text(&ear(), PHRASE_AGENT).await;
         assert!(!r.fast_path);
         assert_eq!(
             (r.reply.speech.as_str(), r.reply.outcome),
@@ -1523,7 +1553,7 @@ mod tests {
         )
         .with_speaker(Some(known_voice(voices.path())));
         assert_eq!(
-            svc.listen(&[0; 3 * 16_000], false, false).await,
+            svc.listen(&ear(), &[0; 3 * 16_000], false, false).await,
             ControlResponse::Heard {
                 text: PHRASE_AGENT.into(),
                 speech: depart.into(),

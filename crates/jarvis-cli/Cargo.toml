@@ -11,6 +11,7 @@ path = "src/main.rs"
 jarvis-protocol.workspace = true
 clap.workspace = true
 serde_json.workspace = true
+qrcode.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
