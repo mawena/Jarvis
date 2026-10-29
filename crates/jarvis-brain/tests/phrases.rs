@@ -7,7 +7,7 @@ use jarvis_brain::intent::Intent;
 use jarvis_brain::llm::{ClaudeBackend, LlmBackend, OllamaBackend, Understanding};
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaPlayers, MediaSkill, PlayerCommand, PlayerInfo};
-use jarvis_skills::{FakeRunner, Skill, ToolSpec};
+use jarvis_skills::{FakeRunner, Skill, ToolSpec, search, video};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,7 +48,32 @@ fn real_tools() -> Vec<ToolSpec> {
     let runner = Arc::new(FakeRunner::new());
     let media = MediaSkill::new(Arc::new(NoPlayers), runner.clone());
     let apps = AppsSkill::new(AppIndex::load(&[]), HashMap::new(), runner);
-    [media.tools(), apps.tools()].concat()
+    [
+        media.tools(),
+        apps.tools(),
+        search::tool_specs(),
+        video::tool_specs(),
+    ]
+    .concat()
+}
+
+#[test]
+fn les_outils_de_recherche_sont_proposes_a_l_ia() {
+    let tools = real_tools();
+    for name in ["web_search", "open_results", "play_video"] {
+        assert!(tools.iter().any(|t| t.name == name), "{name}");
+    }
+    let new: Vec<Phrase> = phrases()
+        .into_iter()
+        .filter(|p| {
+            matches!(
+                p.tool.as_str(),
+                "web_search" | "open_results" | "play_video"
+            )
+        })
+        .collect();
+    assert!(new.iter().filter(|p| p.fast).count() >= 10);
+    assert!(new.iter().filter(|p| !p.fast).count() >= 4);
 }
 
 #[test]
