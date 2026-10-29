@@ -15,13 +15,14 @@ use futures_util::{SinkExt, StreamExt};
 use hub::HelloOutcome;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason};
 use jarvis_protocol::{EarId, Fingerprint};
+use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Semaphore, mpsc};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
@@ -32,10 +33,15 @@ use tracing::{debug, info, warn};
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 /// Sessions ouvertes au plus.
 pub const MAX_SESSIONS: usize = 16;
-/// Poignées de main en cours au plus.
-pub const MAX_HANDSHAKES: usize = 8;
-/// Délai pour TLS, puis pour le premier message.
-pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Poignées de main en cours au plus, venues du réseau.
+pub const MAX_HANDSHAKES: usize = 64;
+/// Poignées de main en cours au plus pour une même adresse IP du réseau.
+pub const MAX_HANDSHAKES_PER_IP: usize = 2;
+/// Places réservées à la boucle locale (l'oreille du PC) : le réseau ne peut pas les
+/// prendre.
+pub const LOOPBACK_HANDSHAKES: usize = 8;
+/// Délai de toute la poignée de main : TLS, WebSocket et premier message.
+pub const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(3);
 /// Son d'une phrase gardé au plus : 1 s de tête + 12 s, à 16 kHz.
 pub const MAX_PHRASE_SAMPLES: usize = 13 * 16_000;
 /// Fenêtre de l'arbitre au plus : l'oreille attend son élection 2 s après `wake`
@@ -82,7 +88,7 @@ pub async fn serve_with_limits(
     limits: Limits,
 ) -> anyhow::Result<()> {
     let acceptor = tokio_rustls::TlsAcceptor::from(tls);
-    let handshakes = Arc::new(Semaphore::new(MAX_HANDSHAKES));
+    let slots = Slots::new(MAX_HANDSHAKES, MAX_HANDSHAKES_PER_IP, LOOPBACK_HANDSHAKES);
     loop {
         let (tcp, peer) = match listener.accept().await {
             Ok(accepted) => accepted,
@@ -93,7 +99,7 @@ pub async fn serve_with_limits(
                 continue;
             }
         };
-        let Ok(permit) = handshakes.clone().try_acquire_owned() else {
+        let Some(permit) = slots.try_acquire(peer.ip()) else {
             debug!(%peer, "trop de poignées de main en cours : connexion fermée");
             continue;
         };
@@ -111,6 +117,79 @@ pub async fn serve_with_limits(
                 session::run(ws, ear, session, outbox, hub, limits).await;
             }
         });
+    }
+}
+
+/// Places des poignées de main en cours : un lot pour le réseau, borné par adresse IP,
+/// et un lot à part pour la boucle locale. Des connexions muettes venues du réseau ne
+/// peuvent donc ni bloquer l'oreille du PC, ni, depuis une seule machine, les autres
+/// oreilles.
+struct Slots {
+    network: Arc<Semaphore>,
+    loopback: Arc<Semaphore>,
+    per_ip: usize,
+    by_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+}
+
+/// Place prise ; rendue en la lâchant.
+enum Slot {
+    Loopback {
+        _permit: OwnedSemaphorePermit,
+    },
+    Network {
+        _permit: OwnedSemaphorePermit,
+        ip: IpAddr,
+        by_ip: Arc<Mutex<HashMap<IpAddr, usize>>>,
+    },
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        if let Slot::Network { ip, by_ip, .. } = self {
+            let mut by_ip = by_ip.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(n) = by_ip.get_mut(ip) {
+                *n -= 1;
+                if *n == 0 {
+                    by_ip.remove(ip);
+                }
+            }
+        }
+    }
+}
+
+impl Slots {
+    fn new(network: usize, per_ip: usize, loopback: usize) -> Self {
+        Slots {
+            network: Arc::new(Semaphore::new(network)),
+            loopback: Arc::new(Semaphore::new(loopback)),
+            per_ip,
+            by_ip: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Une place pour `ip`, s'il en reste (sinon la connexion est fermée).
+    fn try_acquire(&self, ip: IpAddr) -> Option<Slot> {
+        let ip = ip.to_canonical();
+        if ip.is_loopback() {
+            return self
+                .loopback
+                .clone()
+                .try_acquire_owned()
+                .ok()
+                .map(|permit| Slot::Loopback { _permit: permit });
+        }
+        let mut by_ip = self.by_ip.lock().unwrap_or_else(|e| e.into_inner());
+        let count = by_ip.entry(ip).or_insert(0);
+        if *count >= self.per_ip {
+            return None;
+        }
+        let permit = self.network.clone().try_acquire_owned().ok()?;
+        *count += 1;
+        Some(Slot::Network {
+            _permit: permit,
+            ip,
+            by_ip: self.by_ip.clone(),
+        })
     }
 }
 
@@ -138,7 +217,9 @@ async fn handshake(
     limits: Limits,
 ) -> Option<Opened<tokio_rustls::server::TlsStream<TcpStream>>> {
     let _ = tcp.set_nodelay(true);
-    let tls = match tokio::time::timeout(limits.handshake_timeout, acceptor.accept(tcp)).await {
+    // Un seul délai pour tout : TLS, WebSocket et premier message.
+    let deadline = tokio::time::Instant::now() + limits.handshake_timeout;
+    let tls = match tokio::time::timeout_at(deadline, acceptor.accept(tcp)).await {
         Ok(Ok(tls)) => tls,
         Ok(Err(e)) => {
             debug!(%peer, "TLS refusé : {e}");
@@ -149,7 +230,6 @@ async fn handshake(
             return None;
         }
     };
-    let deadline = tokio::time::Instant::now() + limits.handshake_timeout;
     let accepted = tokio::time::timeout_at(
         deadline,
         tokio_tungstenite::accept_async_with_config(tls, Some(ws_config())),
@@ -478,6 +558,54 @@ fn lan_hosts(listen: IpAddr) -> Vec<IpAddr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().unwrap()
+    }
+
+    #[test]
+    fn places_bornees_par_adresse_ip() {
+        let slots = Slots::new(64, 2, 8);
+        let a1 = slots.try_acquire(ip("192.168.1.50")).unwrap();
+        let _a2 = slots.try_acquire(ip("192.168.1.50")).unwrap();
+        // Troisième poignée de main de la même machine : refusée…
+        assert!(slots.try_acquire(ip("192.168.1.50")).is_none());
+        // … pas celles des autres.
+        assert!(slots.try_acquire(ip("192.168.1.51")).is_some());
+        // Une place rendue : elle repasse.
+        drop(a1);
+        assert!(slots.try_acquire(ip("192.168.1.50")).is_some());
+    }
+
+    #[test]
+    fn boucle_locale_jamais_privee_de_place() {
+        let slots = Slots::new(4, 2, 2);
+        // Le réseau prend toutes ses places (deux machines).
+        let held: Vec<Slot> = ["10.0.0.1", "10.0.0.1", "10.0.0.2", "10.0.0.2"]
+            .iter()
+            .map(|a| slots.try_acquire(ip(a)).unwrap())
+            .collect();
+        assert!(slots.try_acquire(ip("10.0.0.3")).is_none());
+        // L'oreille du PC passe quand même, en IPv4, IPv6 ou IPv4 dans IPv6.
+        let _l1 = slots.try_acquire(ip("127.0.0.1")).unwrap();
+        let _l2 = slots.try_acquire(ip("::1")).unwrap();
+        assert!(slots.try_acquire(ip("::ffff:127.0.0.1")).is_none());
+        drop(held);
+        assert!(slots.try_acquire(ip("10.0.0.3")).is_some());
+    }
+
+    #[test]
+    fn ipv4_dans_ipv6_compte_comme_la_meme_adresse() {
+        let slots = Slots::new(64, 2, 8);
+        let _a = slots.try_acquire(ip("192.168.1.50")).unwrap();
+        let _b = slots.try_acquire(ip("::ffff:192.168.1.50")).unwrap();
+        assert!(slots.try_acquire(ip("192.168.1.50")).is_none());
+    }
+
+    #[test]
+    fn delai_de_poignee_de_main_court() {
+        assert!(HANDSHAKE_TIMEOUT <= Duration::from_secs(3));
+    }
 
     #[test]
     fn fenetre_de_l_arbitre_bornee_sous_le_delai_de_l_oreille() {
