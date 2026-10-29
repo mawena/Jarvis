@@ -269,3 +269,9 @@ Démarrage : `git flow feature start agent-de-code` depuis `develop`.
 5. Jamais de déclenchement par l'IA, même en mode en ligne : il faut nommer le projet. D'accord ?
 6. Annonce de fin jouée même quand l'écoute est coupée ?
 7. Nom d'oreille par défaut `pc` dans `Listen.ear` : à aligner avec le plan de la phase 4.
+
+## Décisions de Charles (2026-10-29)
+
+- Question 1 : **commit de fin par Jarvis** sur la branche de la tâche (identité et signature de Charles, sans attribution), `commit_at_end = true`.
+- Question 3 : **abonnement de Charles** : `ANTHROPIC_API_KEY` retirée de l'environnement de l'agent (`pass_api_key = false`) ; modèle par défaut de Claude Code, sans plafond.
+- Questions 2, 4 à 7 : choix proposés par le plan.

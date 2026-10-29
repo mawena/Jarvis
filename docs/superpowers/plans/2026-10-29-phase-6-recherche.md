@@ -279,3 +279,9 @@ Mesuré le 2026-10-29 sur le PC de Charles :
 4. Installer un `yt-dlp` récent (pipx) et `mpv-mpris` pour lire les vidéos dans mpv plus tard ?
 5. Autoriser la lecture automatique de youtube.com dans Firefox ?
 6. Régler `OLLAMA_NUM_PARALLEL=2` (deux caches, environ 0,5 Go de plus), pour que les résumés n'évincent plus le préfixe des outils ?
+
+## Décisions de Charles (2026-10-29)
+
+- Ordre des phases : 6, puis 7, puis 4.
+- Question 1 : **résumé par l'IA locale, environ 10 s**, repli sur l'extrait au-delà de `local_summary_timeout_ms` (plan inchangé).
+- Questions 2 à 6 : choix proposés par le plan (« c'est quoi X » reste une conversation ; page SearXNG pour « ouvre les résultats » ; navigateur, pas mpv ; pas de changement d'Ollama pour l'instant).
