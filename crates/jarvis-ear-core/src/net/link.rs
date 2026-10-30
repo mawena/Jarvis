@@ -192,6 +192,40 @@ impl EarLink {
     }
 }
 
+/// Liaison avec le cerveau, vue de la session de l'oreille (vrai [`EarLink`], lien
+/// supervisé du PC, faux lien dans les tests).
+#[async_trait::async_trait]
+pub trait Link: Send + Sync + 'static {
+    /// Échoue tout de suite hors connexion : rien n'est gardé.
+    fn send(&self, message: EarMessage) -> Result<(), LinkDown>;
+    /// Son du micro ; jamais mis en attente hors connexion.
+    fn send_audio(&self, utterance: u32, samples: &[i16]) -> Result<(), LinkDown>;
+    /// Nouvelle tentative de connexion, tout de suite.
+    fn nudge(&self);
+    fn state(&self) -> watch::Receiver<LinkState>;
+    /// Envoie ce qui est déjà accepté, puis ferme.
+    async fn close(&self);
+}
+
+#[async_trait::async_trait]
+impl Link for EarLink {
+    fn send(&self, message: EarMessage) -> Result<(), LinkDown> {
+        EarLink::send(self, message)
+    }
+    fn send_audio(&self, utterance: u32, samples: &[i16]) -> Result<(), LinkDown> {
+        EarLink::send_audio(self, utterance, samples)
+    }
+    fn nudge(&self) {
+        EarLink::nudge(self)
+    }
+    fn state(&self) -> watch::Receiver<LinkState> {
+        EarLink::state(self)
+    }
+    async fn close(&self) {
+        EarLink::close(self).await
+    }
+}
+
 /// Issue d'une tentative de connexion.
 enum Attempt {
     Connected(Box<Ws>, StatusInfo, SocketAddr),

@@ -10,7 +10,7 @@ pub mod store;
 pub mod tls;
 
 pub use link::{
-    EarLink, LinkConfig, LinkDown, LinkEvent, LinkState, PairError, Paired, pair_with_code,
+    EarLink, Link, LinkConfig, LinkDown, LinkEvent, LinkState, PairError, Paired, pair_with_code,
 };
 pub use store::{Pairing, PairingStore};
 
