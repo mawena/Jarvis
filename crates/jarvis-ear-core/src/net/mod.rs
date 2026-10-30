@@ -6,6 +6,7 @@ pub mod backoff;
 pub mod batch;
 pub mod discovery;
 pub mod link;
+pub mod pair;
 pub mod store;
 pub mod tls;
 
