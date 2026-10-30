@@ -2,6 +2,7 @@
 //! réseau vers le cerveau ([`net`]).
 
 pub mod earshot;
+pub mod enroll;
 pub mod listener;
 pub mod net;
 pub mod resample;

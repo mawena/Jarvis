@@ -21,9 +21,10 @@ toml.workspace = true
 tracing.workspace = true
 getrandom.workspace = true
 mdns-sd.workspace = true
+# Prises du mot d'éveil en WAV (déjà tiré par rustpotter).
+hound.workspace = true
 
 [dev-dependencies]
-hound.workspace = true
 tempfile.workspace = true
 directories.workspace = true
 rcgen.workspace = true
