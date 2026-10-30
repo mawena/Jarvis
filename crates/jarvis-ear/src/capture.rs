@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use anyhow::{Context, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use jarvis_ear_core::session::Capture;
 use tokio::sync::mpsc;
 
 /// Délai avant un nouvel essai d'ouverture du micro.
@@ -31,14 +32,6 @@ const POOL_CAPACITY: usize = 8192;
 pub struct Samples {
     data: Vec<f32>,
     home: Option<std_mpsc::SyncSender<Vec<f32>>>,
-}
-
-impl Samples {
-    /// Échantillons hors pool (tests).
-    #[cfg(test)]
-    pub fn detached(data: Vec<f32>) -> Self {
-        Self { data, home: None }
-    }
 }
 
 impl Deref for Samples {
@@ -122,24 +115,9 @@ impl Pool {
     }
 }
 
-/// Ce que la capture transmet à l'application.
-#[derive(Debug, PartialEq)]
-pub enum CaptureEvent {
-    /// Le flux est ouvert avec ce format ; les `Samples` suivants sont entrelacés ainsi.
-    Format { rate: u32, channels: u16 },
-    /// Échantillons entrelacés au format du périphérique.
-    Samples(Samples),
-    /// Le micro est absent ou perdu (nouvel essai dans 5 s).
-    Unavailable,
-}
-
-/// Source audio de l'application (remplaçable dans les tests).
-pub trait Capture: Send {
-    /// Ouvre le flux et envoie les événements dans `tx`.
-    fn start(&mut self, tx: mpsc::Sender<CaptureEvent>) -> anyhow::Result<()>;
-    /// Ferme le flux (coupure totale).
-    fn stop(&mut self);
-}
+/// Ce que la capture transmet à la session (`Unavailable` : micro absent ou perdu,
+/// nouvel essai dans 5 s).
+pub type CaptureEvent = jarvis_ear_core::session::CaptureEvent<Samples>;
 
 /// Poignée du thread de capture.
 pub struct CaptureHandle {
@@ -189,6 +167,8 @@ impl CpalCapture {
 }
 
 impl Capture for CpalCapture {
+    type Samples = Samples;
+
     fn start(&mut self, tx: mpsc::Sender<CaptureEvent>) -> anyhow::Result<()> {
         self.stop();
         self.handle = Some(start(tx, self.device.clone())?);

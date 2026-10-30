@@ -1,42 +1,10 @@
 //! Icône de la zone de notification : statut du micro et menu de contrôle.
 
 use jarvis_ear_core::MicState;
+use jarvis_ear_core::session::{BrainLink, EarCommand as TrayCommand, EarStatus as TrayState};
 use jarvis_protocol::Mode;
 use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem};
 use tokio::sync::mpsc::UnboundedSender;
-
-/// Liaison avec le cerveau (poussée par le lien réseau).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BrainLink {
-    Connected {
-        mode: Mode,
-        local_model: String,
-    },
-    /// Première tentative, ou reconnexion après une coupure.
-    Connecting,
-    Unreachable,
-    /// Jeton ou oreille refusés (ou version incompatible) : il faut réappairer.
-    Refused,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TrayState {
-    pub mic: MicState,
-    pub capturing: bool,
-    pub brain: BrainLink,
-    pub last_heard: Option<String>,
-}
-
-/// Commandes émises par le menu de l'icône.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TrayCommand {
-    Mute,
-    Unmute,
-    HardMute,
-    Reopen,
-    SetMode(Mode),
-    Quit,
-}
 
 pub struct JarvisTray {
     pub state: TrayState,

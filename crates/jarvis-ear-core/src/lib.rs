@@ -7,6 +7,7 @@ pub mod listener;
 pub mod net;
 pub mod resample;
 pub mod rustpotter;
+pub mod session;
 
 /// Fréquence d'échantillonnage de tout le traitement audio (Hz, mono).
 pub const SAMPLE_RATE: u32 = 16_000;

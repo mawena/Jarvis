@@ -26,10 +26,9 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, anyhow};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use jarvis_ear_core::resample::resample;
+use jarvis_ear_core::session::Player;
+use jarvis_ear_core::session::audio::FALLBACK_RATE;
 use tokio::sync::watch;
-
-/// Fréquence des bips si la sortie est inconnue.
-const FALLBACK_RATE: u32 = 48_000;
 /// Sons en file au plus (au-delà, le son est abandonné).
 const QUEUE: usize = 8;
 /// Fermeture de la sortie après ce délai sans son.
@@ -44,46 +43,6 @@ const STALL_MARGIN: Duration = Duration::from_secs(2);
 const POLL: Duration = Duration::from_millis(20);
 /// Attente maximale du thread en quittant (bloqué dans l'ouverture de la sortie : abandonné).
 const QUIT_WAIT: Duration = Duration::from_secs(1);
-
-/// Sortie sonore (remplaçable dans les tests).
-pub trait Player: Send {
-    /// Fréquence conseillée pour générer les bips.
-    fn sample_rate(&self) -> u32;
-    /// Ajoute un son mono à la file ; il sera joué après ceux déjà en file.
-    fn play(&mut self, samples: Vec<f32>, sample_rate: u32);
-    /// Coupe tout de suite le son en cours et vide la file.
-    fn stop(&mut self);
-    /// `true` tant qu'un son est en file ou en cours de lecture.
-    fn playing(&self) -> watch::Receiver<bool>;
-
-    fn is_playing(&self) -> bool {
-        *self.playing().borrow()
-    }
-}
-
-/// Aucune sortie : les sons sont ignorés.
-pub struct SilentPlayer {
-    playing: watch::Sender<bool>,
-}
-
-impl SilentPlayer {
-    pub fn new() -> Self {
-        Self {
-            playing: watch::channel(false).0,
-        }
-    }
-}
-
-impl Player for SilentPlayer {
-    fn sample_rate(&self) -> u32 {
-        FALLBACK_RATE
-    }
-    fn play(&mut self, _: Vec<f32>, _: u32) {}
-    fn stop(&mut self) {}
-    fn playing(&self) -> watch::Receiver<bool> {
-        self.playing.subscribe()
-    }
-}
 
 /// Un son prêt pour le callback : mono, à la fréquence de la sortie.
 struct Chunk {

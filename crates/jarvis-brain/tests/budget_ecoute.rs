@@ -1,8 +1,8 @@
 //! Le pire cas d'une phrase tient dans l'attente de la réponse par l'oreille.
 //!
-//! Une fois élue, l'oreille attend la réponse à sa phrase `LISTEN_TIMEOUT`
-//! (jarvis-ear, client.rs, d'où `RESPONSE_TIMEOUT`) : au-delà, elle n'attend plus et
-//! Jarvis reste muet. Pire cas côté cerveau, mode par mode :
+//! Une fois élue, l'oreille attend la réponse à sa phrase `RESPONSE_TIMEOUT`
+//! (jarvis-ear-core, session/mod.rs) : au-delà, elle n'attend plus et Jarvis reste
+//! muet. Pire cas côté cerveau, mode par mode :
 //!
 //! ```text
 //!   reconnaissance vocale (marge)           2 s
@@ -12,9 +12,9 @@
 //! ```
 //!
 //! Les délais des compétences sont lus sur les vraies compétences, réglages par
-//! défaut. Les constantes privées (Ollama, Claude, synthèse, oreille) sont lues
-//! dans leur source : jarvis-brain ne dépend pas de jarvis-ear, et ces constantes
-//! ne sont pas publiques.
+//! défaut. Les constantes (Ollama, Claude, synthèse, oreille) sont lues dans leur
+//! source : jarvis-brain ne dépend pas de jarvis-ear-core, et celles du cerveau ne
+//! sont pas publiques.
 
 use jarvis_brain::config::Config;
 use jarvis_brain::llm::Understanding;
@@ -37,14 +37,15 @@ const STT_MARGIN: Duration = Duration::from_secs(2);
 const OLLAMA_SRC: &str = include_str!("../src/llm/ollama.rs");
 const CLAUDE_SRC: &str = include_str!("../src/llm/claude.rs");
 const TTS_SRC: &str = include_str!("../src/tts/mod.rs");
-const EAR_CLIENT_SRC: &str = include_str!("../../jarvis-ear/src/client.rs");
+const EAR_SESSION_SRC: &str = include_str!("../../jarvis-ear-core/src/session/mod.rs");
 
-/// Valeur de `const <name>: Duration = Duration::from_secs(N);` dans `src`.
+/// Valeur de `[pub ]const <name>: Duration = Duration::from_secs(N);` dans `src`.
 fn const_secs(src: &str, name: &str) -> Duration {
     let prefix = format!("const {name}: Duration = Duration::from_secs(");
     let line = src
         .lines()
         .map(str::trim)
+        .map(|l| l.strip_prefix("pub ").unwrap_or(l))
         .find_map(|l| l.strip_prefix(&prefix))
         .unwrap_or_else(|| panic!("constante {name} introuvable"));
     let secs = line
@@ -97,7 +98,7 @@ fn constantes_lues_dans_les_sources() {
 
 #[test]
 fn pire_cas_local_tient_dans_le_delai_d_ecoute_de_l_oreille() {
-    let ear = const_secs(EAR_CLIENT_SRC, "LISTEN_TIMEOUT");
+    let ear = const_secs(EAR_SESSION_SRC, "RESPONSE_TIMEOUT");
     let worst = worst_case(Mode::Local);
     assert_eq!(worst, Duration::from_secs(45));
     assert!(
@@ -110,7 +111,7 @@ fn pire_cas_local_tient_dans_le_delai_d_ecoute_de_l_oreille() {
 fn le_cerveau_abandonne_avant_que_l_oreille_n_attende_plus() {
     // Traitement arrêté (réponse `Error`, bip d'échec) avant que l'oreille ne cesse
     // d'attendre, fenêtre de l'arbitre et réseau (1 s) compris ; jamais avant le pire cas.
-    let ear = const_secs(EAR_CLIENT_SRC, "LISTEN_TIMEOUT");
+    let ear = const_secs(EAR_SESSION_SRC, "RESPONSE_TIMEOUT");
     let worst = worst_case(Mode::Local).max(worst_case(Mode::Online));
     assert!(
         worst <= PROCESS_TIMEOUT,
@@ -124,7 +125,7 @@ fn le_cerveau_abandonne_avant_que_l_oreille_n_attende_plus() {
 
 #[test]
 fn pire_cas_en_ligne_tient_dans_le_delai_d_ecoute_de_l_oreille() {
-    let ear = const_secs(EAR_CLIENT_SRC, "LISTEN_TIMEOUT");
+    let ear = const_secs(EAR_SESSION_SRC, "RESPONSE_TIMEOUT");
     let worst = worst_case(Mode::Online);
     assert!(
         worst <= ear,
