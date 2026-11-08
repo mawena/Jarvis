@@ -2841,6 +2841,7 @@ WantedBy=graphical-session.target
             platform: platform.into(),
             connected,
             local,
+            person: None,
         }
     }
 
