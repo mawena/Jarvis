@@ -3,11 +3,13 @@ use jarvis_brain::announce::AnnouncementBoard;
 use jarvis_brain::brain::{Brain, SystemClock};
 use jarvis_brain::config::{Config, LocalLlmConfig};
 use jarvis_brain::ducking::{Ducker, WpctlDucker};
+use jarvis_brain::ears::EarRegistry;
 use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, NetworkPaths, Services};
+use jarvis_brain::people::People;
 use jarvis_brain::persona::Persona;
 use jarvis_brain::server::{SpeakerState, serve_with_hub};
 use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
@@ -154,9 +156,23 @@ async fn main() -> anyhow::Result<()> {
         ),
     }
 
+    let people = Arc::new(People::open_or_degraded(
+        &People::default_path(),
+        &config.people.owner,
+    ));
+    match people.degraded() {
+        Some(raison) => warn!(
+            raison = %raison,
+            "annuaire des personnes illisible : mode dégradé (seule la voix de Charles reconnue \
+             et le texte tapé ont des droits, aucune modification possible)"
+        ),
+        None => prune_people(&people),
+    }
+
     let brain = Arc::new(
         Brain::new(skills, local.clone(), online, modes)
             .with_local_model(config.local.model.clone())
+            .with_people(people)
             .with_persona(Persona::from(&config)),
     );
     let _ = warm_tools.set(brain.tools());
@@ -266,6 +282,23 @@ async fn main() -> anyhow::Result<()> {
         info!("cerveau arrêté");
     }
     result
+}
+
+/// Retire de l'annuaire les oreilles qui ne sont plus au registre (retrait fait pendant
+/// que le cerveau était arrêté). Registre illisible : rien n'est retiré.
+fn prune_people(people: &People) {
+    match EarRegistry::load(&EarRegistry::default_path()) {
+        Ok(registry) => {
+            let known: Vec<_> = registry.list().into_iter().map(|e| e.id).collect();
+            if let Err(e) = people.prune(&known) {
+                warn!(erreur = %e, "annuaire : nettoyage des oreilles retirées impossible");
+            }
+        }
+        Err(e) => warn!(
+            erreur = %e,
+            "registre des oreilles illisible : annuaire non nettoyé"
+        ),
+    }
 }
 
 /// Registre des tâches de l'agent : `~/.local/state/jarvis/tasks`.
