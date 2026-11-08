@@ -13,7 +13,10 @@ class StartActivity : Activity() {
     override fun onResume() {
         super.onResume()
         getSystemService(NotificationManager::class.java)?.cancel(EarNotification.ID_START)
-        if (intent?.getBooleanExtra(EXTRA_RESTART, false) == true) {
+        // Toucher de la notification « micro bloqué » : action ACTION_RESTART (tâche 6).
+        val restart = intent?.action == ListenService.ACTION_RESTART ||
+            intent?.getBooleanExtra(EXTRA_RESTART, false) == true
+        if (restart) {
             ListenService.send(this, ListenService.ACTION_RESTART)
         } else {
             ListenService.start(this)
