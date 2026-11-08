@@ -90,7 +90,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 4.12 Essai réel avec Charles : oreille du PC sur le réseau, appairage d'une deuxième oreille (Charles, [fiche](docs/essais/essai-4.12-reseau.md))
 
 ## Phase 5 : oreille Android (Pixel 4 XL)
-*Plan : [phase 5](docs/superpowers/plans/2026-10-30-phase-5-oreille-android.md), branche `feature/oreille-android` (en cours)*
+*Plan : [phase 5](docs/superpowers/plans/2026-10-30-phase-5-oreille-android.md), branche `feature/oreille-android` (fusionnée dans `develop`) — guide : [docs/android.md](docs/android.md)*
 
 - [x] 5.1 Rédiger le plan de la phase 5 ([plan](docs/superpowers/plans/2026-10-30-phase-5-oreille-android.md))
 - [x] 5.2 Session de l'oreille partagée dans `jarvis-ear-core` (l'oreille du PC inchangée), appairage et enrôlement portables, liaisons UniFFI (`jarvis-ear-ffi`) pour Kotlin, compilation Android arm64 et scripts `android-build.sh` / `android-install.sh` (tâches 1, 2, 3, 5)
@@ -98,7 +98,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 5.4 Écrans : appairage (scan du QR code ou adresse collée), enregistrement du mot d'éveil sur le téléphone, autorisations et batterie (tâche 7)
 - [x] 5.5 Démarrage automatique (lancement au démarrage du téléphone, sinon notification à toucher ; micro bloqué par Android détecté) (tâche 8)
 - [x] 5.6 Notification permanente avec statut et boutons « Couper / Réactiver l'écoute » et « Coupure totale » (tâche 6)
-- [ ] 5.8 Score de la voix par oreille dans le journal du cerveau, oreilles distantes dans `doctor`, documentation (`docs/android.md`), relecture de la phase 5 et corrections (tâches 4, 9, 10)
+- [x] 5.8 Score de la voix par oreille dans le journal du cerveau, oreilles distantes dans `doctor`, documentation (`docs/android.md`), relecture de la phase 5 et corrections (tâches 4, 9, 10 ; relecture : 3 défauts et 5 points mineurs corrigés ; l'essai de fumée par adb se fait au début de l'essai 5.7)
 - [ ] 5.7 Essai de bout en bout depuis une autre pièce, écran éteint (Charles) — fiche d'essai : `docs/essais/essai-5.7-android.md` (tâche 9)
 
 ## Phase 6 : recherche et vidéos
