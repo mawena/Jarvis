@@ -93,11 +93,11 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 *Plan : [phase 5](docs/superpowers/plans/2026-10-30-phase-5-oreille-android.md), branche `feature/oreille-android` (en cours)*
 
 - [x] 5.1 Rédiger le plan de la phase 5 ([plan](docs/superpowers/plans/2026-10-30-phase-5-oreille-android.md))
-- [ ] 5.2 Session de l'oreille partagée dans `jarvis-ear-core` (l'oreille du PC inchangée), appairage et enrôlement portables, liaisons UniFFI (`jarvis-ear-ffi`) pour Kotlin, compilation Android arm64 et scripts `android-build.sh` / `android-install.sh` (tâches 1, 2, 3, 5)
-- [ ] 5.3 Service au premier plan avec écoute continue, écran éteint : micro 16 kHz, voix de Jarvis sur le téléphone, verrous de veille, Wi-Fi et multicast (tâche 6)
-- [ ] 5.4 Écrans : appairage (scan du QR code ou adresse collée), enregistrement du mot d'éveil sur le téléphone, autorisations et batterie (tâche 7)
-- [ ] 5.5 Démarrage automatique (lancement au démarrage du téléphone, sinon notification à toucher ; micro bloqué par Android détecté) (tâche 8)
-- [ ] 5.6 Notification permanente avec statut et boutons « Couper / Réactiver l'écoute » et « Coupure totale » (tâche 6)
+- [x] 5.2 Session de l'oreille partagée dans `jarvis-ear-core` (l'oreille du PC inchangée), appairage et enrôlement portables, liaisons UniFFI (`jarvis-ear-ffi`) pour Kotlin, compilation Android arm64 et scripts `android-build.sh` / `android-install.sh` (tâches 1, 2, 3, 5)
+- [x] 5.3 Service au premier plan avec écoute continue, écran éteint : micro 16 kHz, voix de Jarvis sur le téléphone, verrous de veille, Wi-Fi et multicast (tâche 6)
+- [x] 5.4 Écrans : appairage (scan du QR code ou adresse collée), enregistrement du mot d'éveil sur le téléphone, autorisations et batterie (tâche 7)
+- [x] 5.5 Démarrage automatique (lancement au démarrage du téléphone, sinon notification à toucher ; micro bloqué par Android détecté) (tâche 8)
+- [x] 5.6 Notification permanente avec statut et boutons « Couper / Réactiver l'écoute » et « Coupure totale » (tâche 6)
 - [ ] 5.8 Score de la voix par oreille dans le journal du cerveau, oreilles distantes dans `doctor`, documentation (`docs/android.md`), relecture de la phase 5 et corrections (tâches 4, 9, 10)
 - [ ] 5.7 Essai de bout en bout depuis une autre pièce, écran éteint (Charles) — fiche d'essai : `docs/essais/essai-5.7-android.md` (tâche 9)
 
