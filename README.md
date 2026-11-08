@@ -88,6 +88,7 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 | `jarvis say "lance VS Code"` | même chose, par écrit |
 | `jarvis mode local` / `jarvis mode en-ligne` | choisir l'IA |
 | `jarvis pair` / `jarvis ears` / `jarvis unpair <nom ou id>` | appairer, lister, retirer une oreille |
+| `jarvis person …` / `jarvis role …` | personnes et rôles (qui a le droit de demander quoi) |
 | `jarvisctl status` | état du cerveau, de l'oreille, du mode, d'Ollama |
 | `jarvisctl logs [-f] [--oreille]` | journaux |
 | `jarvisctl start` / `stop` / `restart` `[cerveau\|oreille]` | piloter les services |
@@ -95,6 +96,16 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 
 Les réglages sont dans `~/.config/jarvis/config.toml` (cerveau) et `~/.config/jarvis/ear.toml`
 (oreille). Toutes les clés sont facultatives.
+
+## Personnes et rôles
+
+Jarvis peut connaître plusieurs personnes, chacune avec un rôle (la liste de ce qu'elle peut
+demander). Par défaut il n'y a que Charles, `admin`, et rien ne change pour lui. On peut par
+exemple rattacher l'oreille d'un proche à un rôle `famille` qui ne permet que la musique : la
+personne qui parle est déduite de l'oreille, sauf la voix reconnue de Charles qui vaut Charles
+partout. Un invité ne peut jamais faire d'action risquée ni lancer l'agent. Tout se gère au
+clavier (`jarvis person …`, `jarvis role …`). Le détail est dans
+[docs/personnes.md](docs/personnes.md).
 
 ## Ce qui quitte le PC
 
@@ -115,6 +126,7 @@ Le détail est dans [docs/recherche.md](docs/recherche.md) et
   voix, réglages, dépannage (dont les mots mal compris).
 - [docs/reseau.md](docs/reseau.md) : oreilles en réseau, appairage, pare-feu, certificat.
 - [docs/android.md](docs/android.md) : l'oreille Android (construire, installer, appairer, batterie).
+- [docs/personnes.md](docs/personnes.md) : personnes, rôles et droits, qui parle, `people.toml`.
 - [docs/recherche.md](docs/recherche.md) : recherche sur internet et vidéos.
 - [docs/ia-locale.md](docs/ia-locale.md) : choix du modèle local et de Whisper, mesures.
 - [docs/essais/](docs/essais/README.md) : fiches d'essai en conditions réelles.

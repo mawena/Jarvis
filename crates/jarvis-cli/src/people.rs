@@ -9,22 +9,23 @@ pub enum PersonCommand {
     List,
     /// Ajoute une personne
     Add {
-        #[arg(required = true, num_args = 1..)]
-        name: Vec<String>,
+        /// Nom de la personne (entre guillemets s'il a plusieurs mots)
+        name: String,
         /// Rôle de la personne (voir `jarvis role list`)
         #[arg(long, required = true)]
         role: String,
     },
     /// Retire une personne (refusé pour le propriétaire, ou si elle a une oreille)
     Remove {
-        #[arg(required = true, num_args = 1..)]
-        name: Vec<String>,
+        /// Nom de la personne (entre guillemets s'il a plusieurs mots)
+        name: String,
     },
     /// Change le rôle d'une personne : `jarvis person role Léa famille`
     Role {
-        /// Le nom (un ou plusieurs mots), puis le rôle en dernier
-        #[arg(required = true, num_args = 2..)]
-        args: Vec<String>,
+        /// Nom de la personne (entre guillemets s'il a plusieurs mots)
+        name: String,
+        /// Nouveau rôle (un seul mot)
+        role: String,
     },
     /// Rattache une oreille (nom ou identifiant) : `jarvis person attach Léa Pixel 4 XL`
     Attach {
@@ -42,7 +43,7 @@ pub struct RoleChanges {
     /// Outils autorisés, séparés par des virgules (`media_*,app_launch`)
     #[arg(long)]
     tools: Option<String>,
-    /// Exiger une confirmation même pour les outils sans risque
+    /// Autoriser les actions risquées (veille, redémarrage…) et leur confirmation par « oui »
     #[arg(long, conflicts_with = "no_confirm")]
     confirm: bool,
     /// Ne plus exiger de confirmation
@@ -62,12 +63,12 @@ pub enum RoleCommand {
     List,
     /// Crée un rôle
     Add {
-        #[arg(required = true, num_args = 1..)]
-        name: Vec<String>,
+        /// Nom du rôle (un seul mot : lettres, chiffres, - et _)
+        name: String,
         /// Outils autorisés, séparés par des virgules (`media_*,app_launch`)
         #[arg(long)]
         tools: Option<String>,
-        /// Exiger une confirmation même pour les outils sans risque
+        /// Autoriser les actions risquées (veille, redémarrage…) et leur confirmation par « oui »
         #[arg(long)]
         confirm: bool,
         /// Autoriser l'agent (tâches longues)
@@ -76,15 +77,15 @@ pub enum RoleCommand {
     },
     /// Modifie un rôle (au moins une option ; les autres champs restent inchangés)
     Edit {
-        #[arg(required = true, num_args = 1..)]
-        name: Vec<String>,
+        /// Nom du rôle
+        name: String,
         #[command(flatten)]
         changes: RoleChanges,
     },
     /// Supprime un rôle (refusé s'il est encore porté par quelqu'un)
     Remove {
-        #[arg(required = true, num_args = 1..)]
-        name: Vec<String>,
+        /// Nom du rôle
+        name: String,
     },
 }
 
@@ -100,20 +101,9 @@ fn split_tools(list: &str) -> Vec<String> {
 pub fn person_request(command: PersonCommand) -> ControlRequest {
     match command {
         PersonCommand::List => ControlRequest::PersonList,
-        PersonCommand::Add { name, role } => ControlRequest::PersonAdd {
-            name: name.join(" "),
-            role,
-        },
-        PersonCommand::Remove { name } => ControlRequest::PersonRemove {
-            name: name.join(" "),
-        },
-        PersonCommand::Role { mut args } => {
-            let role = args.pop().unwrap_or_default();
-            ControlRequest::PersonRole {
-                name: args.join(" "),
-                role,
-            }
-        }
+        PersonCommand::Add { name, role } => ControlRequest::PersonAdd { name, role },
+        PersonCommand::Remove { name } => ControlRequest::PersonRemove { name },
+        PersonCommand::Role { name, role } => ControlRequest::PersonRole { name, role },
         PersonCommand::Attach { name, ear } => ControlRequest::PersonAttach {
             name,
             ear: ear.join(" "),
@@ -130,20 +120,18 @@ pub fn role_request(command: RoleCommand) -> ControlRequest {
             confirm,
             agent,
         } => ControlRequest::RoleAdd {
-            name: name.join(" "),
+            name,
             tools: tools.as_deref().map(split_tools).unwrap_or_default(),
             confirm,
             agent,
         },
         RoleCommand::Edit { name, changes } => ControlRequest::RoleEdit {
-            name: name.join(" "),
+            name,
             tools: changes.tools.as_deref().map(split_tools),
             confirm: flag(changes.confirm, changes.no_confirm),
             agent: flag(changes.agent, changes.no_agent),
         },
-        RoleCommand::Remove { name } => ControlRequest::RoleRemove {
-            name: name.join(" "),
-        },
+        RoleCommand::Remove { name } => ControlRequest::RoleRemove { name },
     }
 }
 

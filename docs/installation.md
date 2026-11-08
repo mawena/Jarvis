@@ -74,6 +74,10 @@ Le cerveau et l'oreille se mettent toujours à jour **ensemble** (`jarvisctl upd
 depuis les oreilles en réseau, une oreille trop ancienne est refusée par le cerveau
 (« requête invalide »), et une oreille récente ne sait pas parler à un cerveau ancien.
 
+Les personnes autorisées à parler à Jarvis et leurs droits sont dans
+`~/.local/share/jarvis/people.toml`, créé au premier lancement avec Charles seul (`admin`) ;
+on le gère avec `jarvis person` et `jarvis role` (voir [personnes.md](personnes.md)).
+
 ## Oreilles en réseau
 
 Une autre machine (ou plus tard un téléphone) peut servir d'oreille : `jarvis pair` sur le PC,

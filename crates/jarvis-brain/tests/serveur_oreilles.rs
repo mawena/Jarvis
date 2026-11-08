@@ -1416,7 +1416,7 @@ async fn appairage_personne_inconnue_refuse_sans_ouvrir_la_fenetre() {
         })
         .await,
         ControlResponse::Error {
-            message: "« Zoé » est inconnu.".into()
+            message: "Personne « Zoé » inconnue.".into()
         }
     );
     // Aucune fenêtre ouverte : un code, même plausible, est refusé.
@@ -1878,4 +1878,56 @@ async fn changement_de_role_sans_redemarrage() {
     .await;
     assert!(may(&rig, "media_next"));
     assert!(!may(&rig, "status"));
+}
+
+#[tokio::test]
+async fn set_mode_reseau_respecte_les_roles() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await; // rôle famille : media_* seulement
+    let (id, token) = pair_ear_for(&rig, "Pixel", Some("Léa")).await;
+    let mut pixel = session(&rig, &id, &token).await;
+    // Une invitée sans le droit set_mode ne peut rien changer.
+    for mode in [Mode::Local, Mode::Online] {
+        send(&mut pixel, &EarMessage::SetMode { mode }).await;
+        let BrainMessage::Response {
+            utterance: None,
+            response: ControlResponse::Error { message },
+        } = next(&mut pixel).await
+        else {
+            panic!("erreur attendue")
+        };
+        assert!(message.contains("pas le droit"), "{message}");
+    }
+    // Avec le droit set_mode, le mode local passe, jamais le mode en ligne.
+    let response = cmd(
+        &mut cli,
+        ControlRequest::RoleEdit {
+            name: "famille".into(),
+            tools: Some(vec!["media_*".into(), "set_mode".into()]),
+            confirm: None,
+            agent: None,
+        },
+    )
+    .await;
+    assert!(!is_error(&response), "{response:?}");
+    send(&mut pixel, &EarMessage::SetMode { mode: Mode::Online }).await;
+    assert!(matches!(
+        next(&mut pixel).await,
+        BrainMessage::Response {
+            response: ControlResponse::Error { .. },
+            ..
+        }
+    ));
+    send(&mut pixel, &EarMessage::SetMode { mode: Mode::Local }).await;
+    assert!(matches!(
+        next(&mut pixel).await,
+        BrainMessage::Response {
+            response: ControlResponse::Status {
+                mode: Mode::Local,
+                ..
+            },
+            ..
+        }
+    ));
 }

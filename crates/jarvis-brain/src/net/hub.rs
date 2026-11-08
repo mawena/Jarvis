@@ -8,12 +8,13 @@ use crate::brain::Brain;
 use crate::ears::{EarRecord, EarRegistry, hex};
 use crate::listen::ListenService;
 use crate::pairing::{PairAttempt, PairingWindow};
-use crate::people::{EarPerson, PeopleError};
+use crate::people::{Access, EarPerson, PeopleError, Trust};
 use crate::tts::Voice;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
 use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
+use jarvis_skills::Risk;
 use jarvis_skills::text::fold;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -49,6 +50,9 @@ const MAX_PLATFORM_CHARS: usize = 32;
 /// Réponse à une oreille distante qui demande le mode en ligne.
 pub const ONLINE_FROM_PC_ONLY: &str =
     "Le mode en ligne se demande à la voix (avec confirmation) ou depuis le PC.";
+
+/// Réponse à une oreille dont la personne n'a pas le droit de changer le mode.
+pub const MODE_FORBIDDEN: &str = "Vous n'avez pas le droit de changer le mode.";
 
 /// Rappel de l'annonce mDNS : `true` pendant une fenêtre d'appairage.
 pub type PairingHook = Arc<dyn Fn(bool) + Send + Sync>;
@@ -872,7 +876,26 @@ impl State {
             }
             EarMessage::SetMode { mode } => {
                 let local = self.sessions.get(ear).is_some_and(|s| s.record.local);
-                if mode == Mode::Online && !local {
+                let people = self.services.brain.people();
+                let (speaker, guest) = match people.person_of(ear) {
+                    EarPerson::Owner => (people.owner_speaker(Trust::Accepted), false),
+                    EarPerson::Guest(name) => (people.speaker(&name, Trust::Unverified), true),
+                    EarPerson::Unknown => (people.speaker("", Trust::Unverified), true),
+                };
+                if speaker.check("set_mode", Risk::Direct) != Access::Allowed {
+                    warn!(oreille = %ear, "changement de mode refusé : la personne n'en a pas le droit");
+                    self.send(
+                        ear,
+                        BrainMessage::Response {
+                            utterance: None,
+                            response: ControlResponse::Error {
+                                message: MODE_FORBIDDEN.into(),
+                            },
+                        },
+                    );
+                    return;
+                }
+                if mode == Mode::Online && (!local || guest) {
                     // À la voix, le mode en ligne demande une confirmation exacte : une
                     // oreille d'une autre machine ne peut pas s'en passer.
                     warn!(oreille = %ear, "mode en ligne demandé par une oreille distante : refusé");
@@ -1286,7 +1309,7 @@ impl State {
             .into_iter()
             .find(|p| fold(&p.name) == key)
             .map(|p| p.name)
-            .ok_or_else(|| PeopleError::Unknown(wanted.trim().to_string()).to_string())
+            .ok_or_else(|| PeopleError::UnknownPerson(wanted.trim().to_string()).to_string())
     }
 
     fn close_pairing(&mut self, reason: &str) {

@@ -50,6 +50,17 @@ fenêtre (« plus aucun essai depuis cette machine »), mais les autres peuvent 
 Après 20 codes faux en tout, la fenêtre se ferme. `jarvis pair` rend 0 quand une oreille s'est
 appairée, 1 sinon (délai écoulé, trop d'essais, `Ctrl+C`).
 
+Pour rattacher l'oreille à une personne autre que Charles (voir [personnes.md](personnes.md)) :
+
+```bash
+jarvis pair --person Léa
+```
+
+Sans `--person`, l'oreille est rattachée au propriétaire (Charles). Une personne inconnue est
+refusée, et si le rattachement échoue, l'appairage échoue. `jarvis ears` montre la personne de
+chaque oreille (colonne « Personne »), et `jarvis person attach` rattache une oreille déjà
+appairée.
+
 Pour un téléphone Android, voir [android.md](android.md) : l'appli scanne le QR code ou prend
 l'adresse collée.
 
@@ -74,7 +85,7 @@ voir plus bas). L'appairage est dans `~/.local/share/jarvis/ear/pairing.toml` (0
 ## Lister et retirer les oreilles
 
 ```bash
-jarvis ears              # identifiant court, nom, plateforme, connectée ou non
+jarvis ears              # identifiant court, nom, plateforme, connectée ou non, personne
 jarvis unpair Salon      # par nom
 jarvis unpair 3f9a1c07   # ou par identifiant (la colonne Id de jarvis ears suffit)
 ```
