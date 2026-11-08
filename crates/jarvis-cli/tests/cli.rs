@@ -327,9 +327,9 @@ fn person_list_affiche_le_tableau() {
     assert_eq!(
         lignes(&out),
         [
-            "Nom                    Rôle     Oreilles         Empreinte vocale",
-            "Charles (propriétaire)  admin    PC, Pixel 4 XL   oui",
-            "Léa                    famille  -                non",
+            "Nom                     Rôle     Oreilles        Empreinte vocale",
+            "Charles (propriétaire)  admin    PC, Pixel 4 XL  oui",
+            "Léa                     famille  -               non",
         ]
     );
 }
@@ -478,9 +478,9 @@ fn role_list_affiche_le_tableau() {
     assert_eq!(
         lignes(&out),
         [
-            "Nom      Outils                Confirmer  Agent  Personnes",
-            "admin    tout                  non        oui    1",
-            "famille  media_*, app_launch   oui        non    2",
+            "Nom      Outils               Confirmer  Agent  Personnes",
+            "admin    tout                 non        oui    1",
+            "famille  media_*, app_launch  oui        non    2",
         ]
     );
 }
