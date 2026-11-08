@@ -128,10 +128,10 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 *Plan : [phase 8](docs/superpowers/plans/2026-10-30-phase-8-personnes-roles.md), branche `feature/personnes-roles` (en cours)*
 
 - [x] 8.1 Rédiger le plan de la phase 8 ([plan](docs/superpowers/plans/2026-10-30-phase-8-personnes-roles.md))
-- [ ] 8.2 Personnes, rattachement de chaque oreille à une personne (`people.toml`, `jarvis pair --person`)
+- [x] 8.2 Personnes, rattachement de chaque oreille à une personne (`people.toml`, `jarvis pair --person`)
 - [x] 8.3 Rôles et permissions (outils autorisés, droit de confirmer, permission `agent`), rôle `admin` intégré
 - [ ] 8.4 Qui parle (oreille ou voix de Charles reconnue) et vérification des droits avant chaque outil
-- [ ] 8.5 Gestion par `jarvis person …` et `jarvis role …` (socket Unix, pas de gestion vocale)
+- [x] 8.5 Gestion par `jarvis person …` et `jarvis role …` (socket Unix, pas de gestion vocale)
 - [ ] 8.6 `jarvisctl doctor`, documentation (`docs/personnes.md`, README) et fiche d'essai
 - [ ] 8.7 Relecture de la phase 8 et corrections
 - [ ] 8.8 Essai réel avec Charles : un invité sur une deuxième oreille, refus des actions risquées et de l'agent (Charles) — [fiche d'essai](docs/essais/essai-8.8-personnes.md)
