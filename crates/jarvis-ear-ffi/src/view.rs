@@ -63,9 +63,9 @@ impl Notifier {
     /// pendant l'appel : l'ordre des envois est celui des vues.
     pub fn notify(&self, view: &EarView, send: impl FnOnce(&EarView)) -> bool {
         let mut sent = self.sent.lock().unwrap_or_else(|e| e.into_inner());
-        let same = sent
-            .as_ref()
-            .is_some_and(|old| (old.mic, old.brain, &old.text) == (view.mic, view.brain, &view.text));
+        let same = sent.as_ref().is_some_and(|old| {
+            (old.mic, old.brain, &old.text) == (view.mic, view.brain, &view.text)
+        });
         if same {
             return false;
         }
@@ -176,6 +176,9 @@ mod tests {
         status.mic = MicState::Muted;
         assert!(push(&status, &mut sent));
         assert!(!push(&status, &mut sent));
-        assert_eq!(sent, ["À l'écoute · mode local", "Écoute coupée · mode local"]);
+        assert_eq!(
+            sent,
+            ["À l'écoute · mode local", "Écoute coupée · mode local"]
+        );
     }
 }

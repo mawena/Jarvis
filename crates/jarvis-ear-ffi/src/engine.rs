@@ -83,7 +83,11 @@ impl Shared {
     }
 
     fn send_event(&self, event: CaptureEvent<Vec<f32>>) {
-        let tx = self.capture_tx.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let tx = self
+            .capture_tx
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
         if let Some(tx) = tx
             && tx.try_send(event).is_err()
             && !self.overflow_warned.swap(true, Ordering::Relaxed)
@@ -132,7 +136,8 @@ impl Shared {
         let rate = self.rate.load(Ordering::SeqCst) as usize;
         let channels = self.channels.load(Ordering::SeqCst) as usize;
         let limit = BLOCKED_AFTER_SECONDS * rate * channels;
-        if self.zero_run.load(Ordering::SeqCst) >= limit && !self.blocked.swap(true, Ordering::SeqCst)
+        if self.zero_run.load(Ordering::SeqCst) >= limit
+            && !self.blocked.swap(true, Ordering::SeqCst)
         {
             tracing::warn!("le micro livre des zéros exacts depuis 3 s : bloqué par Android ?");
             self.refresh();
@@ -246,7 +251,11 @@ impl EarEngine {
         // L'écoute coupée est retenue d'un démarrage à l'autre : la vue le dit déjà.
         let muted = data_dir.join("muted").exists();
         let (status_tx, status) = watch::channel(EarStatus {
-            mic: if muted { MicState::Muted } else { MicState::Open },
+            mic: if muted {
+                MicState::Muted
+            } else {
+                MicState::Open
+            },
             capturing: false,
             brain: BrainLink::Connecting,
             last_heard: None,
@@ -411,7 +420,8 @@ impl EarEngine {
             let connector = Arc::new(TlsConnector::new(pinned_client_config(
                 &pairing.fingerprint,
             )));
-            let (link, events) = EarLink::spawn(LinkConfig::new(pairing, store, connector, discovery));
+            let (link, events) =
+                EarLink::spawn(LinkConfig::new(pairing, store, connector, discovery));
             (Arc::new(link) as Arc<dyn Link>, events)
         });
         Ok(Self::build(settings, host, Box::new(wake), link))
@@ -480,9 +490,12 @@ impl EarEngine {
             return;
         }
         self.shared.rate.store(rate, Ordering::SeqCst);
-        self.shared.channels.store(u32::from(channels), Ordering::SeqCst);
+        self.shared
+            .channels
+            .store(u32::from(channels), Ordering::SeqCst);
         self.shared.zero_run.store(0, Ordering::SeqCst);
-        self.shared.send_event(CaptureEvent::Format { rate, channels });
+        self.shared
+            .send_event(CaptureEvent::Format { rate, channels });
     }
 
     /// Son du micro : PCM 16 bits little-endian (blocs de 20 ms).
@@ -497,7 +510,11 @@ impl EarEngine {
 
     /// Fin de lecture du son de cette génération ; une fin périmée est ignorée.
     pub fn playback_idle(&self, generation: u64) {
-        let latest = self.shared.generation.lock().unwrap_or_else(|e| e.into_inner());
+        let latest = self
+            .shared
+            .generation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         if *latest == generation {
             self.shared.playing.send_replace(false);
         }
@@ -534,3 +551,6 @@ impl Drop for EarEngine {
         self.stop();
     }
 }
+
+#[cfg(test)]
+mod tests;
