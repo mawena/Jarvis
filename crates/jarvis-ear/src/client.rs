@@ -1,7 +1,7 @@
 //! Client du socket de contrôle du cerveau (une connexion par requête). L'oreille ne
 //! s'en sert plus que pour l'appairage local (`PairLocal`) et l'enrôlement vocal
 //! (`EnrollVoice`) ; les phrases et les annonces passent par le réseau (voir
-//! [`crate::link`]).
+//! [`crate::link`] et la session de jarvis-ear-core).
 
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -13,22 +13,6 @@ use tokio::net::UnixStream;
 
 /// Délai maximal d'une requête.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Attente maximale de la réponse à une phrase : le pire cas du cerveau, plus une marge.
-///
-/// ```text
-///   reconnaissance vocale (marge)           2 s
-/// + choix de l'outil par Ollama            20 s  (llm/ollama.rs, TIMEOUT)
-/// + compétence la plus lente : recherche   15 s  (SearXNG 4 s + résumé local 10 s + 1 s)
-/// + synthèse vocale                         8 s  (tts/mod.rs, SYNTH_DEADLINE)
-/// = 45 s, arrondi à 50 s
-/// ```
-///
-/// Vérifié côté cerveau par le test `budget_ecoute` de jarvis-brain (qui lit cette ligne).
-const LISTEN_TIMEOUT: Duration = Duration::from_secs(50);
-
-/// Au-delà, la réponse attendue n'est plus attendue (les annonces peuvent passer).
-pub const RESPONSE_TIMEOUT: Duration = LISTEN_TIMEOUT;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {
@@ -98,6 +82,7 @@ async fn exchange(socket: &Path, req: &ControlRequest) -> Result<ControlResponse
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jarvis_ear_core::session::RESPONSE_TIMEOUT;
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
 

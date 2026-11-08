@@ -284,6 +284,7 @@ impl SpeakerGate {
         let Some(reference) = reference else {
             if unreadable {
                 // Déjà signalé au chargement.
+                info!(oreille = %ear, "voix non reconnue (empreinte illisible)");
                 return Verdict::NoMatch(0.0);
             }
             if !self.warned.swap(true, Ordering::Relaxed) {
@@ -301,6 +302,7 @@ impl SpeakerGate {
             return if in_session {
                 Verdict::SessionShort
             } else {
+                info!(oreille = %ear, "voix non reconnue (phrase trop courte)");
                 Verdict::TooShort
             };
         }
@@ -312,18 +314,23 @@ impl SpeakerGate {
         let score = match self.verifier.embed(audio) {
             Ok(e) => cosine(&e, &reference),
             Err(e) => {
-                warn!(erreur = %e, "empreinte de la phrase impossible");
+                warn!(oreille = %ear, erreur = %e, "empreinte de la phrase impossible");
                 return Verdict::NoMatch(0.0);
             }
         };
+        // Score et seuil dans le journal, avec l'oreille : l'empreinte a été enregistrée
+        // sur le micro du PC, les scores des autres oreilles s'y lisent
+        // (`jarvisctl logs | grep voix`).
+        let (score_txt, seuil) = (format!("{score:.2}"), format!("{threshold:.2}"));
         if score >= threshold {
             let mut sessions = self.session.lock().unwrap();
             sessions.retain(|_, t| t.elapsed() <= SESSION_WINDOW);
             sessions.insert(ear.clone(), Instant::now());
             drop(sessions);
-            info!(score = format!("{score:.2}"), "voix reconnue");
+            info!(oreille = %ear, score = %score_txt, seuil = %seuil, "voix reconnue");
             Verdict::Match(score)
         } else {
+            info!(oreille = %ear, score = %score_txt, seuil = %seuil, "voix non reconnue");
             Verdict::NoMatch(score)
         }
     }
@@ -331,8 +338,8 @@ impl SpeakerGate {
     /// Vérification stricte d'une phrase courte, pour un « oui » de confirmation : même
     /// sous 1 s, l'empreinte est calculée et comparée au seuil strict. Jamais la session :
     /// sans empreinte (absente ou illisible), sous 0,3 s ou en cas d'erreur, c'est non.
-    /// Ne renouvelle pas la session.
-    pub fn check_short_strict(&self, audio: &[f32]) -> bool {
+    /// Ne renouvelle pas la session. `ear` : oreille qui a entendu la phrase (journal).
+    pub fn check_short_strict(&self, ear: &EarId, audio: &[f32]) -> bool {
         let reference = self
             .print
             .read()
@@ -349,13 +356,15 @@ impl SpeakerGate {
             Ok(e) => {
                 let score = cosine(&e, &reference);
                 info!(
-                    score = format!("{score:.2}"),
+                    oreille = %ear,
+                    score = %format!("{score:.2}"),
+                    seuil = %format!("{:.2}", self.strict_threshold),
                     "vérification stricte d'une phrase courte"
                 );
                 score >= self.strict_threshold
             }
             Err(e) => {
-                warn!(erreur = %e, "empreinte de la phrase courte impossible");
+                warn!(oreille = %ear, erreur = %e, "empreinte de la phrase courte impossible");
                 false
             }
         }
@@ -555,6 +564,85 @@ mod tests {
         assert!(matches!(g.check(&ear(), &audio(2, 3.0)), Verdict::NoMatch(s) if s < 0.55));
     }
 
+    /// Tampon partagé où l'abonné de test écrit le journal.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Journal (texte brut, sans heure ni module) écrit pendant `f`, sur ce fil.
+    ///
+    /// `tracing` garde en cache, par ligne du journal, si un abonné l'écoute. Avec un
+    /// seul abonné local, un autre test qui enregistre la même ligne en même temps
+    /// recalcule ce cache avec l'abonné de son propre fil (aucun) : « jamais écrite ».
+    /// Un second abonné inerte, vivant pendant la capture, fait recalculer le cache
+    /// d'après la liste de tous les abonnés, puis le cache est reconstruit.
+    fn captured_log(f: impl FnOnce()) -> String {
+        let buffer = LogBuffer::default();
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let _inert = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+        tracing::dispatcher::with_default(&dispatch, || {
+            tracing::callsite::rebuild_interest_cache();
+            f()
+        });
+        let bytes = buffer.0.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn journal_du_score_nomme_l_oreille_et_le_seuil() {
+        let pixel = EarId::new("pixel");
+        let salon = EarId::new("salon");
+        let checks = |g: &SpeakerGate| {
+            assert!(matches!(g.check(&pixel, &audio(3, 3.0)), Verdict::Match(_)));
+            assert!(matches!(
+                g.check(&pixel, &audio(2, 3.0)),
+                Verdict::NoMatch(_)
+            ));
+            // Entre 1 s et 2 s : seuil strict.
+            assert!(matches!(
+                g.check(&pixel, &audio(2, 1.5)),
+                Verdict::NoMatch(_)
+            ));
+            // Autre oreille, hors session : trop courte.
+            assert_eq!(g.check(&salon, &audio(0, 0.5)), Verdict::TooShort);
+        };
+        // Premier passage sans abonné, sur une autre empreinte : les lignes du journal
+        // sont enregistrées par ce fil avant la capture (voir `captured_log`).
+        let warm_up = tempfile::tempdir().unwrap();
+        checks(&enrolled(warm_up.path()));
+        let d = tempfile::tempdir().unwrap();
+        let g = enrolled(d.path());
+        let log = captured_log(|| checks(&g));
+        let lines: Vec<&str> = log.lines().map(str::trim).collect();
+        assert_eq!(
+            lines,
+            [
+                "INFO voix reconnue oreille=pixel score=0.99 seuil=0.55",
+                "INFO voix non reconnue oreille=pixel score=0.20 seuil=0.55",
+                "INFO voix non reconnue oreille=pixel score=0.20 seuil=0.65",
+                "INFO voix non reconnue (phrase trop courte) oreille=salon",
+            ],
+            "{log}"
+        );
+    }
+
     #[test]
     fn phrase_courte_acceptee_dans_la_session() {
         let d = tempfile::tempdir().unwrap();
@@ -625,12 +713,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let g = enrolled(d.path());
         // Seuil strict (0.65) : cos 0.9 passe, cos 0.6 et 0.2 non.
-        assert!(g.check_short_strict(&audio(3, 0.5)));
-        assert!(!g.check_short_strict(&audio(1, 0.5)));
-        assert!(!g.check_short_strict(&audio(2, 0.5)));
+        assert!(g.check_short_strict(&ear(), &audio(3, 0.5)));
+        assert!(!g.check_short_strict(&ear(), &audio(1, 0.5)));
+        assert!(!g.check_short_strict(&ear(), &audio(2, 0.5)));
         // Moins de 0,3 s : rien à mesurer.
-        assert!(!g.check_short_strict(&audio(0, 0.2)));
-        assert!(g.check_short_strict(&audio(0, 0.3)));
+        assert!(!g.check_short_strict(&ear(), &audio(0, 0.2)));
+        assert!(g.check_short_strict(&ear(), &audio(0, 0.3)));
     }
 
     #[test]
@@ -639,22 +727,22 @@ mod tests {
         let g = enrolled(d.path());
         // Session ouverte : une voix inconnue reste refusée.
         assert!(matches!(g.check(&ear(), &audio(0, 3.0)), Verdict::Match(_)));
-        assert!(!g.check_short_strict(&audio(2, 0.5)));
+        assert!(!g.check_short_strict(&ear(), &audio(2, 0.5)));
         // Hors session : la voix de Charles passe quand même, et la session n'est pas
         // ouverte pour autant.
         g.session.lock().unwrap().clear();
-        assert!(g.check_short_strict(&audio(3, 0.5)));
+        assert!(g.check_short_strict(&ear(), &audio(3, 0.5)));
         assert!(g.session.lock().unwrap().is_empty());
     }
 
     #[test]
     fn verification_stricte_sans_empreinte_refusee() {
         let d = tempfile::tempdir().unwrap();
-        assert!(!gate(d.path(), vectors()).check_short_strict(&audio(0, 0.5)));
+        assert!(!gate(d.path(), vectors()).check_short_strict(&ear(), &audio(0, 0.5)));
         let path = d.path().join("voiceprint/charles.json");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "pas du json").unwrap();
-        assert!(!gate(d.path(), vectors()).check_short_strict(&audio(0, 0.5)));
+        assert!(!gate(d.path(), vectors()).check_short_strict(&ear(), &audio(0, 0.5)));
     }
 
     #[test]

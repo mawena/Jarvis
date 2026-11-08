@@ -188,4 +188,26 @@ mod tests {
             assert!(PairingUri::parse(&b).is_err(), "{b}");
         }
     }
+
+    /// Le texte d'une erreur d'analyse ne reprend jamais le code à usage unique ni le reste de l'adresse
+    /// (il finit dans les journaux de l'oreille).
+    #[test]
+    fn erreurs_sans_le_code_ni_l_empreinte() {
+        let bons = uri().to_string();
+        let cassees = [
+            bons.replace("p=7341", "p=0"),
+            bons.replace("c=482913", "c=48291X"),
+            bons.replace("h=192.168.1.20,fe80::1", "h=zzz"),
+            bons.replace("id=0123456789abcdef0123456789abcdef", "id=a/b"),
+            format!("{bons}&c=482913"),
+            bons.replace("fp=", "fp=!!"),
+        ];
+        for s in cassees {
+            let e = PairingUri::parse(&s).unwrap_err();
+            for txt in [e.to_string(), format!("{e:?}")] {
+                assert!(!txt.contains("482913") && !txt.contains("48291X"), "{txt}");
+                assert!(!txt.contains(&uri().fingerprint.to_b64()), "{txt}");
+            }
+        }
+    }
 }

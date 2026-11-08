@@ -35,7 +35,7 @@ pub const CAPTURE_TIMEOUT: Duration = Duration::from_secs(20);
 pub const AUDIO_STALL: Duration = Duration::from_secs(3);
 /// Traitement d'une phrase (transcription, compétence, voix) au plus : au-dessus du
 /// pire cas (45 s, voir le test `budget_ecoute`), sous l'attente de la réponse par
-/// l'oreille (50 s, `LISTEN_TIMEOUT` de jarvis-ear) moins la fenêtre de l'arbitre et le
+/// l'oreille (50 s, `RESPONSE_TIMEOUT` de jarvis-ear-core) moins la fenêtre de l'arbitre et le
 /// réseau. Ainsi l'oreille reçoit toujours `Error` (bip d'échec) plutôt que rien.
 pub const PROCESS_TIMEOUT: Duration = Duration::from_secs(47);
 /// Relève des annonces pour les oreilles connectées.

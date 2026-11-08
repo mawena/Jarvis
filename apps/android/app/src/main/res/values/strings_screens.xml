@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="step_permissions">1. Autorisations</string>
+    <string name="step_permissions_ok">Micro et notifications accordés</string>
+    <string name="step_permissions_missing">Micro et notifications à accorder</string>
+    <string name="action_grant">Accorder</string>
+    <string name="step_pair">2. Appairage</string>
+    <string name="step_pair_ok">Appairé à « %1$s »</string>
+    <string name="step_pair_none">Pas encore appairé au PC</string>
+    <string name="action_pair">Appairer</string>
+    <string name="step_wakeword">3. Mot d\'éveil</string>
+    <string name="step_wakeword_ok">Prêt</string>
+    <string name="step_wakeword_none">Pas encore enregistré</string>
+    <string name="action_enroll">Enregistrer</string>
+    <string name="step_battery">4. Batterie</string>
+    <string name="step_battery_ok">Écoute sans restriction de batterie</string>
+    <string name="step_battery_none">Android peut endormir l\'écoute écran éteint</string>
+    <string name="action_battery">Autoriser</string>
+    <string name="step_overlay">5. Démarrage seul</string>
+    <string name="step_overlay_ok">Autorisé : l\'écoute repart seule au redémarrage</string>
+    <string name="step_overlay_none">Pour que l\'écoute reparte seule quand le téléphone redémarre</string>
+    <string name="action_overlay">Autoriser</string>
+    <string name="action_start">Démarrer l\'écoute</string>
+    <string name="action_stop">Arrêter l\'écoute</string>
+    <string name="status_off">Écoute arrêtée</string>
+    <string name="status_starting">Démarrage de l\'écoute…</string>
+    <string name="status_not_ready">Terminez les étapes 1 à 3 pour démarrer l\'écoute</string>
+    <string name="settings_title">Réglages</string>
+    <string name="autostart_label">Démarrer avec le téléphone</string>
+    <string name="name_label">Nom de l\'oreille (pris en compte au prochain appairage)</string>
+    <string name="threshold_label">Seuil du mot d\'éveil : %1$s (au prochain démarrage)</string>
+    <string name="action_unpair">Désappairer</string>
+    <string name="unpair_confirm">Désappairer cette oreille ? Elle ne sera plus connue du PC.</string>
+    <string name="yes">Oui</string>
+    <string name="no">Non</string>
+    <string name="unpair_done">Oreille désappairée</string>
+
+    <string name="pair_title">Appairage</string>
+    <string name="pair_scan">Scanner le QR code</string>
+    <string name="pair_scan_prompt">QR code de jarvis pair</string>
+    <string name="pair_paste_hint">… ou collez l\'adresse jarvis://pair?…</string>
+    <string name="pair_name_hint">Nom de l\'oreille</string>
+    <string name="pair_go">Appairer</string>
+    <string name="pair_busy">Appairage en cours…</string>
+    <string name="pair_empty">Scannez le QR code ou collez l\'adresse de « jarvis pair ».</string>
+    <string name="pair_invalid">Ce n\'est pas une adresse d\'appairage Jarvis (jarvis://pair?…). Rien n\'a été enregistré.</string>
+    <string name="pair_done">Appairé à « %1$s »</string>
+
+    <string name="enroll_title">Mot d\'éveil</string>
+    <string name="enroll_intro">Huit prises : dites « Jarvis » naturellement, à la distance où vous l\'utiliserez.</string>
+    <string name="enroll_button">Prise %1$d / %2$d</string>
+    <string name="enroll_prepare">Préparez-vous…</string>
+    <string name="enroll_say">Dites « Jarvis »</string>
+    <string name="enroll_too_quiet">Trop faible : rapprochez-vous et recommencez</string>
+    <string name="enroll_done">Mot d\'éveil prêt (%1$d prises)</string>
+    <string name="enroll_need_mic">Le micro n\'est pas autorisé : accordez-le depuis l\'écran principal.</string>
+    <string name="enroll_mic_failed">Le micro n\'a pas pu s\'ouvrir. Réessayez.</string>
+    <string name="enroll_close">Terminer</string>
+</resources>

@@ -1,7 +1,6 @@
 //! Oreille de Jarvis : micro, mot d'éveil, détection de fin de phrase, voix de Jarvis.
 //! Elle parle au cerveau par le réseau (WebSocket sur TLS épinglé), même sur le PC.
 
-mod app;
 mod capture;
 mod client;
 mod config;
@@ -10,7 +9,6 @@ mod link;
 mod pair;
 mod playback;
 mod service;
-mod sounds;
 mod tray;
 
 use std::sync::Arc;
@@ -22,17 +20,19 @@ use jarvis_ear_core::earshot::EarshotVad;
 use jarvis_ear_core::listener::Listener;
 use jarvis_ear_core::net::discovery::MdnsDiscovery;
 use jarvis_ear_core::net::tls::{TlsConnector, pinned_client_config};
-use jarvis_ear_core::net::{Discovery, EarLink, LinkConfig, Pairing, PairingStore};
+use jarvis_ear_core::net::{Discovery, EarLink, Link, LinkConfig, Pairing, PairingStore};
 use jarvis_ear_core::rustpotter::RustpotterDetector;
+use jarvis_ear_core::session::{
+    BrainLink, EarCommand as TrayCommand, EarSession, EarStatus as TrayState, OfflinePhrase,
+};
 use tokio::sync::{mpsc, watch};
 
-use crate::app::{App, OfflinePhrase};
 use crate::capture::CpalCapture;
 use crate::client::{Brain, SocketBrain};
 use crate::config::{EarConfig, Paths};
-use crate::link::{LOCAL_NAME, LOCAL_RETRY, Link, LocalPairing, Spawner, Supervised};
+use crate::link::{LOCAL_NAME, LOCAL_RETRY, LocalPairing, Spawner, Supervised};
 use crate::playback::CpalPlayer;
-use crate::tray::{BrainLink, JarvisTray, TrayCommand, TrayState};
+use crate::tray::JarvisTray;
 
 #[derive(Parser)]
 #[command(name = "jarvis-ear", version, about = "Oreille de Jarvis")]
@@ -272,7 +272,7 @@ async fn run(paths: Paths, profile: Option<String>) -> anyhow::Result<()> {
         wakeword.display()
     );
     // Les annonces des agents arrivent par le lien (poussées par le cerveau).
-    let mut app = App::new(
+    let mut app = EarSession::new(
         listener,
         CpalCapture::new(config.device),
         Arc::new(link),

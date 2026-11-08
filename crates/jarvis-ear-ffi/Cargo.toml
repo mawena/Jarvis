@@ -1,0 +1,35 @@
+[package]
+name = "jarvis-ear-ffi"
+version.workspace = true
+edition.workspace = true
+
+# Façade de l'oreille pour Android (Kotlin par UniFFI). Compilée pour Linux par
+# `scripts/check.sh` (tests), pour `aarch64-linux-android` par `scripts/android-build.sh`.
+[lib]
+name = "jarvis_ear_ffi"
+crate-type = ["cdylib", "lib"]
+
+[[bin]]
+# Générateur des liaisons Kotlin : seulement avec `--features bindgen`, pour que
+# `check.sh` ne compile ni clap, ni askama, ni goblin.
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["bindgen"]
+
+[features]
+bindgen = ["uniffi/cli"]
+
+[dependencies]
+uniffi.workspace = true
+jarvis-ear-core.workspace = true
+jarvis-protocol.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+hound.workspace = true
+async-trait.workspace = true

@@ -1,135 +1,20 @@
 //! `jarvis-ear pair` : appairage d'une oreille au cerveau.
 //!
 //! - `pair <uri>` (QR code de `jarvis pair`) : l'empreinte du certificat est dans
-//!   l'URI, épinglée dès le premier contact.
+//!   l'URI, épinglée dès le premier contact (code commun : `jarvis_ear_core::net::pair`).
 //! - `pair --code 123456 [--address hôte:port]` : le cerveau en appairage est trouvé
 //!   par mDNS (ou à l'adresse donnée) ; un premier contact montre l'empreinte de son
 //!   certificat, à comparer à l'œil avec celle du PC. Le code n'est envoyé qu'après
 //!   « o », sur une connexion épinglée sur cette empreinte.
 
 use std::io::{self, BufRead, Write};
-use std::net::SocketAddr;
-use std::time::Duration;
 
 use anyhow::{Context, anyhow, bail};
-use jarvis_ear_core::net::discovery::{FoundBrain, MdnsDiscovery};
-use jarvis_ear_core::net::tls::{TlsConnector, pinned_client_config, tofu_client_config};
-use jarvis_ear_core::net::{
-    Connector, Discovery, PairError, Paired, Pairing, PairingStore, pair_with_code,
+use jarvis_ear_core::net::pair::{
+    PairNet, RealNet, pair_uri, pairing_of, refusal, resolve, unreachable,
 };
-use jarvis_protocol::ear::{DEFAULT_PORT, RejectReason};
-use jarvis_protocol::pairing_uri::PairingUri;
-use jarvis_protocol::{Fingerprint, printable};
-
-/// Plateforme annoncée au cerveau.
-pub const PLATFORM: &str = "linux";
-
-/// Attente des annonces mDNS.
-const DISCOVERY_WAIT: Duration = Duration::from_secs(3);
-
-/// Le réseau vu de l'appairage (remplaçable dans les tests).
-#[async_trait::async_trait]
-pub trait PairNet: Send + Sync {
-    /// Empreinte du certificat présenté à `addr` (premier contact : rien n'est envoyé).
-    async fn fingerprint(&self, addr: SocketAddr) -> io::Result<Fingerprint>;
-    /// Connexion épinglée sur `fingerprint`, puis échange `pair` → `paired`.
-    async fn pair(
-        &self,
-        addr: SocketAddr,
-        fingerprint: &Fingerprint,
-        code: &str,
-        name: &str,
-    ) -> Result<Paired, PairError>;
-    /// Cerveaux dont la fenêtre d'appairage est ouverte.
-    async fn find_pairing(&self) -> Vec<FoundBrain>;
-    /// Adresses du cerveau `brain_id`.
-    async fn find(&self, brain_id: &str) -> Vec<SocketAddr>;
-}
-
-/// TLS et mDNS réels.
-pub struct RealNet;
-
-#[async_trait::async_trait]
-impl PairNet for RealNet {
-    async fn fingerprint(&self, addr: SocketAddr) -> io::Result<Fingerprint> {
-        let (config, seen) = tofu_client_config();
-        let stream = TlsConnector::new(config).connect(addr).await?;
-        drop(stream);
-        let seen = *seen.lock().unwrap_or_else(|e| e.into_inner());
-        seen.ok_or_else(|| io::Error::other("aucun certificat présenté"))
-    }
-
-    async fn pair(
-        &self,
-        addr: SocketAddr,
-        fingerprint: &Fingerprint,
-        code: &str,
-        name: &str,
-    ) -> Result<Paired, PairError> {
-        let stream = TlsConnector::new(pinned_client_config(fingerprint))
-            .connect(addr)
-            .await
-            .map_err(PairError::Io)?;
-        pair_with_code(stream, code, name, PLATFORM).await
-    }
-
-    async fn find_pairing(&self) -> Vec<FoundBrain> {
-        match MdnsDiscovery::new() {
-            Ok(mdns) => mdns.find_pairing(DISCOVERY_WAIT).await,
-            Err(e) => {
-                tracing::warn!("découverte mDNS impossible : {e:#}");
-                Vec::new()
-            }
-        }
-    }
-
-    async fn find(&self, brain_id: &str) -> Vec<SocketAddr> {
-        match MdnsDiscovery::new() {
-            Ok(mdns) => mdns.find(brain_id, DISCOVERY_WAIT).await,
-            Err(e) => {
-                tracing::warn!("découverte mDNS impossible : {e:#}");
-                Vec::new()
-            }
-        }
-    }
-}
-
-/// Appairage par l'URI du QR code ; enregistré dans `store`.
-pub async fn pair_uri(
-    net: &dyn PairNet,
-    store: &PairingStore,
-    uri: &str,
-    name: &str,
-) -> anyhow::Result<Pairing> {
-    let uri = PairingUri::parse(uri.trim()).context("adresse d'appairage illisible")?;
-    let mut addrs: Vec<SocketAddr> = uri
-        .hosts
-        .iter()
-        .map(|ip| SocketAddr::new(*ip, uri.port))
-        .collect();
-    if addrs.is_empty() {
-        addrs = net.find(&uri.brain_id).await;
-    }
-    let mut last = None;
-    for addr in addrs {
-        match net.pair(addr, &uri.fingerprint, &uri.code, name).await {
-            Ok(paired) => {
-                if paired.brain_id != uri.brain_id {
-                    bail!("le cerveau à {addr} n'est pas celui du QR code");
-                }
-                let pairing = pairing_of(paired, uri.fingerprint, addr, None);
-                store.save(&pairing).context("appairage non enregistré")?;
-                return Ok(pairing);
-            }
-            Err(PairError::Rejected(reason)) => bail!(refusal(&reason)),
-            Err(e) => {
-                tracing::debug!("{addr} : {e}");
-                last = Some(e);
-            }
-        }
-    }
-    Err(unreachable(last))
-}
+use jarvis_ear_core::net::{PairError, Pairing, PairingStore};
+use jarvis_protocol::printable;
 
 /// Appairage par le code seul ; `confirm` pose la question de l'empreinte et rend la
 /// réponse. Enregistré dans `store`.
@@ -190,66 +75,6 @@ pub async fn pair_code(
     Err(unreachable(last))
 }
 
-fn pairing_of(
-    paired: Paired,
-    fingerprint: Fingerprint,
-    addr: SocketAddr,
-    manual: Option<String>,
-) -> Pairing {
-    Pairing {
-        brain_id: paired.brain_id,
-        // Venu du réseau : affiché ensuite au terminal.
-        brain_name: printable(&paired.brain_name),
-        ear_id: paired.ear_id,
-        token: paired.token,
-        fingerprint,
-        addresses: vec![addr],
-        manual,
-    }
-}
-
-fn refusal(reason: &RejectReason) -> String {
-    match reason {
-        RejectReason::WrongCode { attempts_left: 0 } => {
-            "code faux, plus aucun essai depuis cette machine : relancez `jarvis pair` sur le PC"
-                .into()
-        }
-        RejectReason::WrongCode { attempts_left } => {
-            format!("code faux (encore {attempts_left} essai(s))")
-        }
-        RejectReason::PairingClosed => {
-            "aucune fenêtre d'appairage ouverte : relancez `jarvis pair` sur le PC".into()
-        }
-        RejectReason::Version { supported } => {
-            format!("version du protocole incompatible (le cerveau accepte {supported:?})")
-        }
-        other => format!("appairage refusé ({other:?})"),
-    }
-}
-
-fn unreachable(last: Option<PairError>) -> anyhow::Error {
-    match last {
-        Some(e) => anyhow!("cerveau injoignable : {e}"),
-        None => anyhow!("cerveau introuvable sur le réseau"),
-    }
-}
-
-/// `hôte[:port]` (port 7341 par défaut).
-async fn resolve(address: &str) -> anyhow::Result<Vec<SocketAddr>> {
-    let address = address.trim();
-    let with_port = if address.parse::<SocketAddr>().is_ok() || address.contains(':') {
-        address.to_string()
-    } else {
-        format!("{address}:{DEFAULT_PORT}")
-    };
-    let addrs: Vec<SocketAddr> = tokio::net::lookup_host(&with_port)
-        .await
-        .with_context(|| format!("adresse « {address} » introuvable"))?
-        .collect();
-    anyhow::ensure!(!addrs.is_empty(), "adresse « {address} » introuvable");
-    Ok(addrs)
-}
-
 /// Question posée au terminal ; seuls « o » et « oui » valent oui.
 fn ask(question: &str) -> bool {
     print!("{question}");
@@ -276,7 +101,7 @@ pub fn run(
     if store.load().ok().flatten().is_some() {
         println!("Cette oreille est déjà appairée : l'ancien appairage sera remplacé.");
     }
-    let net = RealNet;
+    let net = RealNet { platform: "linux" };
     let pairing = runtime.block_on(async {
         match (uri, code) {
             (Some(uri), _) => pair_uri(&net, &store, &uri, &name).await,
@@ -301,15 +126,11 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn code_faux_dit_ce_qu_il_reste() {
-        let left = |n| refusal(&RejectReason::WrongCode { attempts_left: n });
-        assert_eq!(left(2), "code faux (encore 2 essai(s))");
-        assert!(left(0).contains("plus aucun essai"), "{}", left(0));
-        assert!(left(0).contains("jarvis pair"), "{}", left(0));
-    }
-    use jarvis_protocol::EarId;
+    use jarvis_ear_core::net::Paired;
+    use jarvis_ear_core::net::discovery::FoundBrain;
+    use jarvis_protocol::ear::RejectReason;
+    use jarvis_protocol::{EarId, Fingerprint};
+    use std::net::SocketAddr;
     use std::sync::Mutex;
 
     /// Faux réseau : `dead` ne répond pas ; ailleurs, le cerveau `b1` présente le
@@ -382,51 +203,10 @@ mod tests {
         }
     }
 
-    fn uri(hosts: &str) -> String {
-        format!(
-            "jarvis://pair?v=1&id=b1&h={hosts}&p=7341&fp={}&c=482913",
-            brain_cert().to_b64()
-        )
-    }
-
     fn store() -> (tempfile::TempDir, PairingStore) {
         let dir = tempfile::tempdir().unwrap();
         let store = PairingStore::new(dir.path().join("ear-essai"));
         (dir, store)
-    }
-
-    #[tokio::test]
-    async fn uri_d_appairage_enregistree() {
-        let dead: SocketAddr = "192.168.1.20:7341".parse().unwrap();
-        let net = FakeNet::new(vec![dead], vec![]);
-        let (_dir, store) = store();
-        let pairing = pair_uri(&net, &store, &uri("192.168.1.20,10.0.0.5"), "bureau")
-            .await
-            .unwrap();
-        let live: SocketAddr = "10.0.0.5:7341".parse().unwrap();
-        assert_eq!(pairing.fingerprint, brain_cert());
-        assert_eq!(pairing.addresses, vec![live]);
-        assert_eq!(pairing.token, "jeton");
-        assert_eq!(pairing.manual, None);
-        assert_eq!(store.load().unwrap(), Some(pairing));
-        // Empreinte de l'URI épinglée tout de suite : aucun premier contact à l'aveugle.
-        assert!(net.probes.lock().unwrap().is_empty());
-        let pairs = net.pairs.lock().unwrap().clone();
-        assert_eq!(pairs.len(), 2);
-        assert_eq!(
-            pairs[1],
-            (live, brain_cert(), "482913".into(), "bureau".into())
-        );
-    }
-
-    #[tokio::test]
-    async fn uri_d_un_autre_cerveau_refusee() {
-        let net = FakeNet::new(vec![], vec![]);
-        let (_dir, store) = store();
-        let other = uri("10.0.0.5").replace("id=b1", "id=b9");
-        assert!(pair_uri(&net, &store, &other, "x").await.is_err());
-        assert_eq!(store.load().unwrap(), None);
-        assert!(pair_uri(&net, &store, "http://x", "x").await.is_err());
     }
 
     fn found(addr: SocketAddr) -> FoundBrain {

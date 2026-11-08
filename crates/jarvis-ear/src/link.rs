@@ -1,13 +1,13 @@
-//! Lien réseau de l'oreille : le trait [`Link`] (vrai `EarLink` de jarvis-ear-core,
-//! faux lien dans les tests) et la supervision qui appaire seule l'oreille du PC par
-//! le socket Unix, puis la réappaire si le cerveau refuse son jeton.
+//! Lien réseau de l'oreille du PC : la supervision qui appaire seule l'oreille par le
+//! socket Unix, puis la réappaire si le cerveau refuse son jeton. Elle implémente le
+//! trait [`Link`] du cœur, comme `EarLink`.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::anyhow;
-use jarvis_ear_core::net::{EarLink, LinkDown, LinkEvent, LinkState, Pairing, PairingStore};
+use jarvis_ear_core::net::{Link, LinkDown, LinkEvent, LinkState, Pairing, PairingStore};
 use jarvis_protocol::ear::{EarMessage, RejectReason};
 use jarvis_protocol::{ControlRequest, ControlResponse};
 use tokio::sync::{mpsc, watch};
@@ -19,39 +19,6 @@ pub const LOCAL_NAME: &str = "PC";
 
 /// Délai entre deux essais d'appairage local (cerveau pas encore démarré).
 pub const LOCAL_RETRY: Duration = Duration::from_secs(2);
-
-/// Liaison avec le cerveau, vue de la boucle de l'oreille.
-#[async_trait::async_trait]
-pub trait Link: Send + Sync + 'static {
-    /// Échoue tout de suite hors connexion : rien n'est gardé.
-    fn send(&self, message: EarMessage) -> Result<(), LinkDown>;
-    /// Son du micro ; jamais mis en attente hors connexion.
-    fn send_audio(&self, utterance: u32, samples: &[i16]) -> Result<(), LinkDown>;
-    /// Nouvelle tentative de connexion, tout de suite.
-    fn nudge(&self);
-    fn state(&self) -> watch::Receiver<LinkState>;
-    /// Envoie ce qui est déjà accepté, puis ferme.
-    async fn close(&self);
-}
-
-#[async_trait::async_trait]
-impl Link for EarLink {
-    fn send(&self, message: EarMessage) -> Result<(), LinkDown> {
-        EarLink::send(self, message)
-    }
-    fn send_audio(&self, utterance: u32, samples: &[i16]) -> Result<(), LinkDown> {
-        EarLink::send_audio(self, utterance, samples)
-    }
-    fn nudge(&self) {
-        EarLink::nudge(self)
-    }
-    fn state(&self) -> watch::Receiver<LinkState> {
-        EarLink::state(self)
-    }
-    async fn close(&self) {
-        EarLink::close(self).await
-    }
-}
 
 /// Appairage de l'oreille du PC par le socket Unix (qui vaut preuve, sans code) ;
 /// connexion ensuite à `127.0.0.1:<port>` avec l'empreinte reçue.

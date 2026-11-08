@@ -44,7 +44,7 @@ Garde-fous :
 - **L'oreille** écoute en permanence, mais n'envoie rien avant d'avoir entendu « Jarvis ». Elle
   joue les bips et la voix de Jarvis, et affiche une icône avec un menu (couper l'écoute, mode,
   statut). Sur le PC, et sur toute machine Linux de la maison appairée par `jarvis pair`
-  (réseau local, TLS) ; téléphone Android et iPhone prévus. Si plusieurs oreilles entendent
+  (réseau local, TLS) ; téléphone Android (voir [docs/android.md](docs/android.md)), iPhone prévu. Si plusieurs oreilles entendent
   « Jarvis », une seule répond.
 - **Le cerveau** transcrit la phrase (Whisper), vérifie la voix (CAM++), comprend la demande
   et exécute la bonne compétence. Il répond avec une voix française (Piper).
@@ -114,6 +114,7 @@ Le détail est dans [docs/recherche.md](docs/recherche.md) et
 - [docs/oreille.md](docs/oreille.md) : l'oreille du PC, enrôlement, icône, commandes vocales,
   voix, réglages, dépannage (dont les mots mal compris).
 - [docs/reseau.md](docs/reseau.md) : oreilles en réseau, appairage, pare-feu, certificat.
+- [docs/android.md](docs/android.md) : l'oreille Android (construire, installer, appairer, batterie).
 - [docs/recherche.md](docs/recherche.md) : recherche sur internet et vidéos.
 - [docs/ia-locale.md](docs/ia-locale.md) : choix du modèle local et de Whisper, mesures.
 - [docs/essais/](docs/essais/README.md) : fiches d'essai en conditions réelles.
@@ -131,6 +132,7 @@ Espace de travail Cargo (Rust, édition 2024) :
 | `jarvis-brain` | le cerveau : service, compréhension, IA, Whisper, empreinte vocale, voix |
 | `jarvis-ear-core` | cœur commun des oreilles : mot d'éveil, fin de phrase, réseau (connexion, appairage, découverte) |
 | `jarvis-ear` | l'oreille du PC : micro, haut-parleur, icône |
+| `jarvis-ear-ffi` | façade UniFFI de l'oreille pour l'appli Android (`apps/android`) |
 | `jarvis-cli` | l'outil `jarvis` |
 | `jarvisctl` | installation, services, diagnostic, mises à jour |
 
