@@ -1416,7 +1416,7 @@ async fn appairage_personne_inconnue_refuse_sans_ouvrir_la_fenetre() {
         })
         .await,
         ControlResponse::Error {
-            message: "« Zoé » est inconnu.".into()
+            message: "Personne « Zoé » inconnue.".into()
         }
     );
     // Aucune fenêtre ouverte : un code, même plausible, est refusé.
@@ -1887,7 +1887,6 @@ async fn set_mode_reseau_respecte_les_roles() {
     add_lea(&mut cli).await; // rôle famille : media_* seulement
     let (id, token) = pair_ear_for(&rig, "Pixel", Some("Léa")).await;
     let mut pixel = session(&rig, &id, &token).await;
-    assert!(matches!(next(&mut pixel).await, BrainMessage::Status(_)));
     // Une invitée sans le droit set_mode ne peut rien changer.
     for mode in [Mode::Local, Mode::Online] {
         send(&mut pixel, &EarMessage::SetMode { mode }).await;

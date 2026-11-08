@@ -13,8 +13,8 @@ use crate::tts::Voice;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
 use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
-use jarvis_skills::Risk;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
+use jarvis_skills::Risk;
 use jarvis_skills::text::fold;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -1309,7 +1309,7 @@ impl State {
             .into_iter()
             .find(|p| fold(&p.name) == key)
             .map(|p| p.name)
-            .ok_or_else(|| PeopleError::Unknown(wanted.trim().to_string()).to_string())
+            .ok_or_else(|| PeopleError::UnknownPerson(wanted.trim().to_string()).to_string())
     }
 
     fn close_pairing(&mut self, reason: &str) {
