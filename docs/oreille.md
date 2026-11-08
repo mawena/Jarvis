@@ -7,7 +7,8 @@ ne sont jamais enregistrées : seules les prises de « Jarvis » de l'enrôlemen
 
 L'oreille parle au cerveau par le même protocole que les autres oreilles (WebSocket sur TLS,
 ici sur `127.0.0.1`) et s'appaire seule au premier démarrage. Autres oreilles, appairage,
-pare-feu : [reseau.md](reseau.md).
+pare-feu : [reseau.md](reseau.md). La logique de session (élection, « le PC est endormi »,
+questions, coupures) est commune avec l'oreille Android ([android.md](android.md)).
 
 ## Prérequis
 
