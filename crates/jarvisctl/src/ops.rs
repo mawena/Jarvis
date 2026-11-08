@@ -1230,21 +1230,35 @@ fn people_diagnostics(
                      voix reconnue et le texte tapé ont des droits ; corrigez ou supprimez le \
                      fichier indiqué"
                 )?;
-            } else if let [only] = people.as_slice() {
-                writeln!(
-                    out,
-                    "✓ Personnes et rôles : 1 personne ({}, {}), 1 rôle intégré",
-                    only.name, only.role
-                )?;
             } else {
-                let list: Vec<String> = people
-                    .iter()
-                    .map(|p| format!("{} {}", p.name, p.role))
-                    .collect();
-                writeln!(out, "✓ Personnes : {} ({})", people.len(), list.join(", "))?;
-            }
-            for e in ears.iter().filter(|e| !e.local && e.person.is_none()) {
-                writeln!(out, "! Oreille « {} » sans personne reconnue", e.name)?;
+                if let [only] = people.as_slice() {
+                    let roles = match sys.brain_request(&ControlRequest::RoleList) {
+                        Some(ControlResponse::Roles { roles }) => {
+                            let custom = roles.iter().filter(|r| !r.builtin).count();
+                            match custom {
+                                0 => ", 1 rôle intégré".to_string(),
+                                1 => ", 1 rôle intégré, 1 rôle créé".to_string(),
+                                n => format!(", 1 rôle intégré, {n} rôles créés"),
+                            }
+                        }
+                        _ => String::new(),
+                    };
+                    writeln!(
+                        out,
+                        "✓ Personnes et rôles : 1 personne ({}, {}){roles}",
+                        only.name, only.role
+                    )?;
+                } else {
+                    let list: Vec<String> = people
+                        .iter()
+                        .map(|p| format!("{} {}", p.name, p.role))
+                        .collect();
+                    writeln!(out, "✓ Personnes : {} ({})", people.len(), list.join(", "))?;
+                }
+                // En mode dégradé toutes les oreilles sont inconnues : on ne les répète pas.
+                for e in ears.iter().filter(|e| !e.local && e.person.is_none()) {
+                    writeln!(out, "! Oreille « {} » sans personne reconnue", e.name)?;
+                }
             }
         }
         Some(ControlResponse::Error { message }) if message == "requête invalide" => {
@@ -2902,6 +2916,17 @@ WantedBy=graphical-session.target
         }
     }
 
+    fn role(name: &str, builtin: bool) -> jarvis_protocol::RoleSummary {
+        jarvis_protocol::RoleSummary {
+            name: name.into(),
+            tools: vec![],
+            confirm: false,
+            agent: false,
+            builtin,
+            people: 0,
+        }
+    }
+
     #[test]
     fn doctor_affiche_les_personnes() {
         let (_home, paths, mut sys) = installed();
@@ -2909,9 +2934,32 @@ WantedBy=graphical-session.target
             people: vec![person("Charles", "admin")],
             degraded: None,
         });
+        sys.roles = Some(ControlResponse::Roles {
+            roles: vec![role("admin", true)],
+        });
         let (_, o) = doctor_out(&paths, &sys);
         assert!(
-            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin), 1 rôle intégré"),
+            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin), 1 rôle intégré\n"),
+            "{o}"
+        );
+        // Des rôles créés sont comptés.
+        sys.roles = Some(ControlResponse::Roles {
+            roles: vec![
+                role("admin", true),
+                role("famille", false),
+                role("amis", false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("1 personne (Charles, admin), 1 rôle intégré, 2 rôles créés"),
+            "{o}"
+        );
+        // Sans réponse sur les rôles, la mention disparaît.
+        sys.roles = None;
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin)\n"),
             "{o}"
         );
         sys.people = Some(ControlResponse::People {
@@ -2923,6 +2971,21 @@ WantedBy=graphical-session.target
             o.contains("✓ Personnes : 2 (Charles admin, Léa famille)"),
             "{o}"
         );
+    }
+
+    #[test]
+    fn doctor_annuaire_illisible_ne_liste_pas_les_oreilles() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![summary("Salon", "linux", true, false)],
+        });
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: Some("TOML invalide".into()),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Annuaire des personnes illisible"), "{o}");
+        assert!(!o.contains("sans personne reconnue"), "{o}");
     }
 
     #[test]
