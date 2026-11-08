@@ -1835,7 +1835,7 @@ async fn changement_de_role_sans_redemarrage() {
     let may = |rig: &Rig, tool: &str| {
         rig.people
             .speaker("Léa", Trust::Unverified)
-            .check(tool, Risk::Safe)
+            .check(tool, Risk::Direct)
             == Access::Allowed
     };
     assert!(may(&rig, "media_next"));
