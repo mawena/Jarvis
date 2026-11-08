@@ -50,6 +50,9 @@ fenêtre (« plus aucun essai depuis cette machine »), mais les autres peuvent 
 Après 20 codes faux en tout, la fenêtre se ferme. `jarvis pair` rend 0 quand une oreille s'est
 appairée, 1 sinon (délai écoulé, trop d'essais, `Ctrl+C`).
 
+Pour un téléphone Android, voir [android.md](android.md) : l'appli scanne le QR code ou prend
+l'adresse collée.
+
 Sur l'oreille, au choix :
 
 ```bash

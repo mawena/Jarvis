@@ -120,7 +120,7 @@ impl ListenService {
     /// `check`). Le « oui » de Charles dure souvent moins d'une seconde : un « oui » ou
     /// un « répète » passe donc la vérification stricte de l'audio court (jamais la
     /// session). Toute autre phrase reste non vérifiée : elle ne peut qu'annuler.
-    async fn short_reply_voice(&self, text: &str, samples: Vec<f32>) -> ReplyVoice {
+    async fn short_reply_voice(&self, ear: &EarId, text: &str, samples: Vec<f32>) -> ReplyVoice {
         let wants_check = match_confirmation(text) == Some(true)
             || match_brain_command(text) == Some(BrainCommand::Repeat);
         let SpeakerState::Ready(gate) = &self.speaker else {
@@ -129,15 +129,15 @@ impl ListenService {
         if !wants_check {
             return ReplyVoice::Unverified;
         }
-        let g = gate.clone();
-        let passed = tokio::task::spawn_blocking(move || g.check_short_strict(&samples))
+        let (g, job_ear) = (gate.clone(), ear.clone());
+        let passed = tokio::task::spawn_blocking(move || g.check_short_strict(&job_ear, &samples))
             .await
             .unwrap_or(false);
         if passed {
-            info!("réponse courte : voix reconnue (vérification stricte)");
+            info!(oreille = %ear, "réponse courte : voix reconnue (vérification stricte)");
             ReplyVoice::Verified
         } else {
-            info!("réponse courte : voix non reconnue (vérification stricte)");
+            info!(oreille = %ear, "réponse courte : voix non reconnue (vérification stricte)");
             ReplyVoice::Unverified
         }
     }
@@ -206,23 +206,20 @@ impl ListenService {
         // tâche à l'agent. Sans empreinte ou sans vérification, tout le reste marche.
         let mut recognized = false;
         if let SpeakerState::Ready(gate) = &self.speaker {
-            let (g, audio, ear) = (gate.clone(), samples.clone(), ear.clone());
-            // L'empreinte prend des dizaines de ms : hors du runtime.
-            let verdict = tokio::task::spawn_blocking(move || g.check(&ear, &audio))
+            let (g, audio, job_ear) = (gate.clone(), samples.clone(), ear.clone());
+            // L'empreinte prend des dizaines de ms : hors du runtime. Le verdict est
+            // écrit au journal par `check`, avec l'oreille, le score et le seuil.
+            let verdict = tokio::task::spawn_blocking(move || g.check(&job_ear, &audio))
                 .await
-                .unwrap_or(Verdict::NoMatch(0.0));
+                .unwrap_or_else(|e| {
+                    warn!(oreille = %ear, erreur = %e, "vérification de la voix interrompue");
+                    Verdict::NoMatch(0.0)
+                });
             match verdict {
                 Verdict::Match(_) => recognized = true,
                 Verdict::NotEnrolled => {}
                 Verdict::SessionShort => unverified = true,
-                Verdict::NoMatch(score) => {
-                    info!("voix non reconnue (score {score:.2})");
-                    return heard("", "", None);
-                }
-                Verdict::TooShort => {
-                    info!("voix non reconnue (phrase trop courte)");
-                    return heard("", "", None);
-                }
+                Verdict::NoMatch(_) | Verdict::TooShort => return heard("", "", None),
             }
         }
         let text = match self.stt.transcribe(&samples).await {
@@ -254,7 +251,7 @@ impl ListenService {
             // Réponse à une question : seulement oui / non (ou « répète »), jamais une
             // nouvelle commande.
             let voice = if unverified {
-                self.short_reply_voice(&text, samples).await
+                self.short_reply_voice(ear, &text, samples).await
             } else {
                 ReplyVoice::Verified
             };
