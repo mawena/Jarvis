@@ -876,7 +876,7 @@ async fn appairage_par_code_de_bout_en_bout() {
         uri,
         fingerprint_short,
         ..
-    } = cli.send(ControlRequest::PairStart).await
+    } = cli.send(ControlRequest::PairStart { person: None }).await
     else {
         panic!("fenêtre d'appairage attendue")
     };

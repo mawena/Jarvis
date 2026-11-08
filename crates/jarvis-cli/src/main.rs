@@ -45,7 +45,7 @@ fn main() -> ExitCode {
         },
         Command::Status => ControlRequest::Status,
         Command::Mode { mode } => ControlRequest::SetMode { mode },
-        Command::Pair => ControlRequest::PairStart,
+        Command::Pair => ControlRequest::PairStart { person: None },
         Command::Ears => ControlRequest::ListEars,
         Command::Unpair { ear } => ControlRequest::Unpair { ear: ear.join(" ") },
     };
