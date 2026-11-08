@@ -1205,6 +1205,16 @@ fn listening_hosts(ss: &str, port: u16) -> Vec<String> {
     hosts
 }
 
+/// Ligne d'information pour une oreille distante appairée mais déconnectée.
+fn disconnected_ear_line(name: &str, platform: &str) -> String {
+    let hint = if platform == "android" {
+        "ouvrez l'appli Jarvis sur le téléphone"
+    } else {
+        "vérifiez que la machine est allumée et que l'oreille y tourne"
+    };
+    format!("· Oreille « {name} » ({platform}) déconnectée — {hint}")
+}
+
 /// Réseau des oreilles : avertissements seulement (le cerveau tourne sans, mais
 /// l'oreille du PC passe aussi par lui).
 fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
@@ -1273,6 +1283,11 @@ fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> 
                 format!("connectées : {}", connected.join(", "))
             };
             writeln!(out, "✓ Oreilles appairées : {} ({detail})", ears.len())?;
+            // Simple information, jamais un avertissement : un téléphone peut être éteint.
+            // L'oreille du PC a son propre diagnostic (service `jarvis-ear`).
+            for e in ears.iter().filter(|e| !e.local && !e.connected) {
+                writeln!(out, "{}", disconnected_ear_line(&e.name, &e.platform))?;
+            }
             if !ears.iter().any(|e| e.local) {
                 writeln!(
                     out,
@@ -2811,6 +2826,83 @@ WantedBy=graphical-session.target
         let (code, o) = doctor_out(&paths, &sys);
         assert!(o.contains("! Registre des oreilles illisible"), "{o}");
         assert_eq!(code, 1);
+    }
+
+    fn summary(
+        name: &str,
+        platform: &str,
+        connected: bool,
+        local: bool,
+    ) -> jarvis_protocol::EarSummary {
+        jarvis_protocol::EarSummary {
+            id: jarvis_protocol::EarId::new(name.to_lowercase()),
+            name: name.into(),
+            platform: platform.into(),
+            connected,
+            local,
+        }
+    }
+
+    #[test]
+    fn doctor_signale_l_oreille_android_deconnectee() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", true, true),
+                summary("Pixel 4 XL", "android", false, false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "· Oreille « Pixel 4 XL » (android) déconnectée — \
+                 ouvrez l'appli Jarvis sur le téléphone"
+            ),
+            "{o}"
+        );
+        // Information seulement : ni avertissement ni échec pour cette oreille.
+        assert!(!o.contains("! Oreille « Pixel 4 XL »"), "{o}");
+        assert!(!o.contains("✗ Oreille « Pixel 4 XL »"), "{o}");
+
+        // Reconnectée : plus de ligne.
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", true, true),
+                summary("Pixel 4 XL", "android", true, false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("Oreille « Pixel 4 XL »"), "{o}");
+
+        // Autre machine distante : conseil adapté.
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![summary("Salon", "linux", false, false)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "· Oreille « Salon » (linux) déconnectée — \
+                 vérifiez que la machine est allumée et que l'oreille y tourne"
+            ),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_ne_signale_pas_l_oreille_locale_deconnectee() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", false, true),
+                summary("Pixel 4 XL", "android", true, false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("· Oreille"), "{o}");
+        assert!(
+            o.contains("✓ Oreilles appairées : 2 (connectées : Pixel 4 XL)"),
+            "{o}"
+        );
     }
 
     #[test]
