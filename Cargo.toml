@@ -52,5 +52,8 @@ getrandom = "0.4"
 subtle = "2.6"
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
+# Phase 5 : oreille Android. Liaisons Kotlin par macros procédurales (pas d'UDL).
+uniffi = "0.32"
+
 wiremock = "0.6"
 tempfile = "3"
