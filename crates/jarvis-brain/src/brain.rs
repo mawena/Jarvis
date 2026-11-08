@@ -7,7 +7,7 @@ use crate::fastpath::{BrainCommand, match_brain_command, match_confirmation, mat
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::mode_store::ModeStore;
-use crate::people::People;
+use crate::people::{Access, People, Speaker, Trust};
 use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
 use jarvis_protocol::{EarId, Mode};
@@ -65,19 +65,37 @@ pub enum ReplyVoice {
 /// D'où vient la phrase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Source<'a> {
-    /// Voix, par l'oreille `ear`. `verified` : empreinte reconnue (`Verdict::Match`) ;
-    /// faux sans empreinte ou sans vérification. Seule une voix reconnue (ou le
+    /// Voix, par l'oreille `ear`, de `who`. Voix « reconnue » : `who.trust ==
+    /// Recognized` (empreinte, `Verdict::Match`). Seule une voix reconnue (ou le
     /// texte tapé) déclenche les raccourcis des compétences (l'agent de code).
-    Voice { ear: &'a EarId, verified: bool },
-    /// Texte tapé (`Say`, CLI) : la réponse n'est pas écoutée par l'oreille, donc
-    /// jamais d'action risquée ni de question reposée.
-    Typed,
+    Voice { ear: &'a EarId, who: &'a Speaker },
+    /// Texte tapé (`Say`, CLI) par `who` (le propriétaire) : la réponse n'est pas
+    /// écoutée par l'oreille, donc jamais d'action risquée ni de question reposée.
+    Typed { who: &'a Speaker },
+}
+
+impl Source<'_> {
+    fn who(&self) -> &Speaker {
+        match self {
+            Source::Voice { who, .. } | Source::Typed { who } => who,
+        }
+    }
+
+    /// Voix reconnue par l'empreinte, ou texte tapé.
+    fn is_sure(&self) -> bool {
+        match self {
+            Source::Voice { who, .. } => who.trust == Trust::Recognized,
+            Source::Typed { .. } => true,
+        }
+    }
 }
 
 /// Action risquée en attente d'un « oui ».
 struct Pending {
     /// Oreille qui a posé la question : seule à pouvoir y répondre.
     ear: EarId,
+    /// Personne qui a posé la question (pour le journal).
+    person: String,
     intent: Intent,
     question: String,
     asked_at: Instant,
@@ -221,7 +239,8 @@ impl Brain {
     /// jamais mise en attente (elle se demande à voix haute) et « répète » ne repose pas
     /// la question en attente. Ne renvoie jamais d'erreur : tout échec devient une phrase.
     pub async fn handle_text(&self, text: &str) -> Reply {
-        self.answer(text, Source::Typed).await.reply
+        let who = self.people.typed();
+        self.answer(text, Source::Typed { who: &who }).await.reply
     }
 
     /// Phrase complète d'une voix reconnue par son empreinte : commande du cerveau,
@@ -236,7 +255,20 @@ impl Brain {
     /// vérification désactivée) : tout reste permis sauf les raccourcis des
     /// compétences, refusés d'une phrase sans repli sur l'IA.
     pub async fn answer_voice(&self, ear: &EarId, text: &str, verified: bool) -> Answer {
-        self.answer(text, Source::Voice { ear, verified }).await
+        let trust = if verified {
+            Trust::Recognized
+        } else {
+            Trust::Accepted
+        };
+        let who = self.people.owner_speaker(trust);
+        self.answer_as(ear, text, &who).await
+    }
+
+    /// Phrase complète de `who` (personne, rôle, confiance, droits), par l'oreille
+    /// `ear`. Chaque outil est contrôlé contre ses droits avant d'être lancé ou
+    /// demandé ; la liste d'outils proposée à l'IA ne change pas.
+    pub async fn answer_as(&self, ear: &EarId, text: &str, who: &Speaker) -> Answer {
+        self.answer(text, Source::Voice { ear, who }).await
     }
 
     async fn answer(&self, text: &str, source: Source<'_>) -> Answer {
@@ -245,7 +277,7 @@ impl Brain {
             Some(BrainCommand::Repeat) => {
                 return match source {
                     Source::Voice { ear, .. } => self.repeat(ear),
-                    Source::Typed => self.repeat_last(),
+                    Source::Typed { .. } => self.repeat_last(),
                 };
             }
             Some(BrainCommand::Cancel) => self.cancel(),
@@ -277,13 +309,18 @@ impl Brain {
         // remplacés par un bip seul (`fast_path` reste faux).
         if let Some(shortcut) = self.skills.iter().find_map(|s| s.shortcut(text)) {
             debug!(route = "skill_shortcut", tool = %shortcut.tool);
-            if matches!(
-                source,
-                Source::Voice {
-                    verified: false,
-                    ..
+            // Le droit d'abord : un invité entend le refus, pas « enregistrez votre voix ».
+            // Testé comme si la voix était reconnue ; la confiance vient juste après.
+            if let Some((_, spec)) = self.find(&shortcut.tool) {
+                let as_sure = Speaker {
+                    trust: Trust::Recognized,
+                    ..source.who().clone()
+                };
+                if as_sure.check(&shortcut.tool, spec.risk) == Access::Denied {
+                    return self.refuse(source.who(), &shortcut.tool).into();
                 }
-            ) {
+            }
+            if !source.is_sure() {
                 info!(tool = %shortcut.tool, "raccourci de compétence refusé : voix non reconnue");
                 return Reply::failed(NEEDS_KNOWN_VOICE).into();
             }
@@ -341,6 +378,13 @@ impl Brain {
     /// Les raccourcis propres aux compétences (`Skill::shortcut`) ne sont jamais
     /// consultés : l'agent de code, par exemple, exige une voix vérifiée.
     pub async fn answer_fast(&self, ear: &EarId, text: &str) -> Option<Answer> {
+        let who = self.people.owner_speaker(Trust::Unverified);
+        self.answer_fast_as(ear, text, &who).await
+    }
+
+    /// Comme [`Self::answer_fast`], pour `who` (en pratique `Unverified` : voix non
+    /// vérifiée). Un outil que ses droits n'autorisent pas est refusé par une phrase.
+    pub async fn answer_fast_as(&self, ear: &EarId, text: &str, who: &Speaker) -> Option<Answer> {
         let answer = match match_brain_command(text) {
             Some(BrainCommand::Repeat) => {
                 info!("« répète » d'une voix non vérifiée : ignoré");
@@ -358,16 +402,7 @@ impl Brain {
                     return None;
                 }
                 info!(phrase = %text, "phrase reçue (raccourci seul)");
-                let answer = match self
-                    .run_or_ask(
-                        intent,
-                        Source::Voice {
-                            ear,
-                            verified: false,
-                        },
-                    )
-                    .await
-                {
+                let answer = match self.run_or_ask(intent, Source::Voice { ear, who }).await {
                     Step::Answer(a) => a,
                     Step::NotFound(m) => Reply::failed(m).into(),
                 };
@@ -399,6 +434,26 @@ impl Brain {
         text: &str,
         spoken_at: Instant,
         voice: ReplyVoice,
+    ) -> Answer {
+        let trust = match voice {
+            ReplyVoice::Verified => Trust::Recognized,
+            ReplyVoice::Unverified => Trust::Unverified,
+        };
+        let who = self.people.owner_speaker(trust);
+        self.answer_follow_up_as(ear, text, spoken_at, voice, &who)
+            .await
+    }
+
+    /// Comme [`Self::answer_follow_up`], pour `who`. Au « oui », ses droits sont
+    /// revérifiés (`Speaker::may_confirm`) : rôle changé depuis la question, ou
+    /// personne sans le droit `confirm` : refus, et l'attente est effacée.
+    pub async fn answer_follow_up_as(
+        &self,
+        ear: &EarId,
+        text: &str,
+        spoken_at: Instant,
+        voice: ReplyVoice,
+        who: &Speaker,
     ) -> Answer {
         {
             let mut pending = self.pending.lock().unwrap();
@@ -432,16 +487,24 @@ impl Brain {
                 info!(tool = %p.intent.tool, "réponse trop tardive : rien n'est fait");
                 Reply::new(TOO_LATE)
             }
-            (Some(p), Some(true)) if verified => {
-                info!(tool = %p.intent.tool, "action confirmée");
-                match self.find(&p.intent.tool) {
-                    Some((skill, _)) => match self.execute(skill.as_ref(), p.intent).await {
+            (Some(p), Some(true)) if verified => match self.find(&p.intent.tool) {
+                Some((_, spec)) if !who.may_confirm(&p.intent.tool, spec.risk) => {
+                    info!(
+                        demandeur = %p.person,
+                        personne = %who.person,
+                        "confirmation sans droit"
+                    );
+                    return self.refuse_answer(who, &p.intent.tool);
+                }
+                Some((skill, _)) => {
+                    info!(tool = %p.intent.tool, personne = %who.person, "action confirmée");
+                    match self.execute(skill.as_ref(), p.intent).await {
                         Step::Answer(a) => a.reply,
                         Step::NotFound(m) => Reply::failed(m),
-                    },
-                    None => Reply::failed(self.persona.addressed(UNKNOWN)),
+                    }
                 }
-            }
+                None => Reply::failed(self.persona.addressed(UNKNOWN)),
+            },
             (Some(mut p), Some(true)) => {
                 let tool = p.intent.tool.clone();
                 if self.reask(&mut p) {
@@ -559,8 +622,11 @@ impl Brain {
         let Some((skill, spec)) = self.find(&intent.tool) else {
             return Step::Answer(Reply::failed(self.persona.addressed(UNKNOWN)).into());
         };
+        if source.who().check(&intent.tool, spec.risk) == Access::Denied {
+            return Step::Answer(self.refuse(source.who(), &intent.tool).into());
+        }
         if spec.risk == Risk::Risky {
-            let Source::Voice { ear, .. } = source else {
+            let Source::Voice { ear, who } = source else {
                 info!(tool = %intent.tool, "action risquée tapée : refusée, à demander à voix haute");
                 return Step::Answer(Reply::new(self.persona.addressed(ASK_ALOUD)).into());
             };
@@ -571,6 +637,7 @@ impl Brain {
             info!(tool = %intent.tool, oreille = %ear, "action risquée : confirmation demandée");
             *self.pending.lock().unwrap() = Some(Pending {
                 ear: ear.clone(),
+                person: who.person.clone(),
                 intent,
                 question: question.clone(),
                 asked_at: self.clock.now(),
@@ -583,6 +650,18 @@ impl Brain {
             });
         }
         self.execute(skill.as_ref(), intent).await
+    }
+
+    /// Refus d'un outil que les droits de `who` n'autorisent pas.
+    fn refuse(&self, who: &Speaker, tool: &str) -> Reply {
+        info!(personne = %who.person, role = %who.role, outil = %tool, "droit refusé");
+        Reply::failed(REFUSED)
+    }
+
+    fn refuse_answer(&self, who: &Speaker, tool: &str) -> Answer {
+        let answer = Answer::from(self.refuse(who, tool));
+        self.remember(&answer);
+        answer
     }
 
     async fn execute(&self, skill: &dyn Skill, intent: Intent) -> Step {
@@ -642,6 +721,8 @@ const NOT_DONE: &str = "Sans réponse claire, je ne fais rien.";
 const VOICE_NOT_RECOGNIZED: &str =
     "Je n'ai pas bien reconnu votre voix. Dites « oui, vas-y » pour confirmer.";
 const VOICE_REFUSED: &str = "Je ne reconnais toujours pas votre voix : je ne fais rien.";
+/// Droit refusé (spec §5.8) : exacte, non adressée.
+pub const REFUSED: &str = "Je ne peux pas faire ça pour vous.";
 const NO_MORE_REASK: &str = "Je ne repose pas la question : je ne fais rien.";
 /// Adressée.
 const ASK_ALOUD: &str = "Pour cela, demandez-le-moi à voix haute.";
@@ -1723,5 +1804,372 @@ mod tests {
                 sound: Some(Sound::Success),
             }
         );
+    }
+}
+
+/// Garde-fou d'outil : les droits de qui parle (phase 8).
+#[cfg(test)]
+mod droits {
+    use super::*;
+    use crate::testing::{FakeLlm, FakeSkill, ManualClock, tool_understanding};
+    use jarvis_skills::FakeRunner;
+    use jarvis_skills::power::{POWER_DELAY, PowerSkill};
+
+    const PHRASE_AGENT: &str = "Jarvis, finis les tests du projet Jarvis";
+    const VEILLE: &str = "mets le PC en veille";
+
+    struct Montage {
+        brain: Brain,
+        people: Arc<People>,
+        llm: Arc<FakeLlm>,
+        media: Arc<FakeSkill>,
+        agent: Arc<FakeSkill>,
+        runner: Arc<FakeRunner>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn montage_avec(llm: FakeLlm, people: Arc<People>) -> Montage {
+        let dir = tempfile::tempdir().unwrap();
+        let llm = Arc::new(llm);
+        let media = Arc::new(
+            FakeSkill::new(&["media_next", "app_launch", "web_search"])
+                .with_result(Ok(Reply::done("Bien."))),
+        );
+        let agent = Arc::new(
+            FakeSkill::new(&["agent_start"])
+                .with_shortcut(
+                    PHRASE_AGENT,
+                    "agent_start",
+                    serde_json::json!({"project": "Jarvis"}),
+                )
+                .with_llm_tools(false),
+        );
+        let runner = Arc::new(FakeRunner::new());
+        let brain = Brain::new(
+            vec![
+                media.clone(),
+                agent.clone(),
+                Arc::new(PowerSkill::new(runner.clone())),
+            ],
+            llm.clone(),
+            llm.clone(),
+            Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+        )
+        .with_clock(Arc::new(ManualClock::new()))
+        .with_people(people.clone());
+        Montage {
+            brain,
+            people,
+            llm,
+            media,
+            agent,
+            runner,
+            _dir: dir,
+        }
+    }
+
+    fn montage(llm: FakeLlm) -> Montage {
+        montage_avec(llm, Arc::new(People::admin_only("Charles")))
+    }
+
+    fn bavard() -> FakeLlm {
+        FakeLlm::new(Ok(crate::llm::Understanding::Answer("Réponse.".into())))
+    }
+
+    impl Montage {
+        fn tools(&self) -> Vec<String> {
+            self.brain.tool_names()
+        }
+
+        /// Rôle `famille` (musique et applications) et Léa.
+        fn avec_lea(&self) {
+            self.role("famille", &["media_*", "app_launch"], false, false);
+            self.people.add_person("Léa", "famille").unwrap();
+        }
+
+        fn role(&self, nom: &str, outils: &[&str], confirm: bool, agent: bool) {
+            let outils = outils.iter().map(|s| s.to_string()).collect();
+            self.people
+                .add_role(nom, outils, confirm, agent, &self.tools())
+                .unwrap();
+        }
+
+        fn lea(&self, trust: Trust) -> Speaker {
+            self.people.speaker("Léa", trust)
+        }
+
+        async fn ran(&self) -> Vec<(String, Vec<String>)> {
+            tokio::time::sleep(POWER_DELAY + Duration::from_secs(1)).await;
+            self.runner.calls()
+        }
+    }
+
+    fn ear() -> EarId {
+        EarId::new("test")
+    }
+
+    fn refus(a: &Answer) {
+        assert_eq!(
+            (a.reply.speech.as_str(), a.reply.outcome),
+            ("Je ne peux pas faire ça pour vous.", Outcome::Failed)
+        );
+        assert!(!a.awaits_reply);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invite_peut_lancer_une_musique() {
+        let m = montage(bavard());
+        m.avec_lea();
+        let a = m
+            .brain
+            .answer_as(&ear(), "suivant", &m.lea(Trust::Unverified))
+            .await;
+        assert_eq!(
+            (a.reply.speech.as_str(), a.reply.outcome),
+            ("Bien.", Outcome::Done)
+        );
+        assert_eq!(m.media.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invite_ne_peut_pas_mettre_en_veille() {
+        let m = montage(bavard());
+        m.avec_lea();
+        for trust in [Trust::Unverified, Trust::Accepted, Trust::Recognized] {
+            let a = m.brain.answer_as(&ear(), VEILLE, &m.lea(trust)).await;
+            refus(&a);
+            assert!(!m.brain.has_pending(), "aucune attente créée");
+        }
+        assert!(m.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn outil_interdit_par_le_role_refuse() {
+        let m = montage(FakeLlm::new(Ok(tool_understanding("web_search"))));
+        m.avec_lea();
+        let a = m
+            .brain
+            .answer_as(&ear(), "cherche des recettes", &m.lea(Trust::Unverified))
+            .await;
+        refus(&a);
+        assert!(m.media.calls().is_empty());
+        // Même chose par le raccourci du cerveau d'un outil hors du rôle.
+        let a = m
+            .brain
+            .answer_fast_as(&ear(), VEILLE, &m.lea(Trust::Unverified))
+            .await;
+        assert!(
+            a.is_none(),
+            "risqué : jamais proposé à une voix non vérifiée"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn outil_choisi_par_l_ia_mais_interdit_refuse() {
+        let m = montage(FakeLlm::new(Ok(tool_understanding("suspend"))));
+        m.avec_lea();
+        let a = m
+            .brain
+            .answer_as(
+                &ear(),
+                "fais quelque chose d'utile",
+                &m.lea(Trust::Recognized),
+            )
+            .await;
+        refus(&a);
+        assert!(!m.brain.has_pending());
+        assert!(m.ran().await.is_empty());
+        // Outil inventé, inconnu : phrase habituelle, rien n'est lancé.
+        let m2 = montage(FakeLlm::new(Ok(tool_understanding("inexistant"))));
+        m2.avec_lea();
+        let a = m2
+            .brain
+            .answer_as(&ear(), "fais un truc", &m2.lea(Trust::Unverified))
+            .await;
+        assert_eq!(a.reply.outcome, Outcome::Failed);
+        assert_eq!(
+            a.reply.speech,
+            "Je crains de ne pas savoir faire cela, Monsieur."
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn l_ia_recoit_tous_les_outils_pour_un_invite() {
+        let m = montage(bavard());
+        m.avec_lea();
+        m.brain
+            .answer_as(&ear(), "question", &m.people.typed())
+            .await;
+        let admin = m.llm.last_tools();
+        m.brain
+            .answer_as(&ear(), "autre question", &m.lea(Trust::Unverified))
+            .await;
+        assert_eq!(m.llm.last_tools(), admin);
+        assert!(!admin.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_refuse_sans_droit_agent() {
+        let m = montage(bavard());
+        m.avec_lea();
+        for trust in [Trust::Unverified, Trust::Accepted, Trust::Recognized] {
+            let a = m.brain.answer_as(&ear(), PHRASE_AGENT, &m.lea(trust)).await;
+            refus(&a);
+        }
+        assert!(m.agent.calls().is_empty());
+        assert_eq!(m.llm.calls(), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn agent_exige_voix_reconnue_meme_avec_le_droit() {
+        let m = montage(bavard());
+        m.role("dev", &["media_*"], false, true);
+        m.people.add_person("Max", "dev").unwrap();
+        for trust in [Trust::Unverified, Trust::Accepted] {
+            let a = m
+                .brain
+                .answer_as(&ear(), PHRASE_AGENT, &m.people.speaker("Max", trust))
+                .await;
+            assert_eq!(a.reply.speech, NEEDS_KNOWN_VOICE);
+        }
+        assert!(m.agent.calls().is_empty());
+        m.brain
+            .answer_as(
+                &ear(),
+                PHRASE_AGENT,
+                &m.people.speaker("Max", Trust::Recognized),
+            )
+            .await;
+        assert_eq!(m.agent.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn texte_tape_vaut_admin_et_peut_l_agent() {
+        let m = montage(bavard());
+        m.brain.handle_text(PHRASE_AGENT).await;
+        assert_eq!(m.agent.calls().len(), 1);
+        m.brain.handle_text("suivant").await;
+        assert_eq!(m.media.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn texte_tape_risque_toujours_a_voix_haute() {
+        let m = montage(bavard());
+        let r = m.brain.handle_text(VEILLE).await;
+        assert_eq!(
+            r.speech,
+            "Pour cela, demandez-le-moi à voix haute, Monsieur."
+        );
+        assert!(!m.brain.has_pending());
+        assert!(m.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voix_non_verifiee_admin_jamais_risque() {
+        let m = montage(bavard());
+        let who = m.people.owner_speaker(Trust::Unverified);
+        assert!(m.brain.answer_fast_as(&ear(), VEILLE, &who).await.is_none());
+        let a = m.brain.answer_as(&ear(), VEILLE, &who).await;
+        refus(&a);
+        assert!(!m.brain.has_pending());
+        assert!(m.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmation_sans_droit_refusee() {
+        let m = montage(bavard());
+        m.role("veille", &["suspend"], false, false);
+        m.people.add_person("Max", "veille").unwrap();
+        // Charles pose la question ; Max (outil permis, pas de droit confirm) répond oui.
+        let q = m
+            .brain
+            .answer_as(&ear(), VEILLE, &m.people.owner_speaker(Trust::Recognized))
+            .await;
+        assert!(q.awaits_reply);
+        let max = m.people.speaker("Max", Trust::Recognized);
+        let a = m
+            .brain
+            .answer_follow_up_as(&ear(), "oui", m.brain.now(), ReplyVoice::Verified, &max)
+            .await;
+        refus(&a);
+        assert!(!m.brain.has_pending());
+        assert!(m.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn role_retire_entre_question_et_oui_refuse() {
+        let m = montage(bavard());
+        m.role("veille", &["suspend"], true, false);
+        m.people.add_person("Max", "veille").unwrap();
+        let q = m
+            .brain
+            .answer_as(&ear(), VEILLE, &m.people.speaker("Max", Trust::Recognized))
+            .await;
+        assert!(q.awaits_reply);
+        m.people
+            .edit_role("veille", None, Some(false), None, &m.tools())
+            .unwrap();
+        let a = m
+            .brain
+            .answer_follow_up_as(
+                &ear(),
+                "oui",
+                m.brain.now(),
+                ReplyVoice::Verified,
+                &m.people.speaker("Max", Trust::Recognized),
+            )
+            .await;
+        refus(&a);
+        assert!(m.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn confirmation_avec_droit_execute() {
+        let m = montage(bavard());
+        m.role("veille", &["suspend"], true, false);
+        m.people.add_person("Max", "veille").unwrap();
+        let max = m.people.speaker("Max", Trust::Recognized);
+        m.brain.answer_as(&ear(), VEILLE, &max).await;
+        m.brain
+            .answer_follow_up_as(&ear(), "oui", m.brain.now(), ReplyVoice::Verified, &max)
+            .await;
+        assert_eq!(m.ran().await.len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_d_une_autre_oreille_n_execute_pas() {
+        let m = montage(bavard());
+        let q = m.brain.answer_text(&EarId::new("salon"), VEILLE).await;
+        assert!(q.awaits_reply);
+        let a = m
+            .brain
+            .answer_follow_up_as(
+                &EarId::new("chambre"),
+                "oui",
+                m.brain.now(),
+                ReplyVoice::Verified,
+                &m.people.owner_speaker(Trust::Recognized),
+            )
+            .await;
+        assert_eq!(a.reply.speech, "");
+        assert!(!m.brain.has_pending());
+        assert!(m.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cerveau_par_defaut_se_comporte_comme_avant() {
+        let m = montage(bavard());
+        let q = m.brain.answer_text(&ear(), VEILLE).await;
+        assert!(q.awaits_reply);
+        m.brain
+            .answer_follow_up(&ear(), "oui", m.brain.now(), ReplyVoice::Verified)
+            .await;
+        assert_eq!(m.ran().await.len(), 1);
+        // Voix non vérifiée : toujours pas de risqué, mais le reste passe.
+        assert!(m.brain.answer_fast(&ear(), VEILLE).await.is_none());
+        m.brain.answer_voice(&ear(), PHRASE_AGENT, true).await;
+        assert_eq!(m.agent.calls().len(), 1);
+        m.brain.answer_voice(&ear(), PHRASE_AGENT, false).await;
+        assert_eq!(m.agent.calls().len(), 1);
     }
 }
