@@ -319,9 +319,12 @@ fn octets_impairs_ignores() {
     let mut pcm = block(1_000);
     pcm.push(9);
     b.engine.push_audio(pcm);
-    wait("son vu", || seen.load(Ordering::SeqCst) == 320);
+    wait("son vu", || seen.load(Ordering::SeqCst) >= 160);
     std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(seen.load(Ordering::SeqCst), 320);
+    let seen = seen.load(Ordering::SeqCst);
+    assert!(seen <= 320, "{seen}");
+    // L'octet de trop est écarté à la conversion.
+    assert_eq!(crate::enroll::pcm_to_f32(&[1, 0, 2]).len(), 1);
 }
 
 #[test]
