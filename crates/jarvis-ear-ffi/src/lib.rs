@@ -8,22 +8,20 @@
 //! `ByteArray` en Kotlin) : un `Vec<i16>` deviendrait une `List<Short>`, une boîte
 //! par échantillon.
 //!
-//! Surface figée (tâche 3) ; corps provisoires, remplis par la tâche 5.
+//! Surface figée par la tâche 3 de la phase 5 ; le moteur est dans `engine`.
 
-use std::sync::Arc;
+use std::path::Path;
 
+mod engine;
+mod enroll;
 mod logging;
+mod pairing;
+mod view;
+
+pub use engine::EarEngine;
+pub use view::view_of;
 
 uniffi::setup_scaffolding!();
-
-/// Message des corps provisoires.
-const PENDING: &str = "tâche 5";
-
-fn pending() -> EarError {
-    EarError::Internal {
-        message: PENDING.into(),
-    }
-}
 
 /// Réglages du moteur, donnés par l'appli.
 #[derive(Debug, Clone, uniffi::Record)]
@@ -120,74 +118,6 @@ pub trait EarHost: Send + Sync {
     fn status_changed(&self, view: EarView);
 }
 
-/// Moteur de l'oreille : un seul par service.
-#[derive(uniffi::Object)]
-pub struct EarEngine {
-    // Lus par le moteur réel (tâche 5).
-    #[allow(dead_code)]
-    settings: EarSettings,
-    #[allow(dead_code)]
-    host: Arc<dyn EarHost>,
-}
-
-#[uniffi::export]
-impl EarEngine {
-    /// Prépare le moteur (appairage et mot d'éveil lus), sans rien lancer.
-    #[uniffi::constructor]
-    pub fn new(settings: EarSettings, host: Arc<dyn EarHost>) -> Result<Arc<Self>, EarError> {
-        Ok(Arc::new(Self { settings, host }))
-    }
-
-    /// Lance l'écoute et le lien avec le cerveau ; un second appel ne fait rien.
-    pub fn start(&self) -> Result<(), EarError> {
-        Err(pending())
-    }
-
-    /// Arrête tout (idempotent, borné à 5 s).
-    pub fn stop(&self) {}
-
-    /// Format du micro, annoncé avant le premier `push_audio`.
-    pub fn audio_format(&self, rate: u32, channels: u16) {
-        let _ = (rate, channels);
-    }
-
-    /// Son du micro : PCM 16 bits little-endian (blocs de 20 ms).
-    pub fn push_audio(&self, pcm_le: Vec<u8>) {
-        let _ = pcm_le;
-    }
-
-    /// Le micro n'a pas pu s'ouvrir.
-    pub fn capture_unavailable(&self) {}
-
-    /// Fin de lecture du son de cette génération.
-    pub fn playback_idle(&self, generation: u64) {
-        let _ = generation;
-    }
-
-    /// Couper l'écoute (le micro reste ouvert, « Jarvis » est ignoré).
-    pub fn mute(&self) {}
-
-    /// Réactiver l'écoute.
-    pub fn unmute(&self) {}
-
-    /// Coupure totale : micro fermé.
-    pub fn hard_mute(&self) {}
-
-    /// Rouvrir le micro après une coupure totale.
-    pub fn reopen(&self) {}
-
-    /// État courant.
-    pub fn view(&self) -> EarView {
-        EarView {
-            mic: MicView::Open,
-            brain: BrainView::Connecting,
-            text: "connexion au PC…".into(),
-            attention: false,
-            last_heard: None,
-        }
-    }
-}
-
 /// « jarvis-ear-ffi <version> ».
 #[uniffi::export]
 pub fn library_version() -> String {
@@ -204,37 +134,32 @@ pub fn init_logging() {
 /// Nom du cerveau appairé, s'il y en a un.
 #[uniffi::export]
 pub fn paired_brain(data_dir: String) -> Option<String> {
-    let _ = data_dir;
-    None
+    pairing::paired_brain(Path::new(&data_dir))
 }
 
 /// Appaire l'oreille par l'adresse `jarvis://pair?…` (QR code de `jarvis pair`).
 /// Bloquante (à appeler hors du fil principal) ; rend le nom du cerveau.
 #[uniffi::export]
 pub fn pair_with_uri(data_dir: String, uri: String, name: String) -> Result<String, EarError> {
-    let _ = (data_dir, uri, name);
-    Err(pending())
+    pairing::pair_real(Path::new(&data_dir), &uri, &name)
 }
 
 /// Oublie l'appairage (garde le mot d'éveil).
 #[uniffi::export]
 pub fn unpair(data_dir: String) -> Result<(), EarError> {
-    let _ = data_dir;
-    Err(pending())
+    pairing::unpair(Path::new(&data_dir))
 }
 
 /// Vrai si le modèle du mot d'éveil existe.
 #[uniffi::export]
 pub fn has_wakeword(data_dir: String) -> bool {
-    let _ = data_dir;
-    false
+    enroll::model_path(Path::new(&data_dir)).exists()
 }
 
 /// Efface les prises d'un enregistrement précédent.
 #[uniffi::export]
 pub fn enroll_reset(data_dir: String) -> Result<(), EarError> {
-    let _ = data_dir;
-    Err(pending())
+    enroll::reset(Path::new(&data_dir))
 }
 
 /// Enregistre la prise `index` (PCM 16 bits little-endian) ; `TooQuiet` si inaudible.
@@ -245,15 +170,13 @@ pub fn enroll_take(
     pcm_le: Vec<u8>,
     sample_rate: u32,
 ) -> Result<(), EarError> {
-    let _ = (data_dir, index, pcm_le, sample_rate);
-    Err(pending())
+    enroll::take(Path::new(&data_dir), index, &pcm_le, sample_rate)
 }
 
 /// Construit le modèle du mot d'éveil ; rend le nombre de prises utilisées.
 #[uniffi::export]
 pub fn enroll_finish(data_dir: String) -> Result<u32, EarError> {
-    let _ = data_dir;
-    Err(pending())
+    enroll::finish(Path::new(&data_dir))
 }
 
 #[cfg(test)]
