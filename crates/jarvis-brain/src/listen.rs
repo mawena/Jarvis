@@ -1,6 +1,6 @@
 //! Écoute côté cerveau : mot d'éveil (baisse du son) et phrases captées.
 
-use crate::brain::{Answer, Brain, ReplyVoice};
+use crate::brain::{Answer, Brain, REFUSED, ReplyVoice};
 use crate::ducking::Ducker;
 use crate::fastpath::{
     BrainCommand, is_shortcut, match_brain_command, match_confirmation, match_ear_command,
@@ -296,6 +296,12 @@ impl ListenService {
             // `AwaitReply` ne vient jamais d'une commande d'écoute.
             Some(EarAction::AwaitReply) | None if short_only => {
                 match self.brain.answer_fast_as(ear, &text, &who).await {
+                    // Droit refusé sur une phrase courte (télévision, voix de passage) :
+                    // silence, comme une voix inconnue. Rien n'a été lancé pour autant.
+                    Some(a) if a.reply.speech == REFUSED => {
+                        info!("phrase courte non vérifiée refusée par les droits, sans réponse");
+                        heard("", "", None)
+                    }
                     Some(a) => self.answered(&text, a),
                     // Action risquée : jamais pour une voix non vérifiée.
                     None => heard("", "", None),
@@ -1216,6 +1222,38 @@ mod tests {
             .await;
         assert_eq!(llm.calls(), 1);
         assert_eq!(skill.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invite_phrase_courte_refusee_en_silence() {
+        // Rôle sans aucun outil : « suivant » (media_next) est refusé par les droits.
+        let people = People::admin_only("Charles");
+        people
+            .add_role("muet", vec![], false, false, &["media_next".to_string()])
+            .unwrap();
+        people.add_person("Léa", "muet").unwrap();
+        people.attach("Léa", &chambre()).unwrap();
+        let c = confirm_people(&["suivant", "suivant"], Persona::default(), people);
+        let r = c
+            .service
+            .listen(&chambre(), &short_voice(), false, false)
+            .await;
+        assert_eq!(r, heard("", "", None));
+        // Une phrase longue garde le refus parlé.
+        let r = c
+            .service
+            .listen(&chambre(), &voice(20_000), false, false)
+            .await;
+        assert_eq!(
+            r,
+            ControlResponse::Heard {
+                text: "suivant".into(),
+                speech: REFUSED.into(),
+                ear_action: None,
+                audio: None,
+                sound: Some(Sound::Failure),
+            }
+        );
     }
 
     #[tokio::test(start_paused = true)]
