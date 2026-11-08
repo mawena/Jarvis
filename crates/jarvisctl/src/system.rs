@@ -137,6 +137,9 @@ pub mod fake {
         pub brain: Option<(Mode, String, String)>,
         /// Réponse du cerveau à `ListEars` (None : cerveau injoignable).
         pub ears: Option<ControlResponse>,
+        pub people: Option<ControlResponse>,
+        /// Réponse du cerveau à `RoleList`.
+        pub roles: Option<ControlResponse>,
         pub path: Option<String>,
         /// Autres variables d'environnement (`PATH` : `path`).
         pub env: HashMap<String, String>,
@@ -175,6 +178,8 @@ pub mod fake {
         fn brain_request(&self, request: &ControlRequest) -> Option<ControlResponse> {
             match request {
                 ControlRequest::ListEars => self.ears.clone(),
+                ControlRequest::PersonList => self.people.clone(),
+                ControlRequest::RoleList => self.roles.clone(),
                 _ => None,
             }
         }

@@ -8,11 +8,14 @@ use crate::brain::Brain;
 use crate::ears::{EarRecord, EarRegistry, hex};
 use crate::listen::ListenService;
 use crate::pairing::{PairAttempt, PairingWindow};
+use crate::people::{Access, EarPerson, PeopleError, Trust};
 use crate::tts::Voice;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
 use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
+use jarvis_skills::Risk;
+use jarvis_skills::text::fold;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -47,6 +50,9 @@ const MAX_PLATFORM_CHARS: usize = 32;
 /// Réponse à une oreille distante qui demande le mode en ligne.
 pub const ONLINE_FROM_PC_ONLY: &str =
     "Le mode en ligne se demande à la voix (avec confirmation) ou depuis le PC.";
+
+/// Réponse à une oreille dont la personne n'a pas le droit de changer le mode.
+pub const MODE_FORBIDDEN: &str = "Vous n'avez pas le droit de changer le mode.";
 
 /// Rappel de l'annonce mDNS : `true` pendant une fenêtre d'appairage.
 pub type PairingHook = Arc<dyn Fn(bool) + Send + Sync>;
@@ -163,6 +169,7 @@ enum Command {
         response: ControlResponse,
     },
     PairStart {
+        person: Option<String>,
         reply: oneshot::Sender<Result<PairTicket, String>>,
     },
     PairCancel {
@@ -174,6 +181,10 @@ enum Command {
     },
     ListEars {
         reply: oneshot::Sender<Vec<EarSummary>>,
+    },
+    FindEar {
+        ear: String,
+        reply: oneshot::Sender<Result<EarSummary, String>>,
     },
     Unpair {
         ear: String,
@@ -320,8 +331,10 @@ impl Hub {
     }
 
     /// Ouvre une fenêtre d'appairage (une seule à la fois : la précédente est fermée).
-    pub async fn pair_start(&self) -> Result<PairTicket, String> {
-        self.ask(|reply| Command::PairStart { reply })
+    /// `person` : à qui l'oreille appairée sera rattachée (le propriétaire par défaut) ;
+    /// personne inconnue ou annuaire illisible : erreur, aucune fenêtre ouverte.
+    pub async fn pair_start(&self, person: Option<String>) -> Result<PairTicket, String> {
+        self.ask(|reply| Command::PairStart { person, reply })
             .await
             .unwrap_or_else(|| Err("Le réseau des oreilles est arrêté.".into()))
     }
@@ -342,6 +355,14 @@ impl Hub {
         self.ask(|reply| Command::ListEars { reply })
             .await
             .unwrap_or_default()
+    }
+
+    /// Oreille désignée par son nom, son identifiant ou un début d'identifiant.
+    pub async fn find_ear(&self, ear: &str) -> Result<EarSummary, String> {
+        let ear = ear.to_string();
+        self.ask(|reply| Command::FindEar { ear, reply })
+            .await
+            .unwrap_or_else(|| Err("Le réseau des oreilles est arrêté.".into()))
     }
 
     /// Retire une oreille (nom ou identifiant) et la déconnecte : `Reply` ou `Error`.
@@ -455,6 +476,8 @@ impl Capture {
 
 struct OpenWindow {
     id: u64,
+    /// Personne à laquelle l'oreille appairée sera rattachée.
+    person: String,
     window: PairingWindow,
     waiter: oneshot::Sender<PairOutcome>,
 }
@@ -579,8 +602,8 @@ impl State {
                 utterance,
                 response,
             } => self.processed(&ear, utterance, response),
-            Command::PairStart { reply } => {
-                let _ = reply.send(self.pair_start());
+            Command::PairStart { person, reply } => {
+                let _ = reply.send(self.pair_start(person.as_deref()));
             }
             Command::PairCancel { id } => {
                 if self.pairing.as_ref().is_some_and(|p| p.id == id) {
@@ -592,6 +615,9 @@ impl State {
             }
             Command::ListEars { reply } => {
                 let _ = reply.send(self.summaries());
+            }
+            Command::FindEar { ear, reply } => {
+                let _ = reply.send(self.find_ear(&ear));
             }
             Command::Unpair { ear, reply } => {
                 let _ = reply.send(self.unpair(&ear));
@@ -739,14 +765,34 @@ impl State {
         self.registry
             .list()
             .into_iter()
-            .map(|r| EarSummary {
-                connected: self.sessions.contains_key(&r.id),
-                id: r.id,
-                name: r.name,
-                platform: r.platform,
-                local: r.local,
-            })
+            .map(|r| self.summary(r))
             .collect()
+    }
+
+    fn summary(&self, r: EarRecord) -> EarSummary {
+        let people = self.services.brain.people();
+        let person = match people.person_of(&r.id) {
+            EarPerson::Owner => Some(people.owner_name()),
+            EarPerson::Guest(name) => Some(name),
+            EarPerson::Unknown => None,
+        };
+        EarSummary {
+            connected: self.sessions.contains_key(&r.id),
+            id: r.id,
+            name: r.name,
+            platform: r.platform,
+            local: r.local,
+            person,
+        }
+    }
+
+    fn find_ear(&self, ear: &str) -> Result<EarSummary, String> {
+        match self.registry.find(ear.trim()) {
+            Ok(Some(record)) => Ok(self.summary(record)),
+            Ok(None) => Err(format!("Aucune oreille « {} ».", ear.trim())),
+            Err(e) if e.kind() == std::io::ErrorKind::InvalidInput => Err(e.to_string()),
+            Err(e) => Err(format!("Impossible de chercher l'oreille : {e}.")),
+        }
     }
 
     fn broadcast_status(&mut self) {
@@ -830,7 +876,26 @@ impl State {
             }
             EarMessage::SetMode { mode } => {
                 let local = self.sessions.get(ear).is_some_and(|s| s.record.local);
-                if mode == Mode::Online && !local {
+                let people = self.services.brain.people();
+                let (speaker, guest) = match people.person_of(ear) {
+                    EarPerson::Owner => (people.owner_speaker(Trust::Accepted), false),
+                    EarPerson::Guest(name) => (people.speaker(&name, Trust::Unverified), true),
+                    EarPerson::Unknown => (people.speaker("", Trust::Unverified), true),
+                };
+                if speaker.check("set_mode", Risk::Direct) != Access::Allowed {
+                    warn!(oreille = %ear, "changement de mode refusé : la personne n'en a pas le droit");
+                    self.send(
+                        ear,
+                        BrainMessage::Response {
+                            utterance: None,
+                            response: ControlResponse::Error {
+                                message: MODE_FORBIDDEN.into(),
+                            },
+                        },
+                    );
+                    return;
+                }
+                if mode == Mode::Online && (!local || guest) {
                     // À la voix, le mode en ligne demande une confirmation exacte : une
                     // oreille d'une autre machine ne peut pas s'en passer.
                     warn!(oreille = %ear, "mode en ligne demandé par une oreille distante : refusé");
@@ -1190,7 +1255,9 @@ impl State {
 
     // --- Appairage et registre ---
 
-    fn pair_start(&mut self) -> Result<PairTicket, String> {
+    fn pair_start(&mut self, person: Option<&str>) -> Result<PairTicket, String> {
+        // Personne vérifiée avant de toucher à la fenêtre en cours.
+        let person = self.pairing_person(person)?;
         if let Some(old) = self.pairing.take() {
             let _ = old.waiter.send(PairOutcome::Ended {
                 reason: pairing_ended::REPLACED.into(),
@@ -1208,7 +1275,12 @@ impl State {
         let id = self.next_id;
         self.next_id += 1;
         let (waiter, outcome) = oneshot::channel();
-        self.pairing = Some(OpenWindow { id, window, waiter });
+        self.pairing = Some(OpenWindow {
+            id,
+            person,
+            window,
+            waiter,
+        });
         self.announce_pairing(true);
         info!("fenêtre d'appairage ouverte");
         Ok(PairTicket {
@@ -1219,6 +1291,25 @@ impl State {
             expires_in_secs: self.settings.pairing_ttl.as_secs(),
             outcome,
         })
+    }
+
+    /// Nom (tel que l'annuaire l'écrit) de la personne à qui rattacher la prochaine
+    /// oreille : le propriétaire par défaut.
+    fn pairing_person(&self, person: Option<&str>) -> Result<String, String> {
+        let people = self.services.brain.people();
+        if people.degraded().is_some() {
+            return Err(PeopleError::Degraded.to_string());
+        }
+        let Some(wanted) = person else {
+            return Ok(people.owner_name());
+        };
+        let key = fold(wanted.trim());
+        people
+            .people_summary(&|_| None, false)
+            .into_iter()
+            .find(|p| fold(&p.name) == key)
+            .map(|p| p.name)
+            .ok_or_else(|| PeopleError::UnknownPerson(wanted.trim().to_string()).to_string())
     }
 
     fn close_pairing(&mut self, reason: &str) {
@@ -1251,9 +1342,19 @@ impl State {
             PairAttempt::Accepted => {
                 let name = clean(name, MAX_NAME_CHARS, "Oreille");
                 let platform = clean(platform, MAX_PLATFORM_CHARS, "inconnue");
+                let person = open.person.clone();
                 match self.registry.add(&name, &platform, false) {
                     Ok((record, token)) => {
-                        info!(oreille = %record.id, nom = %name, "oreille appairée");
+                        if let Err(e) = self.services.brain.people().attach(&person, &record.id) {
+                            // Une oreille qui n'appartient à personne ne doit pas exister.
+                            warn!(erreur = %e, personne = %person, "rattachement impossible : appairage défait");
+                            if let Err(e) = self.registry.remove(record.id.as_str()) {
+                                warn!(erreur = %e, "registre des oreilles : retrait impossible");
+                            }
+                            self.close_pairing(&pairing_ended::not_saved(&e.to_string()));
+                            return closed;
+                        }
+                        info!(oreille = %record.id, nom = %name, personne = %person, "oreille appairée");
                         if let Some(open) = self.pairing.take() {
                             let _ = open.waiter.send(PairOutcome::Done { name });
                             self.announce_pairing(false);
@@ -1300,6 +1401,16 @@ impl State {
         match self.registry.add_local(&name) {
             Ok((record, token)) => {
                 info!(oreille = %record.id, nom = %name, "oreille locale appairée");
+                // La nouvelle oreille locale est au propriétaire ; l'ancienne
+                // (identifiant disparu du registre) quitte l'annuaire.
+                let people = self.services.brain.people();
+                if let Err(e) = people.attach(&people.owner_name(), &record.id) {
+                    warn!(erreur = %e, "oreille locale : rattachement au propriétaire impossible");
+                }
+                let known: Vec<EarId> = self.registry.list().into_iter().map(|r| r.id).collect();
+                if let Err(e) = people.prune(&known) {
+                    warn!(erreur = %e, "annuaire : nettoyage impossible");
+                }
                 // L'ancienne oreille locale du même nom n'existe plus.
                 self.prune_sessions();
                 self.broadcast_status();
@@ -1322,6 +1433,9 @@ impl State {
         match self.registry.remove(ear.trim()) {
             Ok(Some(record)) => {
                 info!(oreille = %record.id, nom = %record.name, "oreille retirée");
+                if let Err(e) = self.services.brain.people().detach(&record.id) {
+                    warn!(erreur = %e, "annuaire : détachement de l'oreille impossible");
+                }
                 self.prune_sessions();
                 self.broadcast_status();
                 ControlResponse::Reply {

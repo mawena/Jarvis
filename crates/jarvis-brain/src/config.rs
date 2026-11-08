@@ -26,6 +26,25 @@ pub struct Config {
     pub agent: AgentSettings,
     /// Oreilles en réseau (section `[network]`).
     pub network: NetworkConfig,
+    /// Personnes et rôles (section `[people]`).
+    pub people: PeopleConfig,
+}
+
+/// Annuaire des personnes : réglages à la création du fichier.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct PeopleConfig {
+    /// Nom du propriétaire (rôle `admin`), utilisé seulement à la création de
+    /// `people.toml`.
+    pub owner: String,
+}
+
+impl Default for PeopleConfig {
+    fn default() -> Self {
+        Self {
+            owner: "Charles".to_string(),
+        }
+    }
 }
 
 /// Serveur des oreilles (WebSocket sur TLS) et annonce mDNS.
@@ -67,6 +86,7 @@ impl Default for Config {
             search: SearchSettings::default(),
             agent: AgentSettings::default(),
             network: NetworkConfig::default(),
+            people: PeopleConfig::default(),
         }
     }
 }
@@ -483,6 +503,16 @@ mod tests {
             assert_eq!(r.projects[1].path, PathBuf::from("/srv/mawena"));
         }
         assert_eq!(c.search, SearchSettings::default());
+    }
+
+    #[test]
+    fn config_people_defaut_et_proprietaire() {
+        let c = Config::default();
+        assert_eq!(c.people.owner, "Charles");
+        let (_d, p) = write("[people]\nowner = \"Léa\"\n");
+        assert_eq!(Config::load(&p).unwrap().people.owner, "Léa");
+        let (_d, p) = write("[network]\nenabled = false\n");
+        assert_eq!(Config::load(&p).unwrap().people.owner, "Charles");
     }
 
     #[test]

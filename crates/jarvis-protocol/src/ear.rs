@@ -270,6 +270,9 @@ pub struct EarSummary {
     pub connected: bool,
     /// Oreille du PC (appairée par le socket Unix).
     pub local: bool,
+    /// Nom de la personne à qui l'oreille appartient (`None` côté oreille).
+    #[serde(default)]
+    pub person: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -333,6 +336,7 @@ mod tests {
                 platform: "linux".into(),
                 connected: true,
                 local: true,
+                person: None,
             }],
         }
     }

@@ -1215,6 +1215,60 @@ fn disconnected_ear_line(name: &str, platform: &str) -> String {
     format!("· Oreille « {name} » ({platform}) déconnectée — {hint}")
 }
 
+/// Personnes et rôles : annuaire lu par le cerveau, puis oreilles sans personne.
+fn people_diagnostics(
+    sys: &dyn System,
+    ears: &[jarvis_protocol::EarSummary],
+    out: &mut dyn Write,
+) -> Result<()> {
+    match sys.brain_request(&ControlRequest::PersonList) {
+        Some(ControlResponse::People { people, degraded }) => {
+            if let Some(reason) = degraded {
+                writeln!(
+                    out,
+                    "! Annuaire des personnes illisible ({reason}) — mode dégradé : seule votre \
+                     voix reconnue et le texte tapé ont des droits ; corrigez ou supprimez le \
+                     fichier indiqué"
+                )?;
+            } else {
+                if let [only] = people.as_slice() {
+                    let roles = match sys.brain_request(&ControlRequest::RoleList) {
+                        Some(ControlResponse::Roles { roles }) => {
+                            let custom = roles.iter().filter(|r| !r.builtin).count();
+                            match custom {
+                                0 => ", 1 rôle intégré".to_string(),
+                                1 => ", 1 rôle intégré, 1 rôle créé".to_string(),
+                                n => format!(", 1 rôle intégré, {n} rôles créés"),
+                            }
+                        }
+                        _ => String::new(),
+                    };
+                    writeln!(
+                        out,
+                        "✓ Personnes et rôles : 1 personne ({}, {}){roles}",
+                        only.name, only.role
+                    )?;
+                } else {
+                    let list: Vec<String> = people
+                        .iter()
+                        .map(|p| format!("{} {}", p.name, p.role))
+                        .collect();
+                    writeln!(out, "✓ Personnes : {} ({})", people.len(), list.join(", "))?;
+                }
+                // En mode dégradé toutes les oreilles sont inconnues : on ne les répète pas.
+                for e in ears.iter().filter(|e| !e.local && e.person.is_none()) {
+                    writeln!(out, "! Oreille « {} » sans personne reconnue", e.name)?;
+                }
+            }
+        }
+        Some(ControlResponse::Error { message }) if message == "requête invalide" => {
+            writeln!(out, "· Cerveau d'avant les personnes et les rôles")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Réseau des oreilles : avertissements seulement (le cerveau tourne sans, mais
 /// l'oreille du PC passe aussi par lui).
 fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
@@ -1269,7 +1323,12 @@ fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> 
     }
     let none = "! Aucune oreille appairée — l'oreille du PC s'appaire seule à son démarrage ; \
                 une autre : `jarvis pair` (voir docs/reseau.md)";
-    match sys.brain_request(&ControlRequest::ListEars) {
+    let ears_reply = sys.brain_request(&ControlRequest::ListEars);
+    let known_ears: Vec<jarvis_protocol::EarSummary> = match &ears_reply {
+        Some(ControlResponse::Ears { ears }) => ears.clone(),
+        _ => Vec::new(),
+    };
+    match ears_reply {
         Some(ControlResponse::Ears { ears }) if ears.is_empty() => writeln!(out, "{none}")?,
         Some(ControlResponse::Ears { ears }) => {
             let connected: Vec<&str> = ears
@@ -1315,6 +1374,8 @@ fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> 
             Err(_) => {}
         },
     }
+
+    people_diagnostics(sys, &known_ears, out)?;
 
     // Port d'écoute.
     let port = match listen.trim().parse::<std::net::SocketAddr>() {
@@ -2780,6 +2841,7 @@ WantedBy=graphical-session.target
             platform: "linux".into(),
             connected,
             local,
+            person: None,
         };
         sys.ears = Some(ControlResponse::Ears {
             ears: vec![ear("PC", true, true), ear("Salon", false, false)],
@@ -2840,7 +2902,154 @@ WantedBy=graphical-session.target
             platform: platform.into(),
             connected,
             local,
+            person: None,
         }
+    }
+
+    fn person(name: &str, role: &str) -> jarvis_protocol::PersonSummary {
+        jarvis_protocol::PersonSummary {
+            name: name.into(),
+            role: role.into(),
+            owner: role == "admin",
+            ears: vec![],
+            voiceprint: false,
+        }
+    }
+
+    fn role(name: &str, builtin: bool) -> jarvis_protocol::RoleSummary {
+        jarvis_protocol::RoleSummary {
+            name: name.into(),
+            tools: vec![],
+            confirm: false,
+            agent: false,
+            builtin,
+            people: 0,
+        }
+    }
+
+    #[test]
+    fn doctor_affiche_les_personnes() {
+        let (_home, paths, mut sys) = installed();
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: None,
+        });
+        sys.roles = Some(ControlResponse::Roles {
+            roles: vec![role("admin", true)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin), 1 rôle intégré\n"),
+            "{o}"
+        );
+        // Des rôles créés sont comptés.
+        sys.roles = Some(ControlResponse::Roles {
+            roles: vec![
+                role("admin", true),
+                role("famille", false),
+                role("amis", false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("1 personne (Charles, admin), 1 rôle intégré, 2 rôles créés"),
+            "{o}"
+        );
+        // Sans réponse sur les rôles, la mention disparaît.
+        sys.roles = None;
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin)\n"),
+            "{o}"
+        );
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin"), person("Léa", "famille")],
+            degraded: None,
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes : 2 (Charles admin, Léa famille)"),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_annuaire_illisible_ne_liste_pas_les_oreilles() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![summary("Salon", "linux", true, false)],
+        });
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: Some("TOML invalide".into()),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Annuaire des personnes illisible"), "{o}");
+        assert!(!o.contains("sans personne reconnue"), "{o}");
+    }
+
+    #[test]
+    fn doctor_signale_l_annuaire_illisible() {
+        let (_home, paths, mut sys) = installed();
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: Some("/x/people.toml : TOML invalide".into()),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "! Annuaire des personnes illisible (/x/people.toml : TOML invalide) — mode \
+                 dégradé : seule votre voix reconnue et le texte tapé ont des droits"
+            ),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_signale_l_oreille_sans_personne() {
+        let (_home, paths, mut sys) = installed();
+        let mut lea = summary("Chambre", "linux", true, false);
+        lea.person = Some("Léa".into());
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", true, true),
+                lea,
+                summary("Salon", "linux", true, false),
+            ],
+        });
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: None,
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Oreille « Salon » sans personne reconnue"),
+            "{o}"
+        );
+        assert!(!o.contains("« Chambre » sans personne"), "{o}");
+        assert!(!o.contains("« PC » sans personne"), "{o}");
+    }
+
+    #[test]
+    fn doctor_cerveau_sans_personnes() {
+        let (_home, paths, mut sys) = installed();
+        sys.people = Some(ControlResponse::Error {
+            message: "requête invalide".into(),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("· Cerveau d'avant les personnes et les rôles"),
+            "{o}"
+        );
+        assert!(!o.contains("! Cerveau d'avant"), "{o}");
+    }
+
+    #[test]
+    fn doctor_cerveau_injoignable_ne_dit_rien_des_personnes() {
+        let (_home, paths, sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("Personnes"), "{o}");
+        assert!(!o.contains("personnes"), "{o}");
     }
 
     #[test]
