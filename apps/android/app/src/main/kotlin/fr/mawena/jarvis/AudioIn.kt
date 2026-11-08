@@ -48,6 +48,16 @@ class AudioIn(private val engine: () -> EarEngine?) {
 
     private fun run(s: Session) {
         try {
+            runSession(s)
+        } finally {
+            // Session finie (y compris après `captureUnavailable`) : un nouveau `start` doit
+            // pouvoir rouvrir le micro ; seulement si c'est encore la session courante.
+            synchronized(lock) { if (session === s) session = null }
+        }
+    }
+
+    private fun runSession(s: Session) {
+        try {
             s.previous?.join(1000)
         } catch (_: InterruptedException) {
             return
