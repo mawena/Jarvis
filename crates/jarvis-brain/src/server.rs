@@ -214,7 +214,7 @@ async fn handle_client(shared: Arc<Shared>, stream: UnixStream) -> io::Result<()
                 return Ok(());
             }
             Line::Request(line) => match serde_json::from_slice::<ControlRequest>(&line) {
-                Ok(ControlRequest::PairStart) => match &shared.hub {
+                Ok(ControlRequest::PairStart { .. }) => match &shared.hub {
                     Some(hub) => {
                         if pair(hub, &mut reader, &mut write).await? {
                             continue;
@@ -317,8 +317,20 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
             },
         },
         // Traité par `handle_client` (réponse en deux temps).
-        ControlRequest::PairStart => ControlResponse::Error {
+        ControlRequest::PairStart { .. } => ControlResponse::Error {
             message: "requête invalide".into(),
+        },
+        // Gestion des personnes et des rôles : tâche 4 de la phase 8.
+        ControlRequest::PersonList
+        | ControlRequest::PersonAdd { .. }
+        | ControlRequest::PersonRemove { .. }
+        | ControlRequest::PersonRole { .. }
+        | ControlRequest::PersonAttach { .. }
+        | ControlRequest::RoleList
+        | ControlRequest::RoleAdd { .. }
+        | ControlRequest::RoleEdit { .. }
+        | ControlRequest::RoleRemove { .. } => ControlResponse::Error {
+            message: "pas encore disponible".into(),
         },
         ControlRequest::PairLocal { name } => match hub {
             Some(hub) => hub.pair_local(name).await,

@@ -2765,6 +2765,7 @@ WantedBy=graphical-session.target
             platform: "linux".into(),
             connected,
             local,
+            person: None,
         };
         sys.ears = Some(ControlResponse::Ears {
             ears: vec![ear("PC", true, true), ear("Salon", false, false)],

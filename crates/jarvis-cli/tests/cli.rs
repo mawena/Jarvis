@@ -102,7 +102,10 @@ fn pair_affiche_code_et_attend_la_fin() {
         started.elapsed() >= Duration::from_millis(300),
         "n'a pas attendu"
     );
-    assert_eq!(brain.join().unwrap(), ControlRequest::PairStart);
+    assert_eq!(
+        brain.join().unwrap(),
+        ControlRequest::PairStart { person: None }
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert_eq!(out.status.code(), Some(0), "{stdout}");
     assert!(stdout.contains("Code : 482913"), "{stdout}");
@@ -197,6 +200,7 @@ fn ears_liste_les_oreilles() {
         platform: platform.into(),
         connected,
         local,
+        person: None,
     };
     let brain = faux_cerveau(
         dir.path(),
@@ -220,9 +224,9 @@ fn ears_liste_les_oreilles() {
     assert_eq!(
         lines,
         [
-            "Id        Nom         Plateforme  Connectée  Locale",
-            "a1b2c3d4  PC          linux       oui        oui",
-            "0f1e2d3c  Pixel 4 XL  android     non        non",
+            "Id        Nom         Plateforme  Connectée  Locale  Personne",
+            "a1b2c3d4  PC          linux       oui        oui     -",
+            "0f1e2d3c  Pixel 4 XL  android     non        non     -",
         ]
     );
 }

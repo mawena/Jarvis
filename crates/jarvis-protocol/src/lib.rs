@@ -6,9 +6,11 @@ pub mod ear;
 pub mod fingerprint;
 pub mod frame;
 pub mod pairing_uri;
+pub mod people;
 
 pub use ear::{EarId, EarSummary};
 pub use fingerprint::Fingerprint;
+pub use people::{PersonSummary, RoleSummary};
 
 /// Raisons de `ControlResponse::PairingEnded` : en minuscule, sans point final
 /// (`jarvis pair` affiche « Fenêtre d'appairage fermée : <raison>. »).
@@ -101,7 +103,11 @@ pub enum ControlRequest {
     },
     /// Ouvre la fenêtre d'appairage : réponse `Pairing`, puis, sur la même connexion,
     /// `PairingDone` ou `PairingEnded`. Connexion fermée : fenêtre fermée.
-    PairStart,
+    /// `person` : personne à qui rattacher l'oreille (absente : le propriétaire).
+    PairStart {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        person: Option<String>,
+    },
     /// Appairage de l'oreille du PC (le socket Unix vaut preuve, sans code).
     PairLocal {
         name: String,
@@ -110,6 +116,48 @@ pub enum ControlRequest {
     /// Retire une oreille (nom ou identifiant) : réponse `Reply`.
     Unpair {
         ear: String,
+    },
+    /// Liste des personnes : réponse `People`.
+    PersonList,
+    PersonAdd {
+        name: String,
+        role: String,
+    },
+    PersonRemove {
+        name: String,
+    },
+    /// Change le rôle d'une personne.
+    PersonRole {
+        name: String,
+        role: String,
+    },
+    /// Rattache une oreille (nom, identifiant ou début d'identifiant) à une personne.
+    PersonAttach {
+        name: String,
+        ear: String,
+    },
+    /// Liste des rôles : réponse `Roles`.
+    RoleList,
+    RoleAdd {
+        name: String,
+        tools: Vec<String>,
+        #[serde(default)]
+        confirm: bool,
+        #[serde(default)]
+        agent: bool,
+    },
+    /// Champs absents : inchangés.
+    RoleEdit {
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tools: Option<Vec<String>>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        confirm: Option<bool>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<bool>,
+    },
+    RoleRemove {
+        name: String,
     },
 }
 
@@ -207,6 +255,16 @@ pub enum ControlResponse {
     Ears {
         ears: Vec<EarSummary>,
     },
+    /// Réponse à `PersonList`. `degraded` : raison de l'annuaire illisible (mode dégradé).
+    People {
+        people: Vec<PersonSummary>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        degraded: Option<String>,
+    },
+    /// Réponse à `RoleList`.
+    Roles {
+        roles: Vec<RoleSummary>,
+    },
 }
 
 const MASKED: &str = "***";
@@ -284,6 +342,14 @@ impl fmt::Debug for ControlResponse {
                 .field("brain_name", brain_name)
                 .finish(),
             ControlResponse::Ears { ears } => f.debug_struct("Ears").field("ears", ears).finish(),
+            ControlResponse::People { people, degraded } => f
+                .debug_struct("People")
+                .field("people", people)
+                .field("degraded", degraded)
+                .finish(),
+            ControlResponse::Roles { roles } => {
+                f.debug_struct("Roles").field("roles", roles).finish()
+            }
         }
     }
 }
@@ -637,10 +703,10 @@ mod tests {
 
     #[test]
     fn pair_start_et_pairing_serialises() {
-        let json = serde_json::to_string(&ControlRequest::PairStart).unwrap();
+        let json = serde_json::to_string(&ControlRequest::PairStart { person: None }).unwrap();
         assert_eq!(json, r#"{"type":"pair_start"}"#);
         let requests = [
-            ControlRequest::PairStart,
+            ControlRequest::PairStart { person: None },
             ControlRequest::PairLocal { name: "PC".into() },
             ControlRequest::ListEars,
             ControlRequest::Unpair {
@@ -688,6 +754,7 @@ mod tests {
                     platform: "linux".into(),
                     connected: false,
                     local: true,
+                    person: None,
                 }],
             },
         ];
@@ -695,6 +762,160 @@ mod tests {
             let json = serde_json::to_string(&r).unwrap();
             assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
         }
+    }
+
+    #[test]
+    fn ancien_pair_start_sans_personne() {
+        let r: ControlRequest = serde_json::from_str(r#"{"type":"pair_start"}"#).unwrap();
+        assert_eq!(r, ControlRequest::PairStart { person: None });
+    }
+
+    #[test]
+    fn pair_start_avec_personne_aller_retour() {
+        let r = ControlRequest::PairStart {
+            person: Some("Léa".into()),
+        };
+        let json = serde_json::to_string(&r).unwrap();
+        assert_eq!(json, r#"{"type":"pair_start","person":"Léa"}"#);
+        assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
+    }
+
+    #[test]
+    fn requetes_de_gestion_aller_retour() {
+        let requests = [
+            ControlRequest::PersonList,
+            ControlRequest::PersonAdd {
+                name: "Léa".into(),
+                role: "famille".into(),
+            },
+            ControlRequest::PersonRemove {
+                name: "Léa".into()
+            },
+            ControlRequest::PersonRole {
+                name: "Léa".into(),
+                role: "admin".into(),
+            },
+            ControlRequest::PersonAttach {
+                name: "Léa".into(),
+                ear: "ab12".into(),
+            },
+            ControlRequest::RoleList,
+            ControlRequest::RoleAdd {
+                name: "famille".into(),
+                tools: vec!["media_*".into(), "app_launch".into()],
+                confirm: true,
+                agent: false,
+            },
+            ControlRequest::RoleEdit {
+                name: "famille".into(),
+                tools: Some(vec!["media_*".into()]),
+                confirm: Some(false),
+                agent: Some(true),
+            },
+            ControlRequest::RoleRemove {
+                name: "famille".into(),
+            },
+        ];
+        for r in requests {
+            let json = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<ControlRequest>(&json).unwrap(), r);
+        }
+        let r: ControlRequest =
+            serde_json::from_str(r#"{"type":"role_add","name":"x","tools":["a"]}"#).unwrap();
+        assert_eq!(
+            r,
+            ControlRequest::RoleAdd {
+                name: "x".into(),
+                tools: vec!["a".into()],
+                confirm: false,
+                agent: false
+            }
+        );
+    }
+
+    #[test]
+    fn role_edit_champs_absents_restent_none() {
+        let r: ControlRequest =
+            serde_json::from_str(r#"{"type":"role_edit","name":"x","confirm":true}"#).unwrap();
+        assert_eq!(
+            r,
+            ControlRequest::RoleEdit {
+                name: "x".into(),
+                tools: None,
+                confirm: Some(true),
+                agent: None
+            }
+        );
+    }
+
+    fn personne() -> PersonSummary {
+        PersonSummary {
+            name: "Charles".into(),
+            role: "admin".into(),
+            owner: true,
+            ears: vec!["PC".into()],
+            voiceprint: true,
+        }
+    }
+
+    #[test]
+    fn reponses_people_et_roles_aller_retour() {
+        let responses = [
+            ControlResponse::People {
+                people: vec![personne()],
+                degraded: Some("fichier illisible".into()),
+            },
+            ControlResponse::People {
+                people: vec![],
+                degraded: None,
+            },
+            ControlResponse::Roles {
+                roles: vec![RoleSummary {
+                    name: "famille".into(),
+                    tools: vec!["media_*".into()],
+                    confirm: false,
+                    agent: false,
+                    builtin: false,
+                    people: 2,
+                }],
+            },
+        ];
+        for r in responses {
+            let json = serde_json::to_string(&r).unwrap();
+            assert_eq!(serde_json::from_str::<ControlResponse>(&json).unwrap(), r);
+        }
+        let r: ControlResponse = serde_json::from_str(r#"{"type":"people","people":[]}"#).unwrap();
+        assert_eq!(
+            r,
+            ControlResponse::People {
+                people: vec![],
+                degraded: None
+            }
+        );
+    }
+
+    #[test]
+    fn ear_summary_ancien_sans_person_lisible() {
+        let e: EarSummary = serde_json::from_str(
+            r#"{"id":"ab","name":"PC","platform":"linux","connected":true,"local":true}"#,
+        )
+        .unwrap();
+        assert_eq!(e.person, None);
+    }
+
+    #[test]
+    fn debug_des_reponses_de_gestion() {
+        let people = ControlResponse::People {
+            people: vec![personne()],
+            degraded: None,
+        };
+        let text = format!("{people:?}");
+        assert!(
+            text.starts_with("People {") && text.contains("Charles"),
+            "{text}"
+        );
+        let roles = ControlResponse::Roles { roles: vec![] };
+        assert!(format!("{roles:?}").starts_with("Roles {"));
     }
 
     #[test]

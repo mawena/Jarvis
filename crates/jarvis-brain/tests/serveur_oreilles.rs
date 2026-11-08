@@ -277,7 +277,9 @@ async fn salon(rig: &Rig) -> Ws {
 /// Seconde oreille appairée par code.
 async fn pair_ear(rig: &Rig, name: &str) -> (EarId, String) {
     let mut cli = Cli::connect(&rig.socket).await;
-    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+    let ControlResponse::Pairing { code, .. } =
+        cli.send(ControlRequest::PairStart { person: None }).await
+    else {
         panic!("fenêtre d'appairage attendue")
     };
     let stream = stream_to(rig.addr, &rig.fingerprint).await;
@@ -434,7 +436,7 @@ async fn appairage_par_code_puis_connexion() {
         uri,
         fingerprint_short,
         expires_in_secs,
-    } = cli.send(ControlRequest::PairStart).await
+    } = cli.send(ControlRequest::PairStart { person: None }).await
     else {
         panic!("fenêtre d'appairage attendue")
     };
@@ -491,7 +493,9 @@ async fn appairage_hors_fenetre_refuse() {
     ));
     // Fenêtre ouverte, code faux : essais décomptés.
     let mut cli = Cli::connect(&rig.socket).await;
-    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+    let ControlResponse::Pairing { code, .. } =
+        cli.send(ControlRequest::PairStart { person: None }).await
+    else {
         panic!("fenêtre d'appairage attendue")
     };
     let wrong = if code == "000000" { "111111" } else { "000000" };
@@ -516,7 +520,9 @@ async fn appairage_hors_fenetre_refuse() {
 async fn une_machine_seule_ne_ferme_pas_la_fenetre() {
     let rig = rig().await;
     let mut cli = Cli::connect(&rig.socket).await;
-    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+    let ControlResponse::Pairing { code, .. } =
+        cli.send(ControlRequest::PairStart { person: None }).await
+    else {
         panic!("fenêtre d'appairage attendue")
     };
     let wrong = if code == "000000" { "111111" } else { "000000" };
@@ -559,7 +565,9 @@ async fn une_machine_seule_ne_ferme_pas_la_fenetre() {
 async fn vingt_codes_faux_ferment_la_fenetre() {
     let rig = rig().await;
     let mut cli = Cli::connect(&rig.socket).await;
-    let ControlResponse::Pairing { code, .. } = cli.send(ControlRequest::PairStart).await else {
+    let ControlResponse::Pairing { code, .. } =
+        cli.send(ControlRequest::PairStart { person: None }).await
+    else {
         panic!("fenêtre d'appairage attendue")
     };
     let wrong = if code == "000000" { "111111" } else { "000000" };
@@ -1238,7 +1246,7 @@ async fn reseau_desactive_le_cerveau_demarre() {
         ControlResponse::Status { .. }
     ));
     for request in [
-        ControlRequest::PairStart,
+        ControlRequest::PairStart { person: None },
         ControlRequest::PairLocal { name: "PC".into() },
         ControlRequest::ListEars,
     ] {

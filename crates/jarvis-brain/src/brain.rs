@@ -7,6 +7,7 @@ use crate::fastpath::{BrainCommand, match_brain_command, match_confirmation, mat
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
 use crate::mode_store::ModeStore;
+use crate::people::People;
 use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
 use jarvis_protocol::{EarId, Mode};
@@ -100,6 +101,8 @@ pub struct Brain {
     last_speech: Mutex<Option<String>>,
     /// Ton des phrases fixes (nom d'adresse).
     persona: Persona,
+    /// Annuaire des personnes et des rôles (phase 8).
+    people: Arc<People>,
 }
 
 /// Résultat d'une intention.
@@ -128,7 +131,30 @@ impl Brain {
             pending: Mutex::new(None),
             last_speech: Mutex::new(None),
             persona: Persona::default(),
+            people: Arc::new(People::admin_only("Charles")),
         }
+    }
+
+    /// Annuaire des personnes et des rôles (défaut : Charles `admin` seul).
+    pub fn with_people(mut self, people: Arc<People>) -> Brain {
+        self.people = people;
+        self
+    }
+
+    pub fn people(&self) -> &Arc<People> {
+        &self.people
+    }
+
+    /// Noms de tous les outils : compétences et système (validation des rôles).
+    pub fn tool_names(&self) -> Vec<String> {
+        let system: Arc<dyn Skill> = self.system.clone();
+        self.skills
+            .iter()
+            .cloned()
+            .chain(std::iter::once(system))
+            .flat_map(|s| s.tools())
+            .map(|t| t.name)
+            .collect()
     }
 
     /// Ton de Jarvis (nom d'adresse des phrases fixes).

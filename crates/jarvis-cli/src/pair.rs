@@ -127,6 +127,7 @@ pub fn ears_table(ears: &[EarSummary]) -> String {
         "Plateforme".to_string(),
         "Connectée".to_string(),
         "Locale".to_string(),
+        "Personne".to_string(),
     ]];
     rows.extend(ears.iter().map(|e| {
         [
@@ -135,6 +136,7 @@ pub fn ears_table(ears: &[EarSummary]) -> String {
             e.platform.clone(),
             yes_no(e.connected),
             yes_no(e.local),
+            e.person.clone().unwrap_or_else(|| "-".into()),
         ]
     }));
     let widths: Vec<usize> = (0..rows[0].len())

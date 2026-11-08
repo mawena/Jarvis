@@ -745,6 +745,7 @@ impl State {
                 name: r.name,
                 platform: r.platform,
                 local: r.local,
+                person: None,
             })
             .collect()
     }
