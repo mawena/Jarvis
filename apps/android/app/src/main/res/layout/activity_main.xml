@@ -1,0 +1,92 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingBottom="12dp"
+            android:textSize="18sp" />
+
+        <TextView android:id="@+id/permissions_title" style="@style/StepTitle" android:text="@string/step_permissions" />
+        <TextView android:id="@+id/permissions_state" style="@style/StepState" />
+        <Button android:id="@+id/permissions_button" style="@style/StepButton" android:text="@string/action_grant" />
+
+        <TextView android:id="@+id/pair_title" style="@style/StepTitle" android:text="@string/step_pair" />
+        <TextView android:id="@+id/pair_state" style="@style/StepState" />
+        <Button android:id="@+id/pair_button" style="@style/StepButton" android:text="@string/action_pair" />
+
+        <TextView android:id="@+id/wakeword_title" style="@style/StepTitle" android:text="@string/step_wakeword" />
+        <TextView android:id="@+id/wakeword_state" style="@style/StepState" />
+        <Button android:id="@+id/wakeword_button" style="@style/StepButton" android:text="@string/action_enroll" />
+
+        <TextView android:id="@+id/battery_title" style="@style/StepTitle" android:text="@string/step_battery" />
+        <TextView android:id="@+id/battery_state" style="@style/StepState" />
+        <Button android:id="@+id/battery_button" style="@style/StepButton" android:text="@string/action_battery" />
+
+        <TextView android:id="@+id/overlay_title" style="@style/StepTitle" android:text="@string/step_overlay" />
+        <TextView android:id="@+id/overlay_state" style="@style/StepState" />
+        <Button android:id="@+id/overlay_button" style="@style/StepButton" android:text="@string/action_overlay" />
+
+        <Button
+            android:id="@+id/listen_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/action_start" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="24dp"
+            android:text="@string/settings_title"
+            android:textSize="18sp"
+            android:textStyle="bold" />
+
+        <CheckBox
+            android:id="@+id/autostart"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/autostart_label" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:text="@string/name_label" />
+        <EditText
+            android:id="@+id/name"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:importantForAutofill="no"
+            android:inputType="textCapWords"
+            android:singleLine="true" />
+
+        <TextView
+            android:id="@+id/threshold_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="12dp" />
+        <SeekBar
+            android:id="@+id/threshold"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:max="50" />
+
+        <Button
+            android:id="@+id/unpair_button"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="@string/action_unpair" />
+    </LinearLayout>
+</ScrollView>
