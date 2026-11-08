@@ -1,4 +1,5 @@
 mod pair;
+mod people;
 
 use clap::{Parser, Subcommand};
 use jarvis_protocol::{ControlRequest, ControlResponse, Mode, pairing_ended};
@@ -26,7 +27,21 @@ enum Command {
     /// Change de mode (local, online ou en-ligne)
     Mode { mode: Mode },
     /// Ouvre la fenêtre d'appairage d'une oreille (code, QR code)
-    Pair,
+    Pair {
+        /// Personne à qui rattacher l'oreille (par défaut : le propriétaire)
+        #[arg(long, num_args = 1..)]
+        person: Option<Vec<String>>,
+    },
+    /// Gère les personnes (list, add, remove, role, attach)
+    Person {
+        #[command(subcommand)]
+        command: people::PersonCommand,
+    },
+    /// Gère les rôles (list, add, edit, remove)
+    Role {
+        #[command(subcommand)]
+        command: people::RoleCommand,
+    },
     /// Liste les oreilles appairées
     Ears,
     /// Retire une oreille (nom, ou identifiant : la colonne Id de `jarvis ears` suffit)
@@ -45,7 +60,11 @@ fn main() -> ExitCode {
         },
         Command::Status => ControlRequest::Status,
         Command::Mode { mode } => ControlRequest::SetMode { mode },
-        Command::Pair => ControlRequest::PairStart { person: None },
+        Command::Pair { person } => ControlRequest::PairStart {
+            person: person.map(|p| p.join(" ")),
+        },
+        Command::Person { command } => people::person_request(command),
+        Command::Role { command } => people::role_request(command),
         Command::Ears => ControlRequest::ListEars,
         Command::Unpair { ear } => ControlRequest::Unpair { ear: ear.join(" ") },
     };
@@ -94,6 +113,14 @@ fn main() -> ExitCode {
         }
         Ok(ControlResponse::Ears { ears }) => {
             println!("{}", pair::ears_table(&ears));
+            ExitCode::SUCCESS
+        }
+        Ok(ControlResponse::People { people, degraded }) => {
+            println!("{}", people::people_table(&people, degraded.as_deref()));
+            ExitCode::SUCCESS
+        }
+        Ok(ControlResponse::Roles { roles }) => {
+            println!("{}", people::roles_table(&roles));
             ExitCode::SUCCESS
         }
         Ok(ControlResponse::Error { message }) => fail(&message, 1),
