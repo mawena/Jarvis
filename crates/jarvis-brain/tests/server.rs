@@ -60,7 +60,10 @@ impl Client {
             .await
             .unwrap();
         let mut answer = String::new();
-        self.0.read_line(&mut answer).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(10), self.0.read_line(&mut answer))
+            .await
+            .expect("pas de réponse du serveur")
+            .unwrap();
         serde_json::from_str(&answer).unwrap()
     }
 
@@ -126,7 +129,10 @@ async fn requete_trop_grande_refusee_et_connexion_fermee() {
     let big = vec![b'a'; MAX_REQUEST_BYTES + 1];
     c.0.get_mut().write_all(&big).await.unwrap();
     let mut answer = String::new();
-    c.0.read_line(&mut answer).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), c.0.read_line(&mut answer))
+        .await
+        .expect("pas de réponse du serveur")
+        .unwrap();
     assert_eq!(
         serde_json::from_str::<ControlResponse>(&answer).unwrap(),
         ControlResponse::Error {
@@ -134,7 +140,11 @@ async fn requete_trop_grande_refusee_et_connexion_fermee() {
         }
     );
     answer.clear();
-    assert_eq!(c.0.read_line(&mut answer).await.unwrap(), 0);
+    let n = tokio::time::timeout(std::time::Duration::from_secs(10), c.0.read_line(&mut answer))
+        .await
+        .expect("connexion non fermée")
+        .unwrap();
+    assert_eq!(n, 0);
     // Le serveur continue d'accepter d'autres clients.
     assert!(matches!(
         Client::connect(&socket)

@@ -112,7 +112,10 @@ async fn send(c: &mut BufReader<UnixStream>, req: ControlRequest) -> ControlResp
         .await
         .unwrap();
     let mut answer = String::new();
-    c.read_line(&mut answer).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), c.read_line(&mut answer))
+        .await
+        .expect("pas de réponse du serveur")
+        .unwrap();
     serde_json::from_str(&answer).unwrap()
 }
 
