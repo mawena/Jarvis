@@ -51,10 +51,29 @@ fn faux_cerveau(
     std::fs::set_permissions(dir.join("jarvis"), std::fs::Permissions::from_mode(0o700)).unwrap();
     let listener = UnixListener::bind(dir.join("jarvis/brain.sock")).unwrap();
     std::thread::spawn(move || {
-        let (stream, _) = listener.accept().unwrap();
+        // Aucune attente sans limite : une attente fausse échoue vite au lieu de bloquer.
+        listener.set_nonblocking(true).unwrap();
+        let deadline = Instant::now() + ATTENTE_MAX;
+        let stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        Instant::now() < deadline,
+                        "le faux cerveau n'a reçu aucune connexion"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("accept : {e}"),
+            }
+        };
+        stream.set_nonblocking(false).unwrap();
+        stream.set_read_timeout(Some(ATTENTE_MAX)).unwrap();
         let mut reader = BufReader::new(stream.try_clone().unwrap());
         let mut line = String::new();
-        reader.read_line(&mut line).unwrap();
+        reader
+            .read_line(&mut line)
+            .expect("le faux cerveau n'a reçu aucune requête");
         let mut stream = stream;
         for (delay, reply) in replies {
             std::thread::sleep(delay);
@@ -66,12 +85,27 @@ fn faux_cerveau(
     })
 }
 
+/// Durée maximale de toute attente d'un test (socket ou commande).
+const ATTENTE_MAX: Duration = Duration::from_secs(20);
+
+/// Lance `jarvis` ; une commande qui dépasse `ATTENTE_MAX` est tuée et le test échoue.
 fn jarvis(dir: &Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_jarvis"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_jarvis"))
         .args(args)
         .env("XDG_RUNTIME_DIR", dir)
-        .output()
-        .unwrap()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + ATTENTE_MAX;
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            panic!("jarvis {args:?} : toujours en cours après {ATTENTE_MAX:?}");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
 }
 
 fn fenetre() -> ControlResponse {
@@ -337,7 +371,7 @@ fn person_list_affiche_le_tableau() {
 #[test]
 fn person_add_envoie_la_requete() {
     let (req, out) = essai(
-        &["person", "add", "Marie", "Claire", "--role", "famille"],
+        &["person", "add", "Marie Claire", "--role", "famille"],
         ok(),
     );
     assert_eq!(
@@ -353,14 +387,14 @@ fn person_add_envoie_la_requete() {
 
 #[test]
 fn person_remove_et_role_envoient_les_requetes() {
-    let (req, _) = essai(&["person", "remove", "Marie", "Claire"], ok());
+    let (req, _) = essai(&["person", "remove", "Marie Claire"], ok());
     assert_eq!(
         req,
         ControlRequest::PersonRemove {
             name: "Marie Claire".into()
         }
     );
-    let (req, _) = essai(&["person", "role", "Marie", "Claire", "admin"], ok());
+    let (req, _) = essai(&["person", "role", "Marie Claire", "admin"], ok());
     assert_eq!(
         req,
         ControlRequest::PersonRole {
@@ -368,6 +402,21 @@ fn person_remove_et_role_envoient_les_requetes() {
             role: "admin".into()
         }
     );
+}
+
+#[test]
+fn role_a_plusieurs_mots_refuse_par_clap() {
+    // Le mot en trop n'est plus avalé dans le nom de la personne.
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["person", "add", "Léa", "--role", "famille", "proche"][..],
+        &["person", "role", "Léa", "famille", "proche"][..],
+        &["role", "add", "amis", "proches"][..],
+    ] {
+        let out = jarvis(dir.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("pas lancé"));
+    }
 }
 
 #[test]

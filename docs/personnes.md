@@ -79,8 +79,12 @@ jarvis role remove famille                          # refusé tant que quelqu'un
 
 `jarvis role add` accepte `--tools`, `--confirm` et `--agent` (tous facultatifs : sans
 `--tools`, le rôle ne permet aucun outil). `jarvis role edit` exige au moins une option et
-laisse les autres champs inchangés. Un nom de rôle peut avoir plusieurs mots (`jarvis role add
-amis proches --tools …`).
+laisse les autres champs inchangés. Un nom de rôle est **un seul mot** (lettres, chiffres, `-` et
+`_`) : `jarvis role add amis-proches --tools …`. Avec un espace, le cerveau répond « Le nom d'un
+rôle est un seul mot (lettres, chiffres, - et _) : espace n'est pas permis. »
+
+Les options `--confirm` / `--no-confirm` donnent ou retirent le droit de lancer les actions
+risquées (veille, redémarrage, extinction) et de les confirmer par « oui ».
 
 Mettre les outils entre apostrophes évite que le shell développe `*`. Un motif qui ne
 correspond à aucun outil connu est refusé (« aucun outil ne correspond à … »), ce qui
@@ -126,14 +130,17 @@ pas ajoutées à un rôle.
 ```bash
 jarvis person list                          # nom, rôle, oreilles, empreinte vocale
 jarvis person add Léa --role famille
-jarvis person role Léa amis                 # change le rôle (le rôle est le dernier mot)
+jarvis person role Léa amis                 # change le rôle (un seul mot)
 jarvis person attach Léa Pixel 4 XL         # rattache une oreille (nom, id ou début d'id)
 jarvis person remove Léa                    # refusé tant qu'elle a une oreille
 ```
 
 Les noms (de personnes et de rôles) font 1 à 40 caractères, sans caractère de contrôle, et sont
-uniques sans tenir compte des majuscules ni des accents. Pour un nom de plusieurs mots avec
-`person attach`, mets-le entre guillemets : `jarvis person attach "Léa Martin" Pixel 4 XL`.
+uniques sans tenir compte des majuscules ni des accents. Un nom de personne peut avoir plusieurs
+mots, mais il se donne **entre guillemets**, partout (`person add`, `role`, `remove`, `attach`) :
+`jarvis person add "Léa Martin" --role famille`, `jarvis person attach "Léa Martin" Pixel 4 XL`
+(le nom de l'oreille, en dernier, n'a pas besoin de guillemets). Un nom de rôle, lui, n'a jamais
+d'espace.
 
 Le propriétaire (Charles) ne peut être ni supprimé, ni changé de rôle : il reste `admin`.
 
@@ -200,12 +207,14 @@ Corrige le fichier (ou supprime-le : il sera recréé avec Charles seul), puis
 
 ```
 ✓ Personnes et rôles : 1 personne (Charles, admin), 1 rôle intégré
+✓ Personnes et rôles : 1 personne (Charles, admin), 1 rôle intégré, 2 rôles créés
 ✓ Personnes : 2 (Charles admin, Léa famille)
 ! Oreille « Salon » sans personne reconnue
 ```
 
 La dernière ligne signale une oreille distante qui n'est rattachée à personne (elle vaut
-alors Charles) : rattache-la si ce n'est pas lui.
+alors Charles) : rattache-la si ce n'est pas lui. Quand l'annuaire est illisible (mode dégradé),
+toutes les oreilles sont inconnues : seule la ligne d'avertissement sur l'annuaire est affichée.
 
 ## Ce qui viendra
 
