@@ -45,4 +45,24 @@ class ServiceStateTest {
         s.startFailed()
         assertEquals(listOf(Step.START_ENGINE), s.start())
     }
+
+    @Test
+    fun apresCloseAucunDemarrage() {
+        val state = ServiceState()
+        state.start()
+        assertEquals(listOf(ServiceState.Step.STOP_ENGINE), state.close())
+        assertEquals(emptyList<ServiceState.Step>(), state.start())
+        assertEquals(emptyList<ServiceState.Step>(), state.restart())
+        assertEquals(emptyList<ServiceState.Step>(), state.close())
+    }
+
+    @Test
+    fun arretPerimeIgnoreSiUnDemarrageEstArrive() {
+        val ids = StartIds()
+        ids.received(1) // ACTION_STOP
+        assertTrue(ids.isLatest(1))
+        ids.received(2) // ACTION_START juste après
+        assertFalse(ids.isLatest(1))
+        assertTrue(ids.isLatest(2))
+    }
 }
