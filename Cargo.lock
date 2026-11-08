@@ -1816,8 +1816,11 @@ name = "jarvis-ear-ffi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
+ "hound",
  "jarvis-ear-core",
  "jarvis-protocol",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
