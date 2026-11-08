@@ -148,7 +148,8 @@ mod tests {
     #[test]
     fn uri_avec_espaces_acceptee() {
         let dir = tempfile::tempdir().unwrap();
-        let (head, tail) = uri().split_at(20);
+        let full = uri();
+        let (head, tail) = full.split_at(20);
         let pasted = format!("  \n{head}\r\n{tail} \n");
         let name = pair_with(&FakeNet, dir.path(), &pasted, "Pixel").unwrap();
         assert_eq!(name, "PC de Charles");

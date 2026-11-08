@@ -163,7 +163,7 @@ mod tests {
         let notifier = Notifier::default();
         let mut sent = Vec::new();
         let mut status = status(MicState::Open, connected(Mode::Local));
-        let mut push = |s: &EarStatus, sent: &mut Vec<String>| {
+        let push = |s: &EarStatus, sent: &mut Vec<String>| {
             notifier.notify(&view_of(s, false), |v| sent.push(v.text.clone()))
         };
         assert!(push(&status, &mut sent));

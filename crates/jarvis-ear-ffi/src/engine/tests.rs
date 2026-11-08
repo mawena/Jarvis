@@ -1,7 +1,7 @@
 //! Tests du moteur : faux hôte Kotlin, faux lien, faux détecteur (rien de réel).
 
 use super::*;
-use jarvis_ear_core::net::{LinkDown, LinkState, Pairing, PairingStore};
+use jarvis_ear_core::net::{LinkDown, LinkState, Pairing};
 use jarvis_ear_core::session::sounds;
 use jarvis_protocol::ear::{BrainMessage, EarMessage, StatusInfo};
 use jarvis_protocol::{
