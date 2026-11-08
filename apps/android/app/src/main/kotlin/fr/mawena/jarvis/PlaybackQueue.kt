@@ -9,8 +9,12 @@ package fr.mawena.jarvis
  * Toutes les méthodes sont sûres entre fils.
  */
 class PlaybackQueue {
-    /** Un son : octets PCM 16 bits little-endian, fréquence en Hz, numéro de génération. */
-    class Chunk(val pcm: ByteArray, val rate: Int, val generation: Long)
+    /**
+     * Un son : octets PCM 16 bits little-endian, fréquence en Hz, numéro de génération, et
+     * époque (voir [currentEpoch]) au moment où il est entré : si elle n'est plus la
+     * courante, un [stop] est passé entre-temps et le son est périmé.
+     */
+    class Chunk(val pcm: ByteArray, val rate: Int, val generation: Long, val epoch: Long)
 
     private val lock = Object()
     private val chunks = ArrayDeque<Chunk>()
@@ -27,7 +31,7 @@ class PlaybackQueue {
     fun put(pcm: ByteArray, rate: Int, generation: Long) {
         synchronized(lock) {
             if (closed) return
-            chunks.addLast(Chunk(pcm, rate, generation))
+            chunks.addLast(Chunk(pcm, rate, generation, epoch))
             lastGeneration = generation
             lock.notifyAll()
         }

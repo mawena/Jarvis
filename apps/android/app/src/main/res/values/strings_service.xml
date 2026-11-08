@@ -3,6 +3,7 @@
 <resources>
     <string name="notif_title">Jarvis</string>
     <string name="notif_starting">Démarrage de l\'écoute…</string>
+    <string name="notif_restart_needed">Jarvis s\'est arrêté : touchez pour relancer l\'écoute</string>
     <string name="notif_setup_needed">Ouvrez l\'appli Jarvis pour finir la configuration</string>
     <string name="notif_error">Jarvis ne peut pas écouter : %1$s</string>
     <string name="channel_listen">Écoute</string>

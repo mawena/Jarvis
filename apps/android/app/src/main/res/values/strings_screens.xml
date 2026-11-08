@@ -27,7 +27,7 @@
     <string name="status_not_ready">Terminez les étapes 1 à 3 pour démarrer l\'écoute</string>
     <string name="settings_title">Réglages</string>
     <string name="autostart_label">Démarrer avec le téléphone</string>
-    <string name="name_label">Nom de l\'oreille</string>
+    <string name="name_label">Nom de l\'oreille (pris en compte au prochain appairage)</string>
     <string name="threshold_label">Seuil du mot d\'éveil : %1$s (au prochain démarrage)</string>
     <string name="action_unpair">Désappairer</string>
     <string name="unpair_confirm">Désappairer cette oreille ? Elle ne sera plus connue du PC.</string>

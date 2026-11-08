@@ -105,6 +105,28 @@ object EarNotification {
     }
 
     /**
+     * Alerte « Jarvis s'est arrêté » (canal `alerte`) : un toucher ouvre [StartActivity],
+     * activité visible, donc micro permis, qui relance l'écoute.
+     */
+    fun postRestartAlert(ctx: Context, text: String) {
+        val pi = PendingIntent.getActivity(
+            ctx,
+            2,
+            Intent(ctx, StartActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val n = Notification.Builder(ctx, CHANNEL_ALERT)
+            .setSmallIcon(R.drawable.ic_jarvis)
+            .setContentTitle(ctx.getString(R.string.notif_title))
+            .setContentText(text)
+            .setAutoCancel(true)
+            .setContentIntent(pi)
+            .build()
+        ctx.getSystemService(NotificationManager::class.java).notify(ID_SETUP, n)
+    }
+
+    /**
      * Toucher : écran principal ; micro bloqué par Android : `StartActivity` avec l'action
      * `ACTION_RESTART` (un toucher de notification rend le micro au service).
      */

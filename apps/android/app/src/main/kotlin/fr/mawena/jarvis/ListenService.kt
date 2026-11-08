@@ -27,7 +27,8 @@ import java.util.concurrent.Executors
  */
 class ListenService : Service() {
     private val main = Handler(Looper.getMainLooper())
-    private val worker = Executors.newSingleThreadExecutor { r -> Thread(r, "jarvis-moteur") }
+    private val worker = WORKER
+    private val startIds = StartIds()
 
     /** Accédé seulement depuis `worker`. */
     private val state = ServiceState()
@@ -48,6 +49,9 @@ class ListenService : Service() {
             audioOut.play(pcmLe, sampleRate.toInt(), generation.toLong())
         override fun stopPlayback() = audioOut.stop()
         override fun statusChanged(view: EarView) {
+            // Un moteur remplacé ou arrêté ne touche plus à l'état partagé.
+            val e = engine
+            if (e == null || current !== e) return
             lastView = view
             main.post { notify(view) }
         }
@@ -55,7 +59,7 @@ class ListenService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        alive = true
+        alive.incrementAndGet()
         EarNotification.createChannels(this)
         audioIn = AudioIn { engine }
         audioOut = AudioOut(this) { engine }
@@ -74,20 +78,26 @@ class ListenService : Service() {
         } catch (ex: RuntimeException) {
             // Micro refusé (SecurityException) ou démarrage interdit depuis l'arrière-plan.
             Log.w(TAG, "premier plan refusé", ex)
-            EarNotification.postSetupAlert(this, getString(R.string.notif_setup_needed))
+            if (checkSelfPermission(android.Manifest.permission.RECORD_AUDIO) ==
+                android.content.pm.PackageManager.PERMISSION_GRANTED
+            ) {
+                // Permission accordée : démarrage refusé depuis l'arrière-plan (relance après
+                // la mort du processus). Un toucher ouvre une activité visible, micro permis.
+                EarNotification.postRestartAlert(this, getString(R.string.notif_restart_needed))
+            } else {
+                EarNotification.postSetupAlert(this, getString(R.string.notif_setup_needed))
+            }
             stopSelf()
             return START_NOT_STICKY
         }
+        startIds.received(startId)
         // Redémarrage « sticky » (intent nul) = démarrage.
         when (val action = intent?.action ?: ACTION_START) {
-            ACTION_START -> worker.execute { apply(state.start()) }
-            ACTION_RESTART -> worker.execute { apply(state.restart()) }
+            ACTION_START -> worker.execute { apply(state.start(), startId) }
+            ACTION_RESTART -> worker.execute { apply(state.restart(), startId) }
             ACTION_STOP -> worker.execute {
-                apply(state.stop())
-                main.post {
-                    stopForeground(STOP_FOREGROUND_REMOVE)
-                    stopSelf()
-                }
+                apply(state.stop(), startId)
+                endService(startId)
             }
             ACTION_MUTE -> worker.execute { engine?.mute() }
             ACTION_UNMUTE -> worker.execute { engine?.unmute() }
@@ -99,32 +109,43 @@ class ListenService : Service() {
     }
 
     override fun onDestroy() {
-        // Arrêt hors du fil principal : `stop()` du moteur peut attendre jusqu'à 5 s.
-        val teardown = Thread({
-            worker.submit { apply(state.stop()) }.get()
-            worker.shutdown()
+        val mine = engine
+        // État partagé : seulement ce qui appartient à CE service (un nouveau service a pu
+        // déjà y mettre le sien).
+        if (mine != null && current === mine) {
+            current = null
+            lastView = null
+        }
+        releaseLocks()
+        alive.decrementAndGet()
+        // Arrêt hors du fil principal et dans l'ordre du fil du moteur, commun à tous les
+        // services : un moteur suivant ne démarre qu'après la fin de celui-ci. `stop()` du
+        // moteur peut attendre jusqu'à 5 s.
+        worker.execute {
+            apply(state.close(), 0)
             audioIn.stop()
             audioOut.release()
-        }, "jarvis-arret")
-        releaseLocks()
-        current = null
-        lastView = null
-        alive = false
-        teardown.start()
+        }
         super.onDestroy()
     }
 
+    /** Arrête le service, sauf si une commande plus récente que [startId] est arrivée. */
+    private fun endService(startId: Int) {
+        main.post {
+            if (!startIds.isLatest(startId)) return@post
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            stopSelf(startId)
+        }
+    }
+
     /** Exécute les étapes dans l'ordre, sur le fil du moteur. */
-    private fun apply(steps: List<ServiceState.Step>) {
+    private fun apply(steps: List<ServiceState.Step>, startId: Int) {
         for (step in steps) {
             when (step) {
                 ServiceState.Step.STOP_ENGINE -> stopEngine()
                 ServiceState.Step.START_ENGINE -> if (!startEngine()) {
                     state.startFailed()
-                    main.post {
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf()
-                    }
+                    endService(startId)
                     return
                 }
             }
@@ -158,16 +179,19 @@ class ListenService : Service() {
             Log.w(TAG, "démarrage du moteur", ex)
             EarNotification.postSetupAlert(this, getString(R.string.notif_error, ex.message ?: ""))
         }
+        val failed = engine
         engine = null
-        current = null
+        if (failed != null && current === failed) current = null
         releaseLocks()
         return false
     }
 
     private fun stopEngine() {
         val e = engine
-        current = null
-        lastView = null
+        if (e != null && current === e) {
+            current = null
+            lastView = null
+        }
         try {
             e?.stop()
         } catch (ex: Exception) {
@@ -179,7 +203,8 @@ class ListenService : Service() {
     }
 
     private fun notify(view: EarView) {
-        if (current == null) return
+        val e = engine
+        if (e == null || current !== e) return
         getSystemService(android.app.NotificationManager::class.java)
             .notify(EarNotification.ID_LISTEN, EarNotification.build(this, view))
     }
@@ -231,7 +256,13 @@ class ListenService : Service() {
 
         private const val TAG = "JarvisService"
 
-        @Volatile private var alive = false
+        /** Fil du moteur commun à tous les services : un moteur ne démarre qu'après l'arrêt du précédent. */
+        private val WORKER = Executors.newSingleThreadExecutor { r ->
+            Thread(r, "jarvis-moteur").apply { isDaemon = true }
+        }
+
+        /** Nombre de services vivants (0 ou 1, 2 un court instant lors d'un remplacement). */
+        private val alive = java.util.concurrent.atomic.AtomicInteger(0)
         @Volatile private var current: EarEngine? = null
         @Volatile private var lastView: EarView? = null
 
@@ -243,7 +274,7 @@ class ListenService : Service() {
         /** Arrête l'écoute et retire la notification. */
         fun stop(ctx: Context) {
             // Service absent : rien à arrêter (et pas de premier plan juste pour s'arrêter).
-            if (alive) ctx.applicationContext.startService(intent(ctx, ACTION_STOP))
+            if (alive.get() > 0) ctx.applicationContext.startService(intent(ctx, ACTION_STOP))
         }
 
         /** Envoie une action (`ACTION_*`) au service. */
@@ -253,7 +284,7 @@ class ListenService : Service() {
                 // Peuvent démarrer le service : doivent passer par le premier plan.
                 ACTION_START, ACTION_RESTART -> app.startForegroundService(intent(ctx, action))
                 ACTION_STOP -> stop(ctx)
-                else -> if (alive) app.startService(intent(ctx, action))
+                else -> if (alive.get() > 0) app.startService(intent(ctx, action))
             }
         }
 

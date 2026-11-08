@@ -84,32 +84,43 @@ class AudioOut(ctx: Context, private val engine: () -> EarEngine?) {
         var trackEpoch = -1L
         while (!released) {
             val chunk = queue.take(200) ?: continue
-            val epoch = queue.currentEpoch
-            // Après un arrêt, la tête de lecture n'est plus fiable : sortie recréée.
-            if (epoch != trackEpoch) {
-                closeTrack()
-                written = 0
-                trackEpoch = epoch
-            }
-            if (queue.needsNewOutput(chunk.rate)) {
-                // Fréquence nouvelle : finir le son en cours avant de recréer la sortie.
-                if (track != null) waitHead(written, epoch, stopIfPending = false)
-                closeTrack()
-                written = 0
-                if (!openTrack(chunk.rate)) {
-                    queue.outputReleased()
-                    continue
+            val epoch = chunk.epoch
+            // Un arrêt est passé entre la prise du son et maintenant : son périmé.
+            if (epoch != queue.currentEpoch) continue
+            try {
+                // Après un arrêt, la tête de lecture n'est plus fiable : sortie recréée.
+                if (epoch != trackEpoch) {
+                    closeTrack()
+                    written = 0
+                    trackEpoch = epoch
                 }
-            }
-            val t = track ?: continue
-            requestFocus()
-            if (t.playState != AudioTrack.PLAYSTATE_PLAYING) t.play()
-            written += write(t, chunk.pcm, epoch)
-            if (queue.hasPending()) continue
-            // Plus rien en file : fin de lecture quand la tête atteint la fin écrite.
-            if (waitHead(written, epoch, stopIfPending = true)) {
-                queue.drained()?.let { engine()?.playbackIdle(it.toULong()) }
-                abandonFocus()
+                if (queue.needsNewOutput(chunk.rate)) {
+                    // Fréquence nouvelle : finir le son en cours avant de recréer la sortie.
+                    if (track != null) waitHead(written, epoch, stopIfPending = false)
+                    closeTrack()
+                    written = 0
+                    if (!openTrack(chunk.rate)) {
+                        queue.outputReleased()
+                        continue
+                    }
+                }
+                val t = track ?: continue
+                requestFocus()
+                if (t.playState != AudioTrack.PLAYSTATE_PLAYING) t.play()
+                written += write(t, chunk.pcm, epoch)
+                if (queue.hasPending()) continue
+                // Plus rien en file : fin de lecture quand la tête atteint la fin écrite.
+                if (waitHead(written, epoch, stopIfPending = true)) {
+                    queue.drained()?.let { engine()?.playbackIdle(it.toULong()) }
+                    abandonFocus()
+                }
+            } catch (e: Exception) {
+                // Sortie fermée sous nos pieds (release() du fil d'arrêt) ou erreur du système :
+                // jamais d'exception hors du fil, la sortie sera recréée au prochain son.
+                Log.w(TAG, "lecture de la voix interrompue", e)
+                closeTrack()
+                written = 0
+                trackEpoch = -1L
             }
         }
     }
