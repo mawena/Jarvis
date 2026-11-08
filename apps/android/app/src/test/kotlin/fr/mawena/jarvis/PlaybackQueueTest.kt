@@ -79,4 +79,18 @@ class PlaybackQueueTest {
         q.put(pcm, 16000, 1)
         assertNull(q.take(1000))
     }
+
+    @Test
+    fun sonPrisAvantUnArretEstPerime() {
+        val q = PlaybackQueue()
+        q.put(pcm, 16000, 1)
+        val chunk = q.take(100)!!
+        assertEquals(q.currentEpoch, chunk.epoch)
+        // Arrêt entre la prise du son et sa lecture : le lecteur voit l'époque changer.
+        q.stop()
+        assertTrue(chunk.epoch != q.currentEpoch)
+        // Un son entré après l'arrêt porte la nouvelle époque.
+        q.put(pcm, 16000, 2)
+        assertEquals(q.currentEpoch, q.take(100)!!.epoch)
+    }
 }
