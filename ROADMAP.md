@@ -128,15 +128,15 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 7.10 Essai réel avec Charles sur un projet d'essai (Charles) — [fiche d'essai](docs/essais/essai-7.10-agent.md)
 
 ## Phase 8 : personnes et rôles
-*Plan : [phase 8](docs/superpowers/plans/2026-10-30-phase-8-personnes-roles.md), branche `feature/personnes-roles` (en cours)*
+*Plan : [phase 8](docs/superpowers/plans/2026-10-30-phase-8-personnes-roles.md), branche `feature/personnes-roles` (fusionnée dans `develop`) — guide : [docs/personnes.md](docs/personnes.md)*
 
 - [x] 8.1 Rédiger le plan de la phase 8 ([plan](docs/superpowers/plans/2026-10-30-phase-8-personnes-roles.md))
 - [x] 8.2 Personnes, rattachement de chaque oreille à une personne (`people.toml`, `jarvis pair --person`)
 - [x] 8.3 Rôles et permissions (outils autorisés, droit de confirmer, permission `agent`), rôle `admin` intégré
 - [x] 8.4 Qui parle (oreille ou voix de Charles reconnue) et vérification des droits avant chaque outil
 - [x] 8.5 Gestion par `jarvis person …` et `jarvis role …` (socket Unix, pas de gestion vocale)
-- [ ] 8.6 `jarvisctl doctor`, documentation (`docs/personnes.md`, README) et fiche d'essai
-- [ ] 8.7 Relecture de la phase 8 et corrections
+- [x] 8.6 `jarvisctl doctor`, documentation (`docs/personnes.md`, README) et fiche d'essai
+- [x] 8.7 Relecture de la phase 8 et corrections (4 défauts et 3 points mineurs corrigés, 9 tests de bout en bout)
 - [ ] 8.8 Essai réel avec Charles : un invité sur une deuxième oreille, refus des actions risquées et de l'agent (Charles) — [fiche d'essai](docs/essais/essai-8.8-personnes.md)
 
 ## Phase 9 : mise en service
