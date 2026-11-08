@@ -371,7 +371,7 @@ fn person_list_affiche_le_tableau() {
 #[test]
 fn person_add_envoie_la_requete() {
     let (req, out) = essai(
-        &["person", "add", "Marie", "Claire", "--role", "famille"],
+        &["person", "add", "Marie Claire", "--role", "famille"],
         ok(),
     );
     assert_eq!(
@@ -387,14 +387,14 @@ fn person_add_envoie_la_requete() {
 
 #[test]
 fn person_remove_et_role_envoient_les_requetes() {
-    let (req, _) = essai(&["person", "remove", "Marie", "Claire"], ok());
+    let (req, _) = essai(&["person", "remove", "Marie Claire"], ok());
     assert_eq!(
         req,
         ControlRequest::PersonRemove {
             name: "Marie Claire".into()
         }
     );
-    let (req, _) = essai(&["person", "role", "Marie", "Claire", "admin"], ok());
+    let (req, _) = essai(&["person", "role", "Marie Claire", "admin"], ok());
     assert_eq!(
         req,
         ControlRequest::PersonRole {
@@ -402,6 +402,21 @@ fn person_remove_et_role_envoient_les_requetes() {
             role: "admin".into()
         }
     );
+}
+
+#[test]
+fn role_a_plusieurs_mots_refuse_par_clap() {
+    // Le mot en trop n'est plus avalé dans le nom de la personne.
+    let dir = tempfile::tempdir().unwrap();
+    for args in [
+        &["person", "add", "Léa", "--role", "famille", "proche"][..],
+        &["person", "role", "Léa", "famille", "proche"][..],
+        &["role", "add", "amis", "proches"][..],
+    ] {
+        let out = jarvis(dir.path(), args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(!String::from_utf8_lossy(&out.stderr).contains("pas lancé"));
+    }
 }
 
 #[test]

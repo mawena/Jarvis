@@ -230,7 +230,7 @@ Sans redémarrer quoi que ce soit.
   jarvis role remove famille
   ```
 
-  **Attendu :** deux refus : « Charles est le propriétaire : impossible de la supprimer. » et
+  **Attendu :** deux refus : « Charles est le propriétaire : on ne peut pas le supprimer. » et
   « Le rôle famille est encore donné à 1 personne(s). ».
 
 - [ ] Retire l'oreille puis la personne et le rôle :

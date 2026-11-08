@@ -108,8 +108,10 @@ pub enum PeopleError {
     Invalid(String),
     #[error("« {0} » existe déjà.")]
     Exists(String),
-    #[error("« {0} » est inconnu.")]
-    Unknown(String),
+    #[error("Personne « {0} » inconnue.")]
+    UnknownPerson(String),
+    #[error("Rôle « {0} » inconnu.")]
+    UnknownRole(String),
     #[error("{0}")]
     Protected(String),
     #[error("{0}")]
@@ -304,6 +306,19 @@ fn validate_name(name: &str) -> Result<String, PeopleError> {
 
 fn validate_role_name(name: &str) -> Result<String, PeopleError> {
     let name = validate_name(name)?;
+    if let Some(bad) = name
+        .chars()
+        .find(|c| !(c.is_alphanumeric() || *c == '-' || *c == '_'))
+    {
+        let shown = if bad == ' ' {
+            "espace".to_string()
+        } else {
+            format!("« {bad} »")
+        };
+        return Err(PeopleError::Invalid(format!(
+            "Le nom d'un rôle est un seul mot (lettres, chiffres, - et _) : {shown} n'est pas permis."
+        )));
+    }
     if fold(&name) == ADMIN {
         return Err(PeopleError::Protected(
             "Le rôle admin est intégré et réservé.".to_string(),
@@ -554,10 +569,10 @@ impl People {
         self.change(|d| {
             let p = d
                 .person(name)
-                .ok_or_else(|| PeopleError::Unknown(name.trim().to_string()))?;
+                .ok_or_else(|| PeopleError::UnknownPerson(name.trim().to_string()))?;
             if p.owner {
                 return Err(PeopleError::Protected(format!(
-                    "{} est le propriétaire : impossible de la supprimer.",
+                    "{} est le propriétaire : on ne peut pas le supprimer.",
                     p.name
                 )));
             }
@@ -579,7 +594,7 @@ impl People {
             let role = existing_role(d, role)?;
             let p = d
                 .person_mut(name)
-                .ok_or_else(|| PeopleError::Unknown(name.trim().to_string()))?;
+                .ok_or_else(|| PeopleError::UnknownPerson(name.trim().to_string()))?;
             if p.owner {
                 return Err(PeopleError::Protected(format!(
                     "{} est le propriétaire : son rôle reste admin.",
@@ -595,7 +610,7 @@ impl People {
     pub fn attach(&self, person: &str, ear: &EarId) -> Result<(), PeopleError> {
         self.change(|d| {
             if d.person(person).is_none() {
-                return Err(PeopleError::Unknown(person.trim().to_string()));
+                return Err(PeopleError::UnknownPerson(person.trim().to_string()));
             }
             remove_ear(d, |e| e == ear);
             if let Some(p) = d.person_mut(person) {
@@ -670,7 +685,7 @@ impl People {
                 .roles
                 .iter_mut()
                 .find(|r| fold(&r.name) == key)
-                .ok_or_else(|| PeopleError::Unknown(name.trim().to_string()))?;
+                .ok_or_else(|| PeopleError::UnknownRole(name.trim().to_string()))?;
             if let Some(t) = tools {
                 role.tools = t;
             }
@@ -693,7 +708,7 @@ impl People {
         self.change(|d| {
             let role = d
                 .role(name)
-                .ok_or_else(|| PeopleError::Unknown(name.trim().to_string()))?;
+                .ok_or_else(|| PeopleError::UnknownRole(name.trim().to_string()))?;
             let key = fold(&role.name);
             let used = d.people.iter().filter(|p| fold(&p.role) == key).count();
             if used > 0 {
@@ -767,7 +782,7 @@ fn existing_role(d: &Data, role: &str) -> Result<String, PeopleError> {
     }
     d.role(role)
         .map(|r| r.name.clone())
-        .ok_or_else(|| PeopleError::Unknown(role.trim().to_string()))
+        .ok_or_else(|| PeopleError::UnknownRole(role.trim().to_string()))
 }
 
 fn remove_ear(d: &mut Data, gone: impl Fn(&EarId) -> bool) {
@@ -931,7 +946,7 @@ mod tests {
         assert_eq!(people.person_of(&ear("e2")), EarPerson::Owner);
         assert!(matches!(
             people.attach("Zoé", &ear("e3")),
-            Err(PeopleError::Unknown(_))
+            Err(PeopleError::UnknownPerson(_))
         ));
     }
 
@@ -978,7 +993,7 @@ mod tests {
         ));
         assert!(matches!(
             people.remove_person("Zoé"),
-            Err(PeopleError::Unknown(_))
+            Err(PeopleError::UnknownPerson(_))
         ));
     }
 
@@ -1075,6 +1090,44 @@ mod tests {
                 .people_summary(&|_| None, false)
                 .iter()
                 .any(|p| p.name == "Zoé")
+        );
+    }
+
+    #[test]
+    fn nom_de_role_en_un_seul_mot() {
+        let (_d, _p, people) = fresh();
+        for bad in ["famille proche", "a/b", "a,b", "x!"] {
+            let r = people.add_role(bad, vec![], false, false, &tools());
+            assert!(matches!(r, Err(PeopleError::Invalid(_))), "{bad:?}");
+        }
+        let e = people
+            .add_role("famille proche", vec![], false, false, &tools())
+            .unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Le nom d'un rôle est un seul mot (lettres, chiffres, - et _) : espace n'est pas permis."
+        );
+        people
+            .add_role("grands-parents_2", vec![], false, false, &tools())
+            .unwrap();
+        // Les noms de personnes gardent leurs espaces.
+        people.add_person("Léa Dupont", "grands-parents_2").unwrap();
+    }
+
+    #[test]
+    fn messages_d_inconnu_precis() {
+        let (_d, _p, people) = fresh();
+        assert_eq!(
+            people.remove_person("Zoé").unwrap_err().to_string(),
+            "Personne « Zoé » inconnue."
+        );
+        assert_eq!(
+            people.remove_role("nexiste").unwrap_err().to_string(),
+            "Rôle « nexiste » inconnu."
+        );
+        assert_eq!(
+            people.remove_person("Charles").unwrap_err().to_string(),
+            "Charles est le propriétaire : on ne peut pas le supprimer."
         );
     }
 
@@ -1246,7 +1299,7 @@ mod tests {
         assert!(people.speaker("Léa", Trust::Accepted).rights.all);
         assert!(matches!(
             people.set_role("Léa", "nexiste"),
-            Err(PeopleError::Unknown(_))
+            Err(PeopleError::UnknownRole(_))
         ));
     }
 
