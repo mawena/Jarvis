@@ -58,8 +58,8 @@ seulement avec des mots très courts (voir « Bon à savoir »).
   **Attendu :**
   - `person list` : une seule ligne, `Charles (propriétaire)`, rôle `admin`, avec l'oreille du
     PC, empreinte vocale `oui` ;
-  - `role list` : une seule ligne, `admin`, outils `tout`, confirmer `non`, agent `non`,
-    1 personne (c'est un rôle intégré : ses droits ne se lisent pas dans ces colonnes) ;
+  - `role list` : une seule ligne, `admin`, outils `tout`, confirmer `oui`, agent `oui`,
+    1 personne ;
   - `ears` : colonne « Personne » avec `Charles` pour l'oreille du PC (ou `-` : elle vaut
     alors Charles).
 
