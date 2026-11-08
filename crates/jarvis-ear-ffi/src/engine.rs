@@ -337,6 +337,7 @@ fn engine_main(
     };
     shared.running.store(true, Ordering::SeqCst);
     let _ = ready.send(Ok(()));
+    tracing::info!("oreille « {} » démarrée", settings.name);
     let Parts {
         wake,
         link,

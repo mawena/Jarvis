@@ -100,7 +100,7 @@ est trop faible (« Trop faible : rapprochez-vous et recommencez »), la même p
 celui du PC : c'est pour ça que le modèle est fait sur le téléphone.
 
 Les réglages (en bas de l'écran principal) : « Démarrer avec le téléphone », « Nom de
-l'oreille », « Seuil du mot d'éveil » (de 0,30 à 0,80, 0,50 par défaut ; pris en compte **au
+l'oreille » (envoyé au cerveau à l'appairage : un changement ne compte qu'au prochain appairage), « Seuil du mot d'éveil » (de 0,30 à 0,80, 0,50 par défaut ; pris en compte **au
 prochain démarrage** de l'écoute) et « Désappairer ».
 
 ## La notification et ses boutons
