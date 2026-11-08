@@ -193,14 +193,20 @@ async fn rig() -> Rig {
     let (chambre, chambre_token) = registry.add("Chambre", "android", false).unwrap();
     let (ancienne, ancienne_token) = registry.add("Ancienne", "linux", false).unwrap();
 
-    let media = Arc::new(
-        FakeSkill::new(&["media_next"]).with_shortcut("suivant", "media_next", serde_json::json!({})),
-    );
+    let media = Arc::new(FakeSkill::new(&["media_next"]).with_shortcut(
+        "suivant",
+        "media_next",
+        serde_json::json!({}),
+    ));
     let musique = Arc::new(FakeSkill::new(&["media_play"]));
     let apps = Arc::new(FakeSkill::new(&["app_launch"]));
     let agent = Arc::new(
         FakeSkill::new(&["agent_start"])
-            .with_shortcut("confie une tâche à l'agent", "agent_start", serde_json::json!({}))
+            .with_shortcut(
+                "confie une tâche à l'agent",
+                "agent_start",
+                serde_json::json!({}),
+            )
             .with_llm_tools(false),
     );
     let suspend = Arc::new(Suspend::default());
@@ -712,7 +718,10 @@ async fn message_de_gestion_envoye_par_une_oreille_ignore() {
             break;
         }
     }
-    let (people, roles) = (rig.people.people_summary(&|_| None, false), rig.people.roles_summary());
+    let (people, roles) = (
+        rig.people.people_summary(&|_| None, false),
+        rig.people.roles_summary(),
+    );
     let names: Vec<_> = people.iter().map(|p| p.name.clone()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(!names.iter().any(|n| n == "Mallory"), "{names:?}");
