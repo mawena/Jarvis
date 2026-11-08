@@ -80,7 +80,7 @@ impl Transcriber for Phrases {
             VEILLE => "mets le PC en veille",
             OUI => "oui",
             MUSIQUE => "lance la musique",
-            AGENT => "lance l'agent",
+            AGENT => "confie une tâche à l'agent",
             _ => "",
         }
         .to_string())
@@ -127,6 +127,16 @@ impl Skill for Suspend {
     }
 }
 
+/// Noms des outils du cerveau d'essai (validation des rôles).
+const TOOLS: [&str; 6] = [
+    "media_next",
+    "media_play",
+    "app_launch",
+    "agent_start",
+    "suspend",
+    "set_mode",
+];
+
 type Oreille = (EarId, String);
 
 struct Rig {
@@ -141,7 +151,7 @@ struct Rig {
     media: Arc<FakeSkill>,
     /// `media_play` : « lance la musique ».
     musique: Arc<FakeSkill>,
-    /// Doublure de l'agent de code : `agent_start`, raccourci « lance l'agent ».
+    /// Doublure de l'agent de code : `agent_start`, raccourci « confie une tâche à l'agent ».
     agent: Arc<FakeSkill>,
     suspend: Arc<Suspend>,
     /// À Charles, rattachée à lui.
@@ -190,7 +200,7 @@ async fn rig() -> Rig {
     let apps = Arc::new(FakeSkill::new(&["app_launch"]));
     let agent = Arc::new(
         FakeSkill::new(&["agent_start"])
-            .with_shortcut("lance l'agent", "agent_start", serde_json::json!({}))
+            .with_shortcut("confie une tâche à l'agent", "agent_start", serde_json::json!({}))
             .with_llm_tools(false),
     );
     let suspend = Arc::new(Suspend::default());
@@ -473,7 +483,7 @@ struct Reponse {
 async fn demande_veille(ear: &mut Ear, utterance: u32, voix: Voix) {
     let r = ear.phrase(utterance, VEILLE, voix).await;
     assert_eq!(r.text, "mets le PC en veille");
-    assert_eq!(r.speech, "Je mets le PC en veille ?");
+    assert_eq!(r.speech, "Je mets le PC en veille, Monsieur ?");
     assert_eq!(r.ear_action, Some(EarAction::AwaitReply));
 }
 
@@ -508,12 +518,12 @@ async fn oreille_de_lea_veille_refusee_et_rien_execute() {
             Some(vec!["*".into()]),
             Some(true),
             Some(true),
-            &[],
+            &TOOLS.map(String::from),
         )
         .unwrap();
     let r = chambre.phrase(3, VEILLE, Voix::Inconnue).await;
     assert_eq!(r.ear_action, None);
-    assert_ne!(r.speech, "Je mets le PC en veille ?");
+    assert_ne!(r.speech, "Je mets le PC en veille, Monsieur ?");
     assert_eq!(rig.veilles(), 0);
 }
 
@@ -531,7 +541,7 @@ async fn agent_refuse_sur_l_oreille_de_lea() {
             Some(vec!["*".into()]),
             Some(true),
             Some(true),
-            &[],
+            &TOOLS.map(String::from),
         )
         .unwrap();
     let r = chambre.phrase(2, AGENT, Voix::Inconnue).await;
@@ -583,6 +593,7 @@ async fn oui_de_lea_ne_confirme_pas_une_action_de_charles() {
     let r = chambre.reponse_sans_reveil(1, OUI, Voix::Inconnue).await;
     assert_eq!(r.speech, "");
     assert_eq!(rig.veilles(), 0);
+    salon.silent().await;
     // Par sécurité l'attente est effacée : même le « oui » de Charles ne fait plus rien.
     let r = salon.reponse_sans_reveil(2, OUI, Voix::Charles).await;
     assert_ne!(r.speech, "Je mets le PC en veille.");
@@ -626,16 +637,24 @@ async fn gestion_par_le_socket_effective_a_la_phrase_suivante() {
     assert!(matches!(r, ControlResponse::Reply { .. }), "{r:?}");
     chambre.phrase(3, MUSIQUE, Voix::Inconnue).await;
     assert_eq!(rig.musiques(), 2);
-    // Léa supprimée : son oreille n'a plus aucun droit, jamais ceux de l'administrateur.
+    // L'oreille de Léa passe à Charles : c'est désormais une oreille de Charles, où une
+    // voix inconnue est ignorée (jamais les droits de l'administrateur pour autant).
     let r = cli
-        .send(ControlRequest::PersonRemove { name: "Léa".into() })
+        .send(ControlRequest::PersonAttach {
+            name: "Charles".into(),
+            ear: "Chambre".into(),
+        })
         .await;
     assert!(matches!(r, ControlResponse::Reply { .. }), "{r:?}");
-    assert_eq!(rig.people.person_of(&rig.chambre.0), EarPerson::Unknown);
+    assert_eq!(rig.people.person_of(&rig.chambre.0), EarPerson::Owner);
+    let calls = rig.stt.calls.load(Ordering::SeqCst);
     let r = chambre.phrase(4, MUSIQUE, Voix::Inconnue).await;
-    assert_eq!(rig.musiques(), 2, "{:?}", r.speech);
+    assert_eq!(r.text, "");
+    assert_eq!(rig.musiques(), 2);
+    assert_eq!(rig.stt.calls.load(Ordering::SeqCst), calls);
     let r = chambre.phrase(5, VEILLE, Voix::Inconnue).await;
-    assert_eq!(rig.veilles(), 0, "{:?}", r.speech);
+    assert_eq!(r.text, "");
+    assert_eq!(rig.veilles(), 0);
 }
 
 type Ws = WebSocketStream<Box<dyn AsyncStream>>;
@@ -675,8 +694,7 @@ async fn message_de_gestion_envoye_par_une_oreille_ignore() {
     ))
     .await
     .unwrap();
-    let mut statuses = 0;
-    while statuses < 2 {
+    loop {
         let message = tokio::time::timeout(WAIT, ws.next())
             .await
             .expect("pas de réponse du cerveau")
@@ -685,13 +703,16 @@ async fn message_de_gestion_envoye_par_une_oreille_ignore() {
         if let Message::Text(text) = message
             && matches!(
                 serde_json::from_str::<BrainMessage>(text.as_str()),
-                Ok(BrainMessage::Status(_))
+                Ok(BrainMessage::Response {
+                    utterance: None,
+                    response: ControlResponse::Status { .. }
+                })
             )
         {
-            statuses += 1;
+            break;
         }
     }
-    let (people, roles) = (rig.people.people_summary(&[]), rig.people.roles_summary());
+    let (people, roles) = (rig.people.people_summary(&|_| None, false), rig.people.roles_summary());
     let names: Vec<_> = people.iter().map(|p| p.name.clone()).collect();
     assert_eq!(names.len(), 2, "{names:?}");
     assert!(!names.iter().any(|n| n == "Mallory"), "{names:?}");
@@ -722,9 +743,4 @@ async fn oreille_non_rattachee_vaut_charles_apres_migration() {
     assert_eq!(rig.veilles(), 1);
     ancienne.phrase(4, AGENT, Voix::Charles).await;
     assert_eq!(rig.agents(), 1);
-}
-
-#[allow(dead_code)]
-fn _silence(ear: &mut Ear) -> impl std::future::Future<Output = ()> + '_ {
-    ear.silent()
 }
