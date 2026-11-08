@@ -35,8 +35,10 @@ fn io(context: &str, e: impl std::fmt::Display) -> EarError {
 /// PCM 16 bits little-endian vers flottants ; un octet de trop est ignoré.
 pub fn pcm_to_f32(pcm_le: &[u8]) -> Vec<f32> {
     pcm_le
-        .chunks_exact(2)
-        .map(|b| i16_to_f32(i16::from_le_bytes([b[0], b[1]])))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|b| i16_to_f32(i16::from_le_bytes(*b)))
         .collect()
 }
 

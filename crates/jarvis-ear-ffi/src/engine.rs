@@ -316,7 +316,7 @@ impl EarEngine {
 
 /// Corps du fil du moteur : runtime, lien, session, jusqu'à `Quit`.
 fn engine_main(
-    parts: Box<Parts>,
+    parts: Parts,
     shared: Arc<Shared>,
     settings: EarSettings,
     data_dir: PathBuf,
@@ -342,7 +342,7 @@ fn engine_main(
         link,
         commands_rx,
         status_tx,
-    } = *parts;
+    } = parts;
     let result = runtime.block_on(async {
         let (link, events) = link();
         let listener = Listener::new(BoxedWake(wake), EarshotVad::new());
@@ -451,7 +451,7 @@ impl EarEngine {
         let data_dir = self.data_dir.clone();
         std::thread::Builder::new()
             .name("jarvis-oreille".into())
-            .spawn(move || engine_main(parts, shared, settings, data_dir, ready_tx, done_tx))
+            .spawn(move || engine_main(*parts, shared, settings, data_dir, ready_tx, done_tx))
             .map_err(|e| EarError::Internal {
                 message: format!("fil du moteur : {e}"),
             })?;
