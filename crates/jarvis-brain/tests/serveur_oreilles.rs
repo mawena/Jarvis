@@ -10,6 +10,7 @@ use jarvis_brain::listen::ListenService;
 use jarvis_brain::llm::Understanding;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, Hub, HubSettings, Limits, NetworkPaths, Services};
+use jarvis_brain::people::{Access, EarPerson, People, Trust};
 use jarvis_brain::server::{SpeakerState, serve_with_hub};
 use jarvis_brain::testing::{FakeDucker, FakeLlm, FakeSkill, FakeSynthesizer, FakeTranscriber};
 use jarvis_brain::tls::BrainIdentity;
@@ -25,7 +26,7 @@ use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{
     ControlRequest, ControlResponse, EarId, Fingerprint, Mode, SpeechAudio, encode_pcm,
 };
-use jarvis_skills::{Announcer, FakeRunner, Notice, Outcome};
+use jarvis_skills::{Announcer, FakeRunner, Notice, Outcome, Risk};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -48,6 +49,10 @@ struct Rig {
     skill: Arc<FakeSkill>,
     board: Arc<AnnouncementBoard>,
     socket: PathBuf,
+    /// Annuaire partagé avec le cerveau, son fichier et le registre des oreilles.
+    people: Arc<People>,
+    people_file: PathBuf,
+    ears_file: PathBuf,
     /// Oreille appairée d'avance : (id, jeton).
     salon: (EarId, String),
 }
@@ -71,9 +76,22 @@ async fn rig_with(skill_delay: Duration, process_timeout: Duration) -> Rig {
 
 /// Comme [`rig_with`], avec la voix des réponses et des annonces.
 async fn rig_full(skill_delay: Duration, process_timeout: Duration, voice: Voice) -> Rig {
+    rig_people(skill_delay, process_timeout, voice, None).await
+}
+
+/// Comme [`rig_full`], avec un annuaire donné (neuf, dans le dossier du test, sinon).
+async fn rig_people(
+    skill_delay: Duration,
+    process_timeout: Duration,
+    voice: Voice,
+    people: Option<Arc<People>>,
+) -> Rig {
     let dir = tempfile::tempdir().unwrap();
+    let people_file = dir.path().join("people/people.toml");
+    let people = people.unwrap_or_else(|| Arc::new(People::open(&people_file, "Charles").unwrap()));
+    let ears_file = dir.path().join("ears.toml");
     let identity = BrainIdentity::load_or_create(&dir.path().join("tls")).unwrap();
-    let mut registry = EarRegistry::load(&dir.path().join("ears.toml")).unwrap();
+    let mut registry = EarRegistry::load(&ears_file).unwrap();
     let (salon, token) = registry.add("Salon", "linux", false).unwrap();
 
     let skill = Arc::new(
@@ -85,7 +103,9 @@ async fn rig_full(skill_delay: Duration, process_timeout: Duration, voice: Voice
     let modes = Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local));
     let changes = modes.subscribe();
     let brain = Arc::new(
-        Brain::new(vec![skill.clone()], llm(), llm(), modes).with_local_model("qwen-test"),
+        Brain::new(vec![skill.clone()], llm(), llm(), modes)
+            .with_local_model("qwen-test")
+            .with_people(people.clone()),
     );
     let stt = Arc::new(FakeTranscriber::new("suivant"));
     let ducker = Arc::new(FakeDucker::new());
@@ -149,6 +169,9 @@ async fn rig_full(skill_delay: Duration, process_timeout: Duration, voice: Voice
         skill,
         board: board_handle,
         socket,
+        people,
+        people_file,
+        ears_file,
         salon: (salon.id, token),
     }
 }
@@ -1266,4 +1289,593 @@ async fn reseau_desactive_le_cerveau_demarre() {
         .expect("réseau démarré");
     assert_ne!(network.port, 0);
     network.shutdown().await;
+}
+
+// --- Phase 8 : personnes, rôles et rattachement des oreilles ---
+
+async fn cmd(cli: &mut Cli, request: ControlRequest) -> ControlResponse {
+    cli.send(request).await
+}
+
+fn is_error(response: &ControlResponse) -> bool {
+    matches!(response, ControlResponse::Error { .. })
+}
+
+async fn add_role_famille(cli: &mut Cli) {
+    let response = cmd(
+        cli,
+        ControlRequest::RoleAdd {
+            name: "famille".into(),
+            tools: vec!["media_*".into()],
+            confirm: false,
+            agent: false,
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        ControlResponse::Reply {
+            speech: "Rôle « famille » créé.".into()
+        }
+    );
+}
+
+async fn add_lea(cli: &mut Cli) {
+    add_role_famille(cli).await;
+    let response = cmd(
+        cli,
+        ControlRequest::PersonAdd {
+            name: "Léa".into(),
+            role: "famille".into(),
+        },
+    )
+    .await;
+    assert_eq!(
+        response,
+        ControlResponse::Reply {
+            speech: "Personne « Léa » ajoutée (rôle famille).".into()
+        }
+    );
+}
+
+/// (personnes, raison du mode dégradé).
+async fn people_of(cli: &mut Cli) -> (Vec<jarvis_protocol::PersonSummary>, Option<String>) {
+    let ControlResponse::People { people, degraded } = cmd(cli, ControlRequest::PersonList).await
+    else {
+        panic!("liste des personnes attendue")
+    };
+    (people, degraded)
+}
+
+async fn ears_of(cli: &mut Cli, person: &str) -> Vec<String> {
+    let (people, _) = people_of(cli).await;
+    people
+        .into_iter()
+        .find(|p| p.name == person)
+        .unwrap_or_else(|| panic!("{person} absent"))
+        .ears
+}
+
+/// Seconde oreille appairée par code pour `person`.
+async fn pair_ear_for(rig: &Rig, name: &str, person: Option<&str>) -> (EarId, String) {
+    let mut cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::Pairing { code, .. } = cli
+        .send(ControlRequest::PairStart {
+            person: person.map(String::from),
+        })
+        .await
+    else {
+        panic!("fenêtre d'appairage attendue")
+    };
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    let paired = pair_with_code(stream, &code, name, "android")
+        .await
+        .unwrap();
+    assert_eq!(
+        cli.read().await,
+        ControlResponse::PairingDone { name: name.into() }
+    );
+    (paired.ear_id, paired.token)
+}
+
+#[tokio::test]
+async fn appairage_attache_a_la_personne_choisie() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await;
+    // Sans tenir compte de la casse ni des accents.
+    let (id, _) = pair_ear_for(&rig, "Pixel", Some("lea")).await;
+    assert_eq!(ears_of(&mut cli, "Léa").await, vec!["Pixel".to_string()]);
+    assert_eq!(rig.people.person_of(&id), EarPerson::Guest("Léa".into()));
+}
+
+#[tokio::test]
+async fn appairage_par_defaut_au_proprietaire() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let (id, _) = pair_ear_for(&rig, "Pixel", None).await;
+    // Rattachée explicitement au propriétaire (écrite dans l'annuaire).
+    assert_eq!(
+        ears_of(&mut cli, "Charles").await,
+        vec!["Pixel".to_string()]
+    );
+    assert!(
+        std::fs::read_to_string(&rig.people_file)
+            .unwrap()
+            .contains(id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn appairage_personne_inconnue_refuse_sans_ouvrir_la_fenetre() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    assert_eq!(
+        cli.send(ControlRequest::PairStart {
+            person: Some("Zoé".into())
+        })
+        .await,
+        ControlResponse::Error {
+            message: "« Zoé » est inconnu.".into()
+        }
+    );
+    // Aucune fenêtre ouverte : un code, même plausible, est refusé.
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    assert!(matches!(
+        pair_with_code(stream, "123456", "Pixel", "android").await,
+        Err(PairError::Rejected(RejectReason::PairingClosed))
+    ));
+    assert_eq!(EarRegistry::load(&rig.ears_file).unwrap().list().len(), 1);
+}
+
+#[tokio::test]
+async fn echec_du_rattachement_defait_l_appairage() {
+    use std::os::unix::fs::PermissionsExt;
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let mut ear_cli = Cli::connect(&rig.socket).await;
+    let ControlResponse::Pairing { code, .. } = ear_cli
+        .send(ControlRequest::PairStart { person: None })
+        .await
+    else {
+        panic!("fenêtre d'appairage attendue")
+    };
+    // Le dossier de l'annuaire devient illisible en écriture : le rattachement échoue.
+    let dir = rig.people_file.parent().unwrap().to_path_buf();
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let stream = stream_to(rig.addr, &rig.fingerprint).await;
+    let paired = pair_with_code(stream, &code, "Pixel", "android").await;
+    let ended = ear_cli.read().await;
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(paired.is_err());
+    assert!(
+        matches!(&ended, ControlResponse::PairingEnded { reason } if reason.starts_with("enregistrement impossible")),
+        "{ended:?}"
+    );
+    // L'oreille créée a été retirée du registre : il ne reste que le salon.
+    let ControlResponse::Ears { ears } = cli.send(ControlRequest::ListEars).await else {
+        panic!("liste attendue")
+    };
+    assert_eq!(ears.len(), 1);
+    assert_eq!(ears[0].name, "Salon");
+    assert_eq!(EarRegistry::load(&rig.ears_file).unwrap().list().len(), 1);
+}
+
+#[tokio::test]
+async fn retrait_detache_l_oreille() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await;
+    let (id, _) = pair_ear_for(&rig, "Pixel", Some("Léa")).await;
+    assert_eq!(ears_of(&mut cli, "Léa").await, vec!["Pixel".to_string()]);
+    assert_eq!(
+        cli.send(ControlRequest::Unpair {
+            ear: "Pixel".into()
+        })
+        .await,
+        ControlResponse::Reply {
+            speech: "Oreille « Pixel » retirée.".into()
+        }
+    );
+    assert!(ears_of(&mut cli, "Léa").await.is_empty());
+    assert!(
+        !std::fs::read_to_string(&rig.people_file)
+            .unwrap()
+            .contains(id.as_str())
+    );
+}
+
+#[tokio::test]
+async fn oreille_locale_reappairee_reste_au_proprietaire() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let mut ids = Vec::new();
+    for _ in 0..2 {
+        let ControlResponse::PairedLocal { ear_id, .. } = cli
+            .send(ControlRequest::PairLocal { name: "PC".into() })
+            .await
+        else {
+            panic!("appairage local attendu")
+        };
+        ids.push(ear_id);
+    }
+    assert_ne!(ids[0], ids[1]);
+    // Une seule oreille « PC », celle du propriétaire ; l'ancienne a quitté l'annuaire.
+    assert_eq!(ears_of(&mut cli, "Charles").await, vec!["PC".to_string()]);
+    assert_eq!(rig.people.person_of(&ids[1]), EarPerson::Owner);
+    let text = std::fs::read_to_string(&rig.people_file).unwrap();
+    assert!(text.contains(ids[1].as_str()));
+    assert!(!text.contains(ids[0].as_str()));
+}
+
+#[tokio::test]
+async fn ears_liste_la_personne() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await;
+    pair_ear_for(&rig, "Pixel", Some("Léa")).await;
+    let ControlResponse::Ears { ears } = cli.send(ControlRequest::ListEars).await else {
+        panic!("liste attendue")
+    };
+    let person = |name: &str| ears.iter().find(|e| e.name == name).unwrap().person.clone();
+    // Le salon, appairé avant la phase 8, est à Charles.
+    assert_eq!(person("Salon").as_deref(), Some("Charles"));
+    assert_eq!(person("Pixel").as_deref(), Some("Léa"));
+}
+
+#[tokio::test]
+async fn person_add_list_remove_par_le_socket() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let (people, degraded) = people_of(&mut cli).await;
+    assert!(degraded.is_none());
+    assert_eq!(people.len(), 1);
+    assert!(people[0].owner && people[0].role == "admin");
+    add_lea(&mut cli).await;
+    let (people, _) = people_of(&mut cli).await;
+    let lea = people.iter().find(|p| p.name == "Léa").unwrap();
+    assert_eq!((lea.role.as_str(), lea.owner), ("famille", false));
+    // Doublon (sans tenir compte des accents) refusé.
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonAdd {
+                name: "lea".into(),
+                role: "famille".into()
+            }
+        )
+        .await
+    ));
+    // Rôle inconnu refusé.
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonAdd {
+                name: "Paul".into(),
+                role: "inexistant".into()
+            }
+        )
+        .await
+    ));
+    assert_eq!(
+        cmd(
+            &mut cli,
+            ControlRequest::PersonRemove {
+                name: "Léa".into()
+            }
+        )
+        .await,
+        ControlResponse::Reply {
+            speech: "Personne « Léa » supprimée.".into()
+        }
+    );
+    assert_eq!(people_of(&mut cli).await.0.len(), 1);
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonRemove {
+                name: "Léa".into()
+            }
+        )
+        .await
+    ));
+}
+
+#[tokio::test]
+async fn person_attach_par_nom_ou_identifiant() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await;
+    assert_eq!(
+        cmd(
+            &mut cli,
+            ControlRequest::PersonAttach {
+                name: "Léa".into(),
+                ear: "Salon".into()
+            }
+        )
+        .await,
+        ControlResponse::Reply {
+            speech: "Oreille « Salon » rattachée à Léa.".into()
+        }
+    );
+    assert_eq!(ears_of(&mut cli, "Léa").await, vec!["Salon".to_string()]);
+    // Par début d'identifiant, vers une autre personne : elle quitte la première.
+    let prefix = rig.salon.0.as_str()[..8].to_string();
+    assert!(!is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonAttach {
+                name: "Charles".into(),
+                ear: prefix
+            }
+        )
+        .await
+    ));
+    assert!(ears_of(&mut cli, "Léa").await.is_empty());
+    assert_eq!(
+        ears_of(&mut cli, "Charles").await,
+        vec!["Salon".to_string()]
+    );
+    // Oreille ou personne inconnue.
+    assert_eq!(
+        cmd(
+            &mut cli,
+            ControlRequest::PersonAttach {
+                name: "Léa".into(),
+                ear: "Cuisine".into()
+            }
+        )
+        .await,
+        ControlResponse::Error {
+            message: "Aucune oreille « Cuisine ».".into()
+        }
+    );
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonAttach {
+                name: "Zoé".into(),
+                ear: "Salon".into()
+            }
+        )
+        .await
+    ));
+}
+
+#[tokio::test]
+async fn person_remove_proprietaire_refuse() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonRemove {
+                name: "Charles".into()
+            }
+        )
+        .await
+    ));
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::PersonRole {
+                name: "Charles".into(),
+                role: "famille".into()
+            }
+        )
+        .await
+    ));
+    let (people, _) = people_of(&mut cli).await;
+    assert_eq!(people.len(), 1);
+    assert_eq!(people[0].role, "admin");
+}
+
+#[tokio::test]
+async fn role_admin_intouchable() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::RoleAdd {
+                name: "admin".into(),
+                tools: vec!["*".into()],
+                confirm: true,
+                agent: true
+            }
+        )
+        .await
+    ));
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::RoleEdit {
+                name: "admin".into(),
+                tools: Some(vec!["media_next".into()]),
+                confirm: Some(false),
+                agent: Some(false)
+            }
+        )
+        .await
+    ));
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::RoleRemove {
+                name: "admin".into()
+            }
+        )
+        .await
+    ));
+    let ControlResponse::Roles { roles } = cmd(&mut cli, ControlRequest::RoleList).await else {
+        panic!("liste des rôles attendue")
+    };
+    let admin = roles.iter().find(|r| r.name == "admin").unwrap();
+    assert!(admin.builtin && admin.confirm && admin.agent);
+}
+
+#[tokio::test]
+async fn role_en_service_non_supprimable() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await;
+    let response = cmd(
+        &mut cli,
+        ControlRequest::RoleRemove {
+            name: "famille".into(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(&response, ControlResponse::Error { message } if message.contains("encore donné")),
+        "{response:?}"
+    );
+    cmd(
+        &mut cli,
+        ControlRequest::PersonRemove {
+            name: "Léa".into()
+        },
+    )
+    .await;
+    assert_eq!(
+        cmd(
+            &mut cli,
+            ControlRequest::RoleRemove {
+                name: "famille".into()
+            }
+        )
+        .await,
+        ControlResponse::Reply {
+            speech: "Rôle « famille » supprimé.".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn outil_inconnu_dans_un_role_refuse() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    for tools in [vec!["inexistant".to_string()], vec!["zzz_*".to_string()]] {
+        assert!(is_error(
+            &cmd(
+                &mut cli,
+                ControlRequest::RoleAdd {
+                    name: "bizarre".into(),
+                    tools,
+                    confirm: false,
+                    agent: false
+                }
+            )
+            .await
+        ));
+    }
+    add_role_famille(&mut cli).await;
+    assert!(is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::RoleEdit {
+                name: "famille".into(),
+                tools: Some(vec!["inexistant".into()]),
+                confirm: None,
+                agent: None
+            }
+        )
+        .await
+    ));
+    let ControlResponse::Roles { roles } = cmd(&mut cli, ControlRequest::RoleList).await else {
+        panic!("liste des rôles attendue")
+    };
+    assert!(roles.iter().all(|r| r.name != "bizarre"));
+    assert_eq!(
+        roles.iter().find(|r| r.name == "famille").unwrap().tools,
+        vec!["media_*".to_string()]
+    );
+}
+
+#[tokio::test]
+async fn mode_degrade_signale_dans_person_list() {
+    let dir = tempfile::tempdir().unwrap();
+    let broken = dir.path().join("people.toml");
+    std::fs::write(&broken, "pas du toml [").unwrap();
+    let people = Arc::new(People::open_or_degraded(&broken, "Charles"));
+    let rig = rig_people(
+        Duration::ZERO,
+        net::hub::PROCESS_TIMEOUT,
+        Voice::none(),
+        Some(people),
+    )
+    .await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    let (_, degraded) = people_of(&mut cli).await;
+    assert!(degraded.is_some());
+    // Écritures refusées, appairage refusé avant d'ouvrir la fenêtre.
+    let response = cmd(
+        &mut cli,
+        ControlRequest::RoleAdd {
+            name: "famille".into(),
+            tools: vec!["media_*".into()],
+            confirm: false,
+            agent: false,
+        },
+    )
+    .await;
+    assert!(is_error(&response));
+    assert!(is_error(
+        &cmd(&mut cli, ControlRequest::PairStart { person: None }).await
+    ));
+    assert_eq!(std::fs::read_to_string(&broken).unwrap(), "pas du toml [");
+}
+
+#[tokio::test]
+async fn changement_de_role_sans_redemarrage() {
+    let rig = rig().await;
+    let mut cli = Cli::connect(&rig.socket).await;
+    add_lea(&mut cli).await;
+    let may = |rig: &Rig, tool: &str| {
+        rig.people
+            .speaker("Léa", Trust::Unverified)
+            .check(tool, Risk::Direct)
+            == Access::Allowed
+    };
+    assert!(may(&rig, "media_next"));
+    assert!(!may(&rig, "status"));
+    // Le rôle change : effectif tout de suite, sans redémarrage.
+    assert!(!is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::RoleEdit {
+                name: "famille".into(),
+                tools: Some(vec!["status".into()]),
+                confirm: None,
+                agent: None
+            }
+        )
+        .await
+    ));
+    assert!(!may(&rig, "media_next"));
+    assert!(may(&rig, "status"));
+    // Et le rôle de la personne aussi.
+    assert!(!is_error(
+        &cmd(
+            &mut cli,
+            ControlRequest::RoleAdd {
+                name: "musique".into(),
+                tools: vec!["media_next".into()],
+                confirm: false,
+                agent: false
+            }
+        )
+        .await
+    ));
+    cmd(
+        &mut cli,
+        ControlRequest::PersonRole {
+            name: "Léa".into(),
+            role: "musique".into(),
+        },
+    )
+    .await;
+    assert!(may(&rig, "media_next"));
+    assert!(!may(&rig, "status"));
 }

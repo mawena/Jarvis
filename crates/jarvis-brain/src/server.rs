@@ -8,11 +8,13 @@ use crate::announce::AnnouncementBoard;
 use crate::brain::{Brain, SystemClock};
 use crate::listen::ListenService;
 use crate::net::{Hub, PairOutcome};
+use crate::people::PeopleError;
 use crate::speaker::SpeakerGate;
 use crate::tts::Voice;
 use anyhow::{Context, bail};
 use jarvis_protocol::{
-    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, Sound, decode_pcm, pairing_ended,
+    Announcement, ControlRequest, ControlResponse, DEFAULT_EAR, EarId, Sound, decode_pcm,
+    pairing_ended,
 };
 use jarvis_skills::{Outcome, SystemRunner};
 use std::io::{self, ErrorKind};
@@ -214,9 +216,9 @@ async fn handle_client(shared: Arc<Shared>, stream: UnixStream) -> io::Result<()
                 return Ok(());
             }
             Line::Request(line) => match serde_json::from_slice::<ControlRequest>(&line) {
-                Ok(ControlRequest::PairStart { .. }) => match &shared.hub {
+                Ok(ControlRequest::PairStart { person }) => match &shared.hub {
                     Some(hub) => {
-                        if pair(hub, &mut reader, &mut write).await? {
+                        if pair(hub, person, &mut reader, &mut write).await? {
                             continue;
                         }
                         return Ok(());
@@ -240,12 +242,17 @@ const PAIR_GRACE: Duration = Duration::from_secs(5);
 
 /// `PairStart` : `Pairing`, puis `PairingDone` ou `PairingEnded` sur la même
 /// connexion. Client parti (ou qui écrit) : fenêtre fermée, `false`.
-async fn pair<R, W>(hub: &Hub, reader: &mut R, write: &mut W) -> io::Result<bool>
+async fn pair<R, W>(
+    hub: &Hub,
+    person: Option<String>,
+    reader: &mut R,
+    write: &mut W,
+) -> io::Result<bool>
 where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let ticket = match hub.pair_start().await {
+    let ticket = match hub.pair_start(person).await {
         Ok(ticket) => ticket,
         Err(message) => {
             send(write, &ControlResponse::Error { message }).await?;
@@ -320,18 +327,79 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
         ControlRequest::PairStart { .. } => ControlResponse::Error {
             message: "requête invalide".into(),
         },
-        // Gestion des personnes et des rôles : tâche 4 de la phase 8.
-        ControlRequest::PersonList
-        | ControlRequest::PersonAdd { .. }
-        | ControlRequest::PersonRemove { .. }
-        | ControlRequest::PersonRole { .. }
-        | ControlRequest::PersonAttach { .. }
-        | ControlRequest::RoleList
-        | ControlRequest::RoleAdd { .. }
-        | ControlRequest::RoleEdit { .. }
-        | ControlRequest::RoleRemove { .. } => ControlResponse::Error {
-            message: "pas encore disponible".into(),
+        ControlRequest::PersonList => ControlResponse::People {
+            people: brain
+                .people()
+                .people_summary(&ear_name_lookup(hub).await, owner_voiceprint(speaker)),
+            degraded: brain.people().degraded(),
         },
+        ControlRequest::PersonAdd { name, role } => {
+            let people = brain.people();
+            done(
+                people.add_person(&name, &role),
+                || {
+                    format!(
+                        "Personne « {} » ajoutée (rôle {}).",
+                        name.trim(),
+                        role.trim()
+                    )
+                },
+                || info!(personne = %name.trim(), role = %role.trim(), "personne ajoutée"),
+            )
+        }
+        ControlRequest::PersonRemove { name } => done(
+            brain.people().remove_person(&name),
+            || format!("Personne « {} » supprimée.", name.trim()),
+            || info!(personne = %name.trim(), "personne supprimée"),
+        ),
+        ControlRequest::PersonRole { name, role } => done(
+            brain.people().set_role(&name, &role),
+            || format!("« {} » a maintenant le rôle {}.", name.trim(), role.trim()),
+            || info!(personne = %name.trim(), role = %role.trim(), "rôle d'une personne changé"),
+        ),
+        ControlRequest::PersonAttach { name, ear } => match hub {
+            Some(hub) => match hub.find_ear(&ear).await {
+                Ok(found) => done(
+                    brain.people().attach(&name, &found.id),
+                    || format!("Oreille « {} » rattachée à {}.", found.name, name.trim()),
+                    || info!(personne = %name.trim(), oreille = %found.id, "oreille rattachée"),
+                ),
+                Err(message) => ControlResponse::Error { message },
+            },
+            None => no_network(),
+        },
+        ControlRequest::RoleList => ControlResponse::Roles {
+            roles: brain.people().roles_summary(),
+        },
+        ControlRequest::RoleAdd {
+            name,
+            tools,
+            confirm,
+            agent,
+        } => done(
+            brain
+                .people()
+                .add_role(&name, tools, confirm, agent, &brain.tool_names()),
+            || format!("Rôle « {} » créé.", name.trim()),
+            || info!(role = %name.trim(), confirm, agent, "rôle créé"),
+        ),
+        ControlRequest::RoleEdit {
+            name,
+            tools,
+            confirm,
+            agent,
+        } => done(
+            brain
+                .people()
+                .edit_role(&name, tools, confirm, agent, &brain.tool_names()),
+            || format!("Rôle « {} » modifié.", name.trim()),
+            || info!(role = %name.trim(), "rôle modifié"),
+        ),
+        ControlRequest::RoleRemove { name } => done(
+            brain.people().remove_role(&name),
+            || format!("Rôle « {} » supprimé.", name.trim()),
+            || info!(role = %name.trim(), "rôle supprimé"),
+        ),
         ControlRequest::PairLocal { name } => match hub {
             Some(hub) => hub.pair_local(name).await,
             None => no_network(),
@@ -346,6 +414,42 @@ async fn respond(shared: &Shared, request: ControlRequest) -> ControlResponse {
             Some(hub) => hub.unpair(ear).await,
             None => no_network(),
         },
+    }
+}
+
+/// Réponse à une modification de l'annuaire : `Reply` (et journal) ou `Error`.
+fn done(
+    result: Result<(), PeopleError>,
+    speech: impl FnOnce() -> String,
+    log: impl FnOnce(),
+) -> ControlResponse {
+    match result {
+        Ok(()) => {
+            log();
+            ControlResponse::Reply { speech: speech() }
+        }
+        Err(e) => ControlResponse::Error {
+            message: e.to_string(),
+        },
+    }
+}
+
+/// Nom d'affichage des oreilles du registre, pour la liste des personnes. Sans hub,
+/// l'identifiant fait foi.
+async fn ear_name_lookup(hub: &Option<Hub>) -> impl Fn(&EarId) -> Option<String> {
+    let ears = match hub {
+        Some(hub) => hub.list_ears().await,
+        None => Vec::new(),
+    };
+    move |id: &EarId| ears.iter().find(|e| &e.id == id).map(|e| e.name.clone())
+}
+
+/// Une empreinte vocale du propriétaire est enregistrée.
+fn owner_voiceprint(speaker: &SpeakerState) -> bool {
+    match speaker {
+        SpeakerState::Disabled => false,
+        SpeakerState::Unavailable { enrolled } => *enrolled,
+        SpeakerState::Ready(gate) => gate.is_enrolled(),
     }
 }
 

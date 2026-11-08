@@ -114,41 +114,51 @@ impl EarRegistry {
         Ok((record, token))
     }
 
-    /// Retire une oreille par son identifiant, son nom, ou le début de son identifiant
-    /// (au moins [`MIN_ID_PREFIX`] caractères, comme la colonne Id de `jarvis ears`).
-    /// Nom ou début d'identifiant ambigu : `InvalidInput`.
+    /// Index de l'oreille désignée par son identifiant, son nom, ou le début de son
+    /// identifiant (au moins [`MIN_ID_PREFIX`] caractères, comme la colonne Id de
+    /// `jarvis ears`). Nom ou début d'identifiant ambigu : `InvalidInput`.
+    fn index_of(&self, name_or_id: &str) -> io::Result<Option<usize>> {
+        if let Some(i) = self.ears.iter().position(|e| e.id.as_str() == name_or_id) {
+            return Ok(Some(i));
+        }
+        match self.unique(|e| e.name == name_or_id) {
+            Ok(Some(i)) => return Ok(Some(i)),
+            Ok(None) => {}
+            Err(()) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "plusieurs oreilles s'appellent « {name_or_id} » : donnez son \
+                         identifiant (colonne Id de « jarvis ears »)"
+                    ),
+                ));
+            }
+        }
+        if name_or_id.len() < MIN_ID_PREFIX {
+            return Ok(None);
+        }
+        let prefix = name_or_id.to_ascii_lowercase();
+        self.unique(|e| e.id.as_str().starts_with(&prefix))
+            .map_err(|()| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!(
+                        "plusieurs oreilles ont un identifiant qui commence par \
+                         « {name_or_id} » : donnez-en plus"
+                    ),
+                )
+            })
+    }
+
+    /// Cherche une oreille (même résolution que [`EarRegistry::remove`]).
+    pub fn find(&self, name_or_id: &str) -> io::Result<Option<EarRecord>> {
+        Ok(self.index_of(name_or_id)?.map(|i| self.ears[i].clone()))
+    }
+
+    /// Retire une oreille (même résolution que [`EarRegistry::find`]).
     pub fn remove(&mut self, name_or_id: &str) -> io::Result<Option<EarRecord>> {
-        let index = match self.ears.iter().position(|e| e.id.as_str() == name_or_id) {
-            Some(i) => i,
-            None => match self.unique(|e| e.name == name_or_id) {
-                Ok(Some(i)) => i,
-                Ok(None) if name_or_id.len() >= MIN_ID_PREFIX => {
-                    let prefix = name_or_id.to_ascii_lowercase();
-                    match self.unique(|e| e.id.as_str().starts_with(&prefix)) {
-                        Ok(Some(i)) => i,
-                        Ok(None) => return Ok(None),
-                        Err(()) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                format!(
-                                    "plusieurs oreilles ont un identifiant qui commence par \
-                                     « {name_or_id} » : donnez-en plus"
-                                ),
-                            ));
-                        }
-                    }
-                }
-                Ok(None) => return Ok(None),
-                Err(()) => {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidInput,
-                        format!(
-                            "plusieurs oreilles s'appellent « {name_or_id} » : donnez son \
-                             identifiant (colonne Id de « jarvis ears »)"
-                        ),
-                    ));
-                }
-            },
+        let Some(index) = self.index_of(name_or_id)? else {
+            return Ok(None);
         };
         let mut ears = self.ears.clone();
         let removed = ears.remove(index);
@@ -467,5 +477,30 @@ mod tests {
             EarRegistry::load(&file(&dir)).unwrap().list(),
             vec![phone, second]
         );
+    }
+
+    #[test]
+    fn find_par_nom_id_et_prefixe() {
+        let (_dir, mut reg) = registry();
+        let (a, _) = reg.add("Téléphone", "android", false).unwrap();
+        let (b, _) = reg.add("Salon", "linux", false).unwrap();
+        assert_eq!(reg.find("Téléphone").unwrap(), Some(a.clone()));
+        assert_eq!(reg.find(a.id.as_str()).unwrap(), Some(a.clone()));
+        assert_eq!(reg.find(&a.id.as_str()[..8]).unwrap(), Some(a));
+        assert_eq!(reg.find("Salon").unwrap(), Some(b));
+        assert_eq!(reg.find("inconnue").unwrap(), None);
+        // Un préfixe trop court n'est pas un identifiant.
+        assert_eq!(reg.find(&reg.list()[0].id.as_str()[..2]).unwrap(), None);
+        // La recherche ne retire rien.
+        assert_eq!(reg.list().len(), 2);
+    }
+
+    #[test]
+    fn find_ambigu_refuse() {
+        let (_dir, mut reg) = registry();
+        reg.add("Salon", "linux", false).unwrap();
+        reg.add("Salon", "android", false).unwrap();
+        let err = reg.find("Salon").unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
     }
 }
