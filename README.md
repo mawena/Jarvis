@@ -6,7 +6,7 @@ pause », « Jarvis, cherche la météo de demain à Lomé »), il comprend, agi
 Jarvis tournent **entièrement sur le PC**. Seul le mode « en ligne », choisi exprès, envoie le
 texte des phrases à Claude.
 
-> **État :** préversion `0.1.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
+> **État :** préversion `0.2.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
 > développement continue sur `develop`. La `1.0.0` viendra après la mise en service et les essais
 > réels. Nouveautés : [CHANGELOG.md](CHANGELOG.md) ; avancement détaillé :
 > [ROADMAP.md](ROADMAP.md).

@@ -6,6 +6,11 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.2.0] - 2026-11-09
+
+L'IA locale passe à Qwen3.5 4B servi par LM Studio : 56 phrases sur 56 comprises au banc
+(`docs/ia-locale.md`) ; `llama3.2:3b` en comprenait 26 sur 31 (84 %) à l'ancien banc, plus court.
+
 ### Modifié
 
 - **IA locale : Qwen3.5 4B servi par LM Studio** (API compatible OpenAI) à la place de
@@ -75,4 +80,5 @@ après la mise en service (phase 9) et ces essais.
 - Oreille iOS pas encore faite (phase 10). Accès hors de la maison non prévu dans cette version.
 - Le cerveau et les oreilles doivent être mis à jour ensemble (`jarvisctl update`).
 
+[0.2.0]: https://github.com/mawena/Jarvis/releases/tag/v0.2.0
 [0.1.0]: https://github.com/mawena/Jarvis/releases/tag/v0.1.0
