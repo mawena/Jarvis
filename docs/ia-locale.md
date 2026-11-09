@@ -37,7 +37,23 @@ keep_alive = "30m"                 # déchargement après cette durée d'inactiv
 
 ### Réflexion (thinking) coupée
 
-@@REFLEXION@@
+Qwen3.5 « réfléchit » par défaut : avec le budget de 100 jetons d'une réponse vocale, tout part
+dans le raisonnement et la réponse revient **vide** (`finish_reason: length`, `content: ""`), en
+18 à 58 s. Méthodes essayées sur LM Studio 0.4.28, mesurées sur le vrai serveur (2026-11-09) :
+
+| Champ ajouté à la requête | Jetons de réflexion | Résultat |
+|---------------------------|---------------------|----------|
+| aucun | 95 sur 100 | réponse vide |
+| `reasoning_effort: "minimal"` | 95 | sans effet |
+| `chat_template_kwargs: {"enable_thinking": false}` | 95 (38 avec outils) | ignoré par LM Studio |
+| `reasoning: {"effort": "none"}` | 95 | ignoré |
+| « /no_think » dans le message | 95 | sans effet |
+| **`reasoning_effort: "none"`** | **0** | « La capitale du Pérou est Lima. » ; appel d'outil correct |
+
+**Retenu : `reasoning_effort: "none"`** (`no_thinking()` dans `llm/lmstudio.rs`). Le raisonnement,
+quand il existe, est rendu à part dans `message.reasoning_content` : le cerveau ne lit que
+`content`. Vérifier si le modèle change : `curl localhost:1234/v1/chat/completions` avec ce champ,
+`usage.completion_tokens_details.reasoning_tokens` doit valoir 0.
 
 ## Mesurer un modèle
 

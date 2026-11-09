@@ -168,9 +168,9 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 
 - [x] 13.1 Réglage `[local] provider = "lmstudio" | "ollama"` (LM Studio par défaut, port 1234, Qwen3.5 4B)
 - [x] 13.2 Backend LM Studio (API compatible OpenAI `/v1/chat/completions`, outils), tests avec serveur simulé
-- [ ] 13.3 Couper la réflexion de Qwen3.5 et le vérifier sur le vrai serveur
+- [x] 13.3 Couper la réflexion de Qwen3.5 et le vérifier sur le vrai serveur
 - [ ] 13.4 Déchargement automatique (`ttl`) et préchauffage
-- [ ] 13.5 Serveur LM Studio sans interface graphique au login (`jarvisctl` : install, status, doctor)
+- [x] 13.5 Serveur LM Studio sans interface graphique au login (`jarvisctl` : install, status, doctor)
 - [ ] 13.6 Remplacer les mentions de `llama3.2:3b` ; README, `docs/ia-locale.md`, `docs/installation.md`, CHANGELOG
 - [ ] 13.7 `scripts/check.sh` au vert (via la file d'attente), feature terminée dans `develop`
 - [ ] 13.8 Banc de `docs/ia-locale.md` refait avec Qwen3.5 4B (précision, latence, comparaison à llama3.2:3b)

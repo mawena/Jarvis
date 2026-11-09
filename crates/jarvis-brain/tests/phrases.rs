@@ -104,6 +104,10 @@ fn phrases_ia_ne_passent_pas_par_les_raccourcis() {
 
 async fn run_set(label: &str, backend: &dyn LlmBackend) {
     let tools = real_tools();
+    // Comme le cerveau au démarrage : le chargement du modèle ne compte pas dans les mesures.
+    if let Err(e) = backend.warm_up(&tools).await {
+        println!("préchauffage impossible : {e}");
+    }
     // Les outils système ne sont pas proposés à l'IA : leurs phrases passent par les raccourcis.
     let all: Vec<Phrase> = phrases()
         .into_iter()
