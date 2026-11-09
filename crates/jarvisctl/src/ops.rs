@@ -1,0 +1,3149 @@
+//! Logique des sous-commandes de `jarvisctl`.
+
+use crate::paths::{
+    BINARIES, DEFAULT_MODEL, EAR_SERVICE, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, Service,
+    VOICE_DIR, WHISPER_MODEL,
+};
+use crate::system::{OLLAMA_ADDR, System};
+use anyhow::{Context, Result, bail};
+use jarvis_protocol::{ControlRequest, ControlResponse};
+use jarvis_skills::agent::AgentSettings;
+use jarvis_skills::agent::registry::Registry;
+use std::collections::HashMap;
+use std::fs;
+use std::io::{BufRead, Write};
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+
+const KEY_VAR: &str = "ANTHROPIC_API_KEY";
+
+/// Contenu exact de l'unité systemd utilisateur.
+pub fn brain_unit() -> String {
+    "[Unit]
+Description=Jarvis — cerveau de l'assistant vocal
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/jarvis-brain
+EnvironmentFile=-%h/.config/jarvis/env
+# Données temporaires (espeak-ng de la voix) dans le dossier privé de la session, pas /tmp.
+Environment=TMPDIR=%t
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=graphical-session.target
+"
+    .to_string()
+}
+
+/// Contenu exact de l'unité systemd utilisateur de l'oreille du PC.
+///
+/// Aucune variable à importer : l'icône passe par le bus D-Bus de session
+/// (`DBUS_SESSION_BUS_ADDRESS`), le micro et le son par PipeWire (`XDG_RUNTIME_DIR`), deux
+/// variables que le gestionnaire systemd de la session fournit déjà ; l'oreille n'ouvre pas
+/// de fenêtre et n'a pas besoin de `DISPLAY`.
+pub fn ear_unit() -> String {
+    "[Unit]
+Description=Jarvis — oreille du PC (micro, mot d'éveil, icône)
+# Le cerveau n'est pas requis : sans lui, l'icône affiche « cerveau injoignable ».
+After=graphical-session.target jarvis-brain.service pipewire.service
+PartOf=graphical-session.target
+# Sans mot d'éveil enregistré (`jarvis-ear enroll`), le service est sauté, pas en échec.
+ConditionPathExists=%h/.local/share/jarvis/wakeword/jarvis.rpw
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/jarvis-ear
+# « Quitter l'oreille » sort avec le code 0 : le service reste arrêté jusqu'à la
+# prochaine session ou `jarvisctl start oreille`.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+"
+    .to_string()
+}
+
+const DEFAULT_ENV: &str =
+    "# Variables d'environnement du cerveau Jarvis (chargées par systemd).\n# ANTHROPIC_API_KEY=\n";
+
+const DEFAULT_CONFIG: &str = r#"# Configuration de Jarvis (valeurs par défaut commentées).
+# mode = "local"          # "local" ou "online"
+# address = "Monsieur"     # nom par lequel Jarvis s'adresse à vous ("" : jamais nommé)
+# sound_only_for_success = false   # vrai : une commande rapide réussie n'est confirmée que par un bip
+
+# [local]
+# url = "http://127.0.0.1:11434"
+# model = "llama3.2:3b"
+# keep_alive = "30m"
+
+# [online]
+# url = "https://api.anthropic.com"
+# model = "claude-haiku-5-5"
+# api_key_env = "ANTHROPIC_API_KEY"
+
+# [network]                    # oreilles en réseau (docs/reseau.md)
+# enabled = true
+# listen = "0.0.0.0:7341"      # gardez 0.0.0.0 : l'oreille du PC passe par 127.0.0.1
+# name = ""                    # nom annoncé ; vide : nom de la machine
+# arbiter_window_ms = 300      # fenêtre de regroupement des réveils
+"#;
+
+fn systemctl(sys: &dyn System, args: &[&str]) -> Result<crate::system::Output> {
+    let mut full = vec!["--user"];
+    full.extend_from_slice(args);
+    sys.run("systemctl", &full)
+        .context("impossible de lancer systemctl")
+}
+
+fn write_private(path: &Path, content: &str) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir)?;
+    }
+    let tmp = path.with_extension("tmp");
+    fs::write(&tmp, content)?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600))?;
+    fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Copie atomique : écrit un fichier temporaire puis renomme.
+fn copy_atomic(from: &Path, to: &Path) -> Result<()> {
+    let name = to.file_name().unwrap().to_string_lossy().into_owned();
+    let tmp = to.with_file_name(format!(".{name}.tmp"));
+    fs::copy(from, &tmp).with_context(|| format!("copie de {}", from.display()))?;
+    fs::set_permissions(&tmp, fs::Permissions::from_mode(0o755))?;
+    fs::rename(&tmp, to)?;
+    Ok(())
+}
+
+pub struct InstallOpts {
+    pub source: PathBuf,
+    pub no_build: bool,
+}
+
+fn build(sys: &dyn System, source: &Path) -> Result<()> {
+    let code = sys
+        .run_inherit(
+            "cargo",
+            &[
+                "build",
+                "--release",
+                "-p",
+                "jarvis-brain",
+                "-p",
+                "jarvis-cli",
+                "-p",
+                "jarvisctl",
+                "-p",
+                "jarvis-ear",
+            ],
+            Some(source),
+        )
+        .context("impossible de lancer cargo")?;
+    if code != 0 {
+        bail!("la compilation a échoué (code {code})");
+    }
+    Ok(())
+}
+
+fn copy_binaries(source: &Path, paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    let release = source.join("target/release");
+    fs::create_dir_all(&paths.bin_dir)?;
+    for bin in BINARIES {
+        let from = release.join(bin);
+        if !from.is_file() {
+            bail!("binaire introuvable : {}", from.display());
+        }
+        copy_atomic(&from, &paths.bin_dir.join(bin))?;
+        writeln!(out, "Installé : {}", paths.bin_dir.join(bin).display())?;
+    }
+    Ok(())
+}
+
+/// Noms de bibliothèques partagées : `libonnxruntime.so*` couvre les versions numérotées.
+fn is_shared_lib(name: &str) -> bool {
+    SHARED_LIBS.contains(&name) || name.starts_with("libonnxruntime.so")
+}
+
+/// Copie les bibliothèques de sherpa-onnx de `target/release` vers `~/.local/lib/jarvis/`.
+fn copy_libraries(source: &Path, paths: &Paths, out: &mut dyn Write) -> Result<()> {
+    let release = source.join("target/release");
+    let mut libs: Vec<PathBuf> = fs::read_dir(&release)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| is_shared_lib(&e.file_name().to_string_lossy()) && e.path().is_file())
+        .map(|e| e.path())
+        .collect();
+    libs.sort();
+    // jarvis-brain est lié dynamiquement à sherpa-onnx : sans cette bibliothèque, il ne
+    // démarre pas du tout. Mieux vaut échouer ici que d'activer un service cassé.
+    let has_c_api = libs.iter().any(|p| {
+        p.file_name()
+            .is_some_and(|n| n == "libsherpa-onnx-c-api.so")
+    });
+    if !has_c_api {
+        bail!(
+            "libsherpa-onnx-c-api.so introuvable dans {} : le cerveau ne pourrait pas démarrer. \
+             Recompile avec `cargo build --release` (ou relance sans --no-build).",
+            release.display()
+        );
+    }
+    fs::create_dir_all(&paths.lib_dir)?;
+    for from in libs {
+        let to = paths.lib_dir.join(from.file_name().unwrap());
+        copy_atomic(&from, &to)?;
+        writeln!(out, "Installé : {}", to.display())?;
+    }
+    Ok(())
+}
+
+pub fn install(
+    paths: &Paths,
+    sys: &dyn System,
+    opts: &InstallOpts,
+    out: &mut dyn Write,
+) -> Result<()> {
+    if !opts.no_build {
+        writeln!(out, "Compilation (release)…")?;
+        build(sys, &opts.source)?;
+    }
+    copy_binaries(&opts.source, paths, out)?;
+    copy_libraries(&opts.source, paths, out)?;
+    write_units(paths, out)?;
+
+    fs::create_dir_all(&paths.config_dir)?;
+    if !paths.env_file.exists() {
+        write_private(&paths.env_file, DEFAULT_ENV)?;
+        writeln!(out, "Créé : {}", paths.env_file.display())?;
+    }
+    if !paths.config_file.exists() {
+        fs::write(&paths.config_file, DEFAULT_CONFIG)?;
+        writeln!(out, "Créé : {}", paths.config_file.display())?;
+    }
+    let source = toml::Value::String(opts.source.display().to_string());
+    fs::write(&paths.install_file, format!("source = {source}\n"))?;
+
+    systemctl(sys, &["daemon-reload"])?;
+    for svc in Service::ALL {
+        let unit = svc.unit();
+        let r = systemctl(sys, &["enable", "--now", unit])?;
+        if r.code != 0 {
+            bail!(
+                "`systemctl --user enable --now {unit}` a échoué (code {})",
+                r.code
+            );
+        }
+        if svc == Service::Ear && !paths.wakeword_enrolled() {
+            writeln!(
+                out,
+                "Service {unit} activé ; il démarrera après `jarvis-ear enroll`."
+            )?;
+        } else {
+            writeln!(out, "Service {unit} activé et démarré.")?;
+        }
+    }
+
+    let in_path = sys
+        .env_var("PATH")
+        .map(|p| std::env::split_paths(&p).any(|d| d == paths.bin_dir))
+        .unwrap_or(false);
+    if !in_path {
+        writeln!(
+            out,
+            "Attention : {} n'est pas dans le PATH. Ajoutez-le à votre ~/.profile.",
+            paths.bin_dir.display()
+        )?;
+    }
+    if paths.cargo_bin.join("jarvis-brain").exists() {
+        writeln!(
+            out,
+            "Attention : un autre jarvis-brain existe dans {}. Supprimez-le avec : cargo uninstall jarvis-brain jarvis-cli",
+            paths.cargo_bin.display()
+        )?;
+    }
+    writeln!(
+        out,
+        "Clé Claude (optionnelle) : jarvisctl set-api-key ; vérification : jarvisctl doctor"
+    )?;
+    Ok(())
+}
+
+/// Lit `source` dans install.toml.
+pub fn installed_source(paths: &Paths) -> Result<PathBuf> {
+    let text = fs::read_to_string(&paths.install_file).context(
+        "Jarvis n'est pas installé (install.toml introuvable) : lancez `jarvisctl install`",
+    )?;
+    let v: toml::Value = toml::from_str(&text).context("install.toml invalide")?;
+    v.get("source")
+        .and_then(|s| s.as_str())
+        .map(PathBuf::from)
+        .context("install.toml : clé `source` absente")
+}
+
+/// Écrit les unités systemd dont le contenu a changé ; renvoie les services dont l'unité
+/// vient d'être créée (absente avant), et si au moins une unité a été écrite.
+fn write_units(paths: &Paths, out: &mut dyn Write) -> Result<(Vec<Service>, bool)> {
+    let mut created = Vec::new();
+    let mut written = false;
+    for svc in Service::ALL {
+        let path = svc.unit_path(paths);
+        let content = svc.unit_content();
+        let existing = fs::read_to_string(path).ok();
+        if existing.as_deref() == Some(content.as_str()) {
+            continue;
+        }
+        if existing.is_none() {
+            created.push(svc);
+        }
+        fs::create_dir_all(path.parent().unwrap())?;
+        fs::write(path, content)?;
+        writeln!(out, "Unité écrite : {}", path.display())?;
+        written = true;
+    }
+    Ok((created, written))
+}
+
+/// Registre des tâches du cerveau (`XDG_STATE_HOME` compris).
+fn tasks_dir(paths: &Paths, sys: &dyn System) -> PathBuf {
+    paths.tasks_dir(sys.env_var("XDG_STATE_HOME").as_deref())
+}
+
+/// Prévient, sans bloquer, que les tâches de l'agent en cours seront interrompues
+/// (le registre du cerveau est sur disque ; les processus, eux, meurent avec le service).
+/// Cerveau inactif : un enregistrement `Running` est le reste d'un arrêt brutal,
+/// rien ne tourne.
+fn warn_running_tasks(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let running = Registry::running_on_disk(&tasks_dir(paths, sys));
+    if running == 0 {
+        return Ok(());
+    }
+    let active = systemctl(sys, &["is-active", SERVICE])?;
+    if active.stdout.trim() != "active" {
+        return Ok(());
+    }
+    match running {
+        0 => {}
+        1 => writeln!(
+            out,
+            "Attention : 1 tâche d'agent en cours sera interrompue."
+        )?,
+        n => writeln!(
+            out,
+            "Attention : {n} tâches d'agent en cours seront interrompues."
+        )?,
+    }
+    Ok(())
+}
+
+pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    warn_running_tasks(paths, sys, out)?;
+    let source = installed_source(paths)?;
+    writeln!(out, "Compilation (release) dans {}…", source.display())?;
+    build(sys, &source)?;
+    copy_binaries(&source, paths, out)?;
+    copy_libraries(&source, paths, out)?;
+    // Une installation antérieure à l'oreille en service n'a que l'unité du cerveau.
+    let (created, written) = write_units(paths, out)?;
+    if written {
+        systemctl(sys, &["daemon-reload"])?;
+    }
+    // Une unité déjà là garde son choix d'activation (`jarvisctl disable oreille`).
+    for svc in created {
+        let r = systemctl(sys, &["enable", svc.unit()])?;
+        if r.code != 0 {
+            bail!(
+                "`systemctl --user enable {}` a échoué (code {})",
+                svc.unit(),
+                r.code
+            );
+        }
+        writeln!(out, "Service {} activé au démarrage.", svc.unit())?;
+    }
+    let r = systemctl(sys, &["restart", SERVICE])?;
+    if r.code != 0 {
+        bail!("le redémarrage du cerveau a échoué (code {})", r.code);
+    }
+    let r = systemctl(sys, &["restart", EAR_SERVICE])?;
+    if r.code != 0 {
+        bail!("le redémarrage de l'oreille a échoué (code {})", r.code);
+    }
+    writeln!(out, "Mise à jour terminée, cerveau et oreille redémarrés.")?;
+    if !paths.wakeword_enrolled() {
+        writeln!(
+            out,
+            "L'oreille démarrera après l'enregistrement du mot d'éveil : `jarvis-ear enroll`."
+        )?;
+    }
+    Ok(())
+}
+
+pub fn uninstall(
+    paths: &Paths,
+    sys: &dyn System,
+    purge: bool,
+    yes: bool,
+    input: &mut dyn BufRead,
+    out: &mut dyn Write,
+) -> Result<()> {
+    // L'oreille d'abord : elle dépend du cerveau.
+    for svc in Service::ALL.into_iter().rev() {
+        let _ = systemctl(sys, &["stop", svc.unit()]);
+        let _ = systemctl(sys, &["disable", svc.unit()]);
+        let path = svc.unit_path(paths);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    let _ = systemctl(sys, &["daemon-reload"]);
+    writeln!(
+        out,
+        "Services du cerveau et de l'oreille arrêtés, désactivés et unités supprimées."
+    )?;
+
+    // jarvisctl en dernier.
+    for bin in BINARIES {
+        let p = paths.bin_dir.join(bin);
+        if p.exists() {
+            fs::remove_file(&p)?;
+        }
+    }
+    writeln!(out, "Binaires supprimés de {}.", paths.bin_dir.display())?;
+    if paths.lib_dir.exists() {
+        fs::remove_dir_all(&paths.lib_dir)?;
+        writeln!(
+            out,
+            "Bibliothèques supprimées de {}.",
+            paths.lib_dir.display()
+        )?;
+    }
+
+    if purge {
+        let dirs = [&paths.config_dir, &paths.state_dir, &paths.data_dir];
+        let confirmed = yes || {
+            writeln!(out, "Supprimer définitivement :")?;
+            for d in dirs {
+                writeln!(out, "  {}", d.display())?;
+            }
+            write!(out, "Confirmer ? [o/N] ")?;
+            out.flush()?;
+            let mut line = String::new();
+            input.read_line(&mut line)?;
+            matches!(line.trim().to_lowercase().as_str(), "o" | "oui")
+        };
+        if confirmed {
+            for d in dirs {
+                if d.exists() {
+                    fs::remove_dir_all(d)?;
+                }
+            }
+            writeln!(out, "Configuration, état et données supprimés.")?;
+        } else {
+            writeln!(out, "Purge annulée : configuration conservée.")?;
+        }
+    } else {
+        writeln!(out, "Configuration conservée (--purge pour l'effacer).")?;
+    }
+    writeln!(out, "Ollama et ses modèles n'ont pas été touchés.")?;
+    Ok(())
+}
+
+/// Services visés : celui indiqué, sinon le cerveau et l'oreille.
+pub fn targets(service: Option<Service>) -> Vec<Service> {
+    match service {
+        Some(s) => vec![s],
+        None => Service::ALL.to_vec(),
+    }
+}
+
+/// Verbe systemctl simple sur chaque service visé (arrêt : l'oreille d'abord) ; renvoie
+/// le premier code de sortie non nul, sinon 0.
+pub fn service_verb(
+    paths: &Paths,
+    sys: &dyn System,
+    verb: &str,
+    services: &[Service],
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let (done, label) = match verb {
+        "start" => ("démarré", "démarrer"),
+        "stop" => ("arrêté", "arrêter"),
+        "restart" => ("redémarré", "redémarrer"),
+        "enable" => ("activé au démarrage", "activer"),
+        _ => ("désactivé au démarrage", "désactiver"),
+    };
+    if matches!(verb, "stop" | "restart") && services.contains(&Service::Brain) {
+        warn_running_tasks(paths, sys, out)?;
+    }
+    let mut order = services.to_vec();
+    if matches!(verb, "stop" | "disable") {
+        order.reverse();
+    }
+    let mut code = 0;
+    for svc in order {
+        let unit = svc.unit();
+        // Installation antérieure à l'oreille en service : on ne bloque pas le cerveau.
+        if svc == Service::Ear && services.len() > 1 && !paths.ear_unit_path.exists() {
+            writeln!(
+                out,
+                "Service {unit} non installé, ignoré : lancez `jarvisctl update`."
+            )?;
+            continue;
+        }
+        let r = systemctl(sys, &[verb, unit])?;
+        if r.code != 0 {
+            writeln!(out, "Impossible de {label} {unit} (code {}).", r.code)?;
+            if code == 0 {
+                code = r.code;
+            }
+        } else if svc == Service::Ear
+            && matches!(verb, "start" | "restart")
+            && !paths.wakeword_enrolled()
+        {
+            // `ConditionPathExists` : systemctl réussit mais le service est sauté.
+            writeln!(
+                out,
+                "Service {unit} non démarré : aucun mot d'éveil enregistré, lancez `jarvis-ear enroll`."
+            )?;
+        } else {
+            writeln!(out, "Service {unit} {done}.")?;
+        }
+    }
+    Ok(code)
+}
+
+pub fn parse_show(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|l| l.split_once('='))
+        .map(|(k, v)| (k.trim().to_string(), v.trim().to_string()))
+        .collect()
+}
+
+/// Heure `HH:MM` extraite d'un `ActiveEnterTimestamp` systemd.
+fn since(ts: &str) -> Option<&str> {
+    ts.split_whitespace()
+        .find(|t| t.matches(':').count() == 2)
+        .map(|t| &t[..5])
+}
+
+fn api_key_set(paths: &Paths) -> bool {
+    fs::read_to_string(&paths.env_file)
+        .map(|t| {
+            t.lines().any(|l| {
+                l.trim()
+                    .strip_prefix(KEY_VAR)
+                    .and_then(|r| r.trim_start().strip_prefix('='))
+                    .is_some_and(|v| !v.trim().trim_matches(['"', '\'']).is_empty())
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Chemin du modèle `[section] model_path` de la configuration, `~` développé ;
+/// sinon le fichier par défaut dans `~/.local/share/jarvis/models/`.
+fn model_path(paths: &Paths, section: &str, default_file: &str) -> PathBuf {
+    configured_path(paths, section, "model_path", default_file)
+}
+
+/// Comme [`model_path`], pour n'importe quelle clé (`[tts] model_dir`).
+fn configured_path(paths: &Paths, section: &str, key: &str, default_file: &str) -> PathBuf {
+    let configured = fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        .and_then(|v| v.get(section)?.get(key)?.as_str().map(PathBuf::from));
+    match configured {
+        Some(p) => match p.strip_prefix("~") {
+            Ok(rest) => paths.home.join(rest),
+            Err(_) => p,
+        },
+        None => paths.data_dir.join("models").join(default_file),
+    }
+}
+
+fn local_model(paths: &Paths) -> String {
+    fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        .and_then(|v| v.get("local")?.get("model")?.as_str().map(String::from))
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+fn model_names(json: &str, key: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.get(key)?.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|m| m.get("name")?.as_str().map(String::from))
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
+}
+
+/// État systemd d'une unité : (actif, détail entre parenthèses).
+fn unit_state(sys: &dyn System, unit: &str) -> Result<(bool, String)> {
+    let r = systemctl(
+        sys,
+        &[
+            "show",
+            unit,
+            "--property=ActiveState,SubState,MainPID,ActiveEnterTimestamp",
+        ],
+    )?;
+    let props = parse_show(&r.stdout);
+    let get = |k: &str| props.get(k).map(String::as_str).unwrap_or("");
+    if get("ActiveState") == "active" {
+        let mut detail = format!("pid {}", get("MainPID"));
+        if let Some(t) = since(get("ActiveEnterTimestamp")) {
+            detail.push_str(&format!(", depuis {t}"));
+        }
+        Ok((true, detail))
+    } else {
+        let state = match get("ActiveState") {
+            "" => "inconnu",
+            s => s,
+        };
+        Ok((false, format!("{state}, {}", get("SubState"))))
+    }
+}
+
+/// Affiche l'état des services visés. Code 3 si le cerveau est inactif (ou l'oreille,
+/// quand elle seule est visée : l'oreille est facultative), 0 sinon.
+pub fn status(
+    paths: &Paths,
+    sys: &dyn System,
+    services: &[Service],
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let brain = services.contains(&Service::Brain);
+    let mut code = 0;
+    let mut model = local_model(paths);
+    if brain {
+        let (active, detail) = unit_state(sys, SERVICE)?;
+        if active {
+            writeln!(out, "Cerveau   : actif ({detail})")?;
+            match sys.brain_status() {
+                Some((mode, version, reported)) => {
+                    if !reported.is_empty() {
+                        model = reported;
+                    }
+                    writeln!(out, "Mode      : {mode} ({model})")?;
+                    writeln!(out, "Version   : {version}")?;
+                }
+                None => writeln!(out, "Mode      : cerveau injoignable sur son socket")?,
+            }
+        } else {
+            writeln!(out, "Cerveau   : inactif ({detail})")?;
+            code = 3;
+        }
+    }
+    if services.contains(&Service::Ear) {
+        let active = ear_status(paths, sys, out)?;
+        if !brain && !active {
+            code = 3;
+        }
+    }
+    if !brain {
+        return Ok(code);
+    }
+
+    match sys.http_get(OLLAMA_ADDR, "/api/version") {
+        Some(_) => {
+            let loaded = sys
+                .http_get(OLLAMA_ADDR, "/api/ps")
+                .map(|b| model_names(&b, "models").contains(&model))
+                .unwrap_or(false);
+            let state = if loaded {
+                "modèle chargé"
+            } else {
+                "modèle non chargé"
+            };
+            writeln!(out, "Ollama    : joignable, {state}")?;
+        }
+        None => writeln!(out, "Ollama    : injoignable")?,
+    }
+    let key = if api_key_set(paths) {
+        "présente"
+    } else {
+        "absente"
+    };
+    writeln!(out, "Clé Claude: {key}")?;
+    Ok(code)
+}
+
+/// Ligne de l'oreille ; renvoie vrai si son service est actif.
+fn ear_status(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<bool> {
+    let (active, detail) = unit_state(sys, EAR_SERVICE)?;
+    if active {
+        writeln!(out, "Oreille   : active ({detail})")?;
+    } else if !paths.ear_unit_path.exists() {
+        writeln!(
+            out,
+            "Oreille   : service non installé (lancez `jarvisctl update`)"
+        )?;
+    } else if !paths.wakeword_enrolled() {
+        writeln!(
+            out,
+            "Oreille   : non démarrée, aucun mot d'éveil enregistré (lancez `jarvis-ear enroll`)"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "Oreille   : inactive ({detail}) ; relance : `jarvisctl start oreille`"
+        )?;
+    }
+    Ok(active)
+}
+
+/// Affiche les vérifications ; renvoie 1 si une vérification obligatoire échoue.
+pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i32> {
+    let mut failures = 0;
+    let mut check = |out: &mut dyn Write, ok: bool, label: &str, hint: &str| -> Result<()> {
+        if ok {
+            writeln!(out, "✓ {label}")?;
+        } else {
+            failures += 1;
+            writeln!(out, "✗ {label} — {hint}")?;
+        }
+        Ok(())
+    };
+
+    let missing: Vec<&str> = BINARIES
+        .into_iter()
+        .filter(|b| !paths.bin_dir.join(b).is_file())
+        .collect();
+    check(
+        out,
+        missing.is_empty(),
+        &format!("Binaires dans {}", paths.bin_dir.display()),
+        &format!(
+            "manquants : {} ; lancez `jarvisctl install`",
+            missing.join(", ")
+        ),
+    )?;
+    check(
+        out,
+        paths.unit_path.is_file(),
+        "Unité systemd du cerveau installée",
+        "lancez `jarvisctl install`",
+    )?;
+    let enabled = systemctl(sys, &["is-enabled", SERVICE])?;
+    check(
+        out,
+        enabled.stdout.trim() == "enabled",
+        "Cerveau activé au démarrage",
+        "lancez `jarvisctl enable cerveau`",
+    )?;
+    let active = systemctl(sys, &["is-active", SERVICE])?;
+    check(
+        out,
+        active.stdout.trim() == "active",
+        "Cerveau actif",
+        "lancez `jarvisctl start cerveau` puis `jarvisctl logs`",
+    )?;
+
+    let ollama = sys
+        .run("ollama", &["--version"])
+        .map(|o| o.code == 0)
+        .unwrap_or(false);
+    check(
+        out,
+        ollama,
+        "Ollama installé",
+        "installez-le : https://ollama.com/download",
+    )?;
+    let tags = sys.http_get(OLLAMA_ADDR, "/api/tags");
+    check(
+        out,
+        tags.is_some(),
+        "Ollama joignable",
+        "lancez `systemctl start ollama` ou `ollama serve`",
+    )?;
+    let pulled = tags
+        .map(|b| model_names(&b, "models").iter().any(|n| n == DEFAULT_MODEL))
+        .unwrap_or(false);
+    check(
+        out,
+        pulled,
+        &format!("Modèle {DEFAULT_MODEL} téléchargé"),
+        &format!("lancez `ollama pull {DEFAULT_MODEL}`"),
+    )?;
+
+    for (tool, pkg) in [
+        ("wmctrl", "wmctrl"),
+        ("xdotool", "xdotool"),
+        ("wpctl", "wireplumber"),
+        ("gio", "libglib2.0-bin"),
+    ] {
+        let found = sys
+            .run("sh", &["-c", &format!("command -v {tool}")])
+            .map(|o| o.code == 0)
+            .unwrap_or(false);
+        check(
+            out,
+            found,
+            &format!("{tool} présent"),
+            &format!("sudo apt install {pkg}"),
+        )?;
+    }
+
+    let env = systemctl(sys, &["show-environment"])?;
+    check(
+        out,
+        env.stdout.lines().any(|l| l.starts_with("DISPLAY=")),
+        "DISPLAY connu du gestionnaire systemd utilisateur",
+        "lancez `systemctl --user import-environment DISPLAY XAUTHORITY` depuis une session graphique",
+    )?;
+
+    match fs::metadata(&paths.env_file) {
+        Ok(m) => check(
+            out,
+            m.permissions().mode() & 0o077 == 0,
+            "Permissions du fichier env (0600)",
+            &format!("lancez `chmod 600 {}`", paths.env_file.display()),
+        )?,
+        Err(_) => check(
+            out,
+            false,
+            "Fichier env présent",
+            "lancez `jarvisctl install`",
+        )?,
+    }
+
+    if api_key_set(paths) {
+        writeln!(out, "✓ Clé API Claude définie")?;
+    } else {
+        writeln!(
+            out,
+            "! Clé API Claude absente — optionnelle (mode en ligne) : `jarvisctl set-api-key`"
+        )?;
+    }
+    ear_diagnostics(paths, sys, out)?;
+    network_diagnostics(paths, sys, out)?;
+    crate::searx::diagnostics(paths, sys, out)?;
+    agent_diagnostics(paths, sys, out)?;
+    Ok(if failures > 0 { 1 } else { 0 })
+}
+
+/// Options de `claude` dont dépend la ligne de commande de l'agent.
+const CLAUDE_OPTIONS: [&str; 12] = [
+    "--restricted",
+    "--tools",
+    "--strict-mcp-config",
+    "--mcp-config",
+    "--permission-mode",
+    "--permission-prompts",
+    "--settings",
+    "--session-id",
+    "--append-system-prompt",
+    "--disallowedTools",
+    "--verbose",
+    "stream-json",
+];
+
+/// `opt` apparaît comme un mot entier de l'aide (« --tools » n'est pas trouvé
+/// dans « --disallowed-tools »).
+fn help_has(help: &str, opt: &str) -> bool {
+    help.split(|c: char| c.is_whitespace() || ",;()[]\"'=<>".contains(c))
+        .any(|word| word == opt)
+}
+
+/// Section `[agent]` de la configuration, `~/` développé depuis `paths.home`.
+fn agent_settings(paths: &Paths) -> Result<AgentSettings, String> {
+    let section = match fs::read_to_string(&paths.config_file) {
+        Ok(text) => toml::from_str::<toml::Table>(&text)
+            .map_err(|e| e.message().to_string())?
+            .remove("agent"),
+        Err(_) => None,
+    };
+    let mut s: AgentSettings = match section {
+        Some(v) => v
+            .try_into()
+            .map_err(|e: toml::de::Error| e.message().to_string())?,
+        None => AgentSettings::default(),
+    };
+    let home = |p: &Path| match p.strip_prefix("~") {
+        Ok(rest) => paths.home.join(rest),
+        Err(_) => p.to_path_buf(),
+    };
+    s.claude_path = home(&s.claude_path);
+    for p in &mut s.projects {
+        p.path = home(&p.path);
+    }
+    Ok(s)
+}
+
+fn is_executable(p: &Path) -> bool {
+    fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Agent de code : avertissements seulement (le reste de Jarvis marche sans).
+fn agent_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let settings = match agent_settings(paths) {
+        Ok(s) => s,
+        Err(e) => {
+            writeln!(
+                out,
+                "! Section [agent] illisible ({e}) — corrigez {}",
+                paths.config_file.display()
+            )?;
+            return Ok(());
+        }
+    };
+    if !settings.enabled {
+        writeln!(
+            out,
+            "! Agent de code désactivé — optionnel : `enabled = true` dans la section [agent] de config.toml"
+        )?;
+        return Ok(());
+    }
+
+    let claude = &settings.claude_path;
+    if is_executable(claude) {
+        let claude = claude.to_string_lossy();
+        let version = sys
+            .run(&claude, &["--version"])
+            .ok()
+            .filter(|o| o.code == 0)
+            .and_then(|o| o.stdout.split_whitespace().next().map(String::from));
+        match version {
+            Some(v) => writeln!(out, "✓ Claude Code présent ({v})")?,
+            None => writeln!(out, "✓ Claude Code présent")?,
+        }
+        let help = sys
+            .run(&claude, &["--help"])
+            .ok()
+            .filter(|o| o.code == 0)
+            .map(|o| o.stdout);
+        match help {
+            Some(help) => {
+                let missing: Vec<&str> = CLAUDE_OPTIONS
+                    .into_iter()
+                    .filter(|opt| !help_has(&help, opt))
+                    .collect();
+                if missing.is_empty() {
+                    writeln!(out, "✓ Options requises de Claude Code présentes")?;
+                } else {
+                    writeln!(
+                        out,
+                        "! Options absentes de `claude --help` : {} — mettez Claude Code à jour (`claude update`)",
+                        missing.join(", ")
+                    )?;
+                }
+            }
+            None => writeln!(
+                out,
+                "! `claude --help` a échoué — vérifiez l'installation de Claude Code"
+            )?,
+        }
+    } else {
+        writeln!(
+            out,
+            "! Claude Code introuvable ({}) — optionnel (agent de code) : installez Claude Code ou corrigez `claude_path` dans [agent]",
+            claude.display()
+        )?;
+    }
+
+    match settings.projects.len() {
+        0 => writeln!(
+            out,
+            "! Aucun projet pour l'agent de code — ajoutez un [[agent.projects]] dans config.toml (voir docs/agent.md)"
+        )?,
+        1 => writeln!(out, "✓ 1 projet pour l'agent de code")?,
+        n => writeln!(out, "✓ {n} projets pour l'agent de code")?,
+    }
+    for p in &settings.projects {
+        project_diagnostics(sys, p, out)?;
+    }
+
+    let notify = sys
+        .run("sh", &["-c", "command -v notify-send"])
+        .is_ok_and(|o| o.code == 0);
+    if notify {
+        writeln!(out, "✓ notify-send présent")?;
+    } else {
+        writeln!(
+            out,
+            "! notify-send absent — optionnel (fin des tâches de l'agent) : sudo apt install libnotify-bin"
+        )?;
+    }
+    sandbox_diagnostics(sys, out)
+}
+
+/// Bac à sable de Claude Code sous Linux : `bwrap` et `socat`, et des espaces de
+/// noms utilisables (Ubuntu 24.04 les restreint par AppArmor).
+fn sandbox_diagnostics(sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let found = |tool: &str| {
+        sys.run("sh", &["-c", &format!("command -v {tool}")])
+            .is_ok_and(|o| o.code == 0)
+    };
+    let bwrap = found("bwrap");
+    if !bwrap {
+        writeln!(
+            out,
+            "! bwrap absent — bac à sable de l'agent : sudo apt install bubblewrap"
+        )?;
+    }
+    if found("socat") {
+        writeln!(out, "✓ socat présent")?;
+    } else {
+        writeln!(
+            out,
+            "! socat absent — bac à sable de l'agent : sudo apt install socat"
+        )?;
+    }
+    if !bwrap {
+        return Ok(());
+    }
+    let works = sys
+        .run("bwrap", &["--ro-bind", "/", "/", "--unshare-net", "true"])
+        .is_ok_and(|o| o.code == 0);
+    if works {
+        writeln!(
+            out,
+            "✓ bwrap présent et utilisable (bac à sable de l'agent)"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "! bwrap ne peut pas isoler l'agent (espaces de noms refusés, AppArmor sous Ubuntu 24.04) — installez ou activez un profil AppArmor pour /usr/bin/bwrap (règle `userns,`), puis `sudo systemctl reload apparmor`"
+        )?;
+    }
+    Ok(())
+}
+
+/// Un projet : dossier, dépôt git, branche de base (celle de `base`, sinon de git flow,
+/// sinon `develop`, comme l'agent).
+fn project_diagnostics(
+    sys: &dyn System,
+    p: &jarvis_skills::agent::Project,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let (name, dir) = (&p.name, p.path.display());
+    if !p.path.is_dir() {
+        writeln!(
+            out,
+            "! Projet {name} : dossier introuvable ({dir}) — corrigez `path` dans [[agent.projects]]"
+        )?;
+        return Ok(());
+    }
+    let dir_s = p.path.to_string_lossy();
+    let git = |args: &[&str]| {
+        let mut full = vec!["-C", &dir_s];
+        full.extend_from_slice(args);
+        sys.run("git", &full).ok()
+    };
+    if !git(&["rev-parse", "--git-dir"]).is_some_and(|o| o.code == 0) {
+        writeln!(out, "! Projet {name} : pas un dépôt git ({dir})")?;
+        return Ok(());
+    }
+    let base = match &p.base {
+        Some(b) => b.clone(),
+        None => git(&["config", "--get", "gitflow.branch.develop"])
+            .filter(|o| o.code == 0)
+            .map(|o| o.stdout.trim().to_string())
+            .filter(|b| !b.is_empty())
+            .unwrap_or_else(|| "develop".into()),
+    };
+    let head = format!("refs/heads/{base}");
+    if git(&["rev-parse", "--verify", "--quiet", &head]).is_some_and(|o| o.code == 0) {
+        writeln!(out, "✓ Projet {name} ({dir}, branche {base})")?;
+    } else {
+        writeln!(
+            out,
+            "! Projet {name} : branche de base {base} absente ({dir}) — `git flow init` ou réglez `base`"
+        )?;
+    }
+    Ok(())
+}
+
+/// Oreille du PC : avertissements seulement (le cerveau fonctionne sans).
+fn ear_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let has_lib = |lib: &str| {
+        fs::read_dir(&paths.lib_dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n == lib || (lib == "libonnxruntime.so" && n.starts_with("libonnxruntime.so"))
+            })
+    };
+    let missing: Vec<&str> = SHARED_LIBS.into_iter().filter(|l| !has_lib(l)).collect();
+    let items: [(bool, String, String); 6] = [
+        (
+            missing.is_empty(),
+            format!("Bibliothèques sherpa-onnx dans {}", paths.lib_dir.display()),
+            format!(
+                "manquantes : {} ; lancez `jarvisctl install` ou `jarvisctl update`",
+                missing.join(", ")
+            ),
+        ),
+        (
+            model_path(paths, "stt", WHISPER_MODEL).is_file(),
+            "Modèle Whisper".into(),
+            "lancez `scripts/download-models.sh all`".into(),
+        ),
+        (
+            model_path(paths, "speaker", SPEAKER_MODEL).is_file(),
+            "Modèle d'empreinte vocale".into(),
+            "lancez `scripts/download-models.sh speaker`".into(),
+        ),
+        (
+            voice_installed(&configured_path(paths, "tts", "model_dir", VOICE_DIR)),
+            "Voix de Jarvis".into(),
+            "lancez `scripts/download-models.sh voice`".into(),
+        ),
+        (
+            paths.wakeword_enrolled(),
+            "Mot d'éveil enregistré".into(),
+            "lancez `jarvis-ear enroll`".into(),
+        ),
+        (
+            paths.data_dir.join("voiceprint/charles.json").is_file(),
+            "Empreinte vocale enregistrée".into(),
+            "lancez `jarvis-ear enroll`".into(),
+        ),
+    ];
+    for (ok, label, hint) in items {
+        if ok {
+            writeln!(out, "✓ {label}")?;
+        } else {
+            writeln!(out, "! {label} absent — optionnel (oreille du PC) : {hint}")?;
+        }
+    }
+    ear_service_diagnostics(paths, sys, out)
+}
+
+/// Service de l'oreille : installé, activé, actif (ou sauté faute de mot d'éveil).
+fn ear_service_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let warn = |out: &mut dyn Write, line: &str| -> Result<()> {
+        writeln!(out, "! {line}")?;
+        Ok(())
+    };
+    if !paths.ear_unit_path.is_file() {
+        return warn(
+            out,
+            "Service de l'oreille non installé — optionnel (oreille du PC) : lancez `jarvisctl update`",
+        );
+    }
+    writeln!(out, "✓ Service de l'oreille installé")?;
+    let enabled = systemctl(sys, &["is-enabled", EAR_SERVICE])?;
+    if enabled.stdout.trim() == "enabled" {
+        writeln!(out, "✓ Oreille activée au démarrage")?;
+    } else {
+        warn(
+            out,
+            "Oreille non activée au démarrage — optionnel (oreille du PC) : lancez `jarvisctl enable oreille`",
+        )?;
+    }
+    let active = systemctl(sys, &["is-active", EAR_SERVICE])?;
+    if active.stdout.trim() == "active" {
+        writeln!(out, "✓ Oreille active")?;
+    } else if !paths.wakeword_enrolled() {
+        warn(
+            out,
+            "Oreille non démarrée : pas de mot d'éveil enregistré — lancez `jarvis-ear enroll`",
+        )?;
+    } else {
+        warn(
+            out,
+            "Oreille inactive — optionnel (oreille du PC) : lancez `jarvisctl start oreille` puis `jarvisctl logs --oreille`",
+        )?;
+    }
+    Ok(())
+}
+
+/// Configuration du pare-feu ufw (lisible sans droits).
+const UFW_CONF: &str = "/etc/ufw/ufw.conf";
+
+/// Section `[network]` du cerveau : (activé, adresse d'écoute).
+fn network_settings(paths: &Paths) -> (bool, String) {
+    let section = fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
+        .and_then(|v| v.get("network").cloned());
+    let get = |key: &str| section.as_ref().and_then(|s| s.get(key).cloned());
+    let enabled = get("enabled").and_then(|v| v.as_bool()).unwrap_or(true);
+    let listen = get("listen")
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_else(|| format!("0.0.0.0:{}", jarvis_protocol::ear::DEFAULT_PORT));
+    (enabled, listen)
+}
+
+/// Nombre d'oreilles du registre (`ears.toml`) ; fichier absent : 0.
+fn registry_count(path: &Path) -> Result<usize, String> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e.to_string()),
+    };
+    let value = toml::from_str::<toml::Value>(&text).map_err(|e| e.message().to_string())?;
+    match value.get("ear") {
+        None => Ok(0),
+        Some(toml::Value::Array(ears)) if ears.iter().all(toml::Value::is_table) => Ok(ears.len()),
+        Some(_) => Err("`ear` doit être une liste de tables [[ear]]".into()),
+    }
+}
+
+/// Adresses locales (sans le port) qui écoutent sur `port`, d'après `ss -Hltn`.
+fn listening_hosts(ss: &str, port: u16) -> Vec<String> {
+    let mut hosts: Vec<String> = ss
+        .lines()
+        .filter_map(|l| l.split_whitespace().nth(3))
+        .filter_map(|local| local.rsplit_once(':'))
+        .filter(|(_, p)| p.parse() == Ok(port))
+        .map(|(host, _)| host.trim_matches(['[', ']']).to_string())
+        .collect();
+    hosts.dedup();
+    hosts
+}
+
+/// Ligne d'information pour une oreille distante appairée mais déconnectée.
+fn disconnected_ear_line(name: &str, platform: &str) -> String {
+    let hint = if platform == "android" {
+        "ouvrez l'appli Jarvis sur le téléphone"
+    } else {
+        "vérifiez que la machine est allumée et que l'oreille y tourne"
+    };
+    format!("· Oreille « {name} » ({platform}) déconnectée — {hint}")
+}
+
+/// Personnes et rôles : annuaire lu par le cerveau, puis oreilles sans personne.
+fn people_diagnostics(
+    sys: &dyn System,
+    ears: &[jarvis_protocol::EarSummary],
+    out: &mut dyn Write,
+) -> Result<()> {
+    match sys.brain_request(&ControlRequest::PersonList) {
+        Some(ControlResponse::People { people, degraded }) => {
+            if let Some(reason) = degraded {
+                writeln!(
+                    out,
+                    "! Annuaire des personnes illisible ({reason}) — mode dégradé : seule votre \
+                     voix reconnue et le texte tapé ont des droits ; corrigez ou supprimez le \
+                     fichier indiqué"
+                )?;
+            } else {
+                if let [only] = people.as_slice() {
+                    let roles = match sys.brain_request(&ControlRequest::RoleList) {
+                        Some(ControlResponse::Roles { roles }) => {
+                            let custom = roles.iter().filter(|r| !r.builtin).count();
+                            match custom {
+                                0 => ", 1 rôle intégré".to_string(),
+                                1 => ", 1 rôle intégré, 1 rôle créé".to_string(),
+                                n => format!(", 1 rôle intégré, {n} rôles créés"),
+                            }
+                        }
+                        _ => String::new(),
+                    };
+                    writeln!(
+                        out,
+                        "✓ Personnes et rôles : 1 personne ({}, {}){roles}",
+                        only.name, only.role
+                    )?;
+                } else {
+                    let list: Vec<String> = people
+                        .iter()
+                        .map(|p| format!("{} {}", p.name, p.role))
+                        .collect();
+                    writeln!(out, "✓ Personnes : {} ({})", people.len(), list.join(", "))?;
+                }
+                // En mode dégradé toutes les oreilles sont inconnues : on ne les répète pas.
+                for e in ears.iter().filter(|e| !e.local && e.person.is_none()) {
+                    writeln!(out, "! Oreille « {} » sans personne reconnue", e.name)?;
+                }
+            }
+        }
+        Some(ControlResponse::Error { message }) if message == "requête invalide" => {
+            writeln!(out, "· Cerveau d'avant les personnes et les rôles")?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Réseau des oreilles : avertissements seulement (le cerveau tourne sans, mais
+/// l'oreille du PC passe aussi par lui).
+fn network_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let (enabled, listen) = network_settings(paths);
+    if !enabled {
+        writeln!(
+            out,
+            "! Réseau des oreilles désactivé ([network] enabled = false) — aucune oreille, \
+             pas même celle du PC, ne peut parler au cerveau"
+        )?;
+        return Ok(());
+    }
+
+    // Identité TLS.
+    let tls = paths.data_dir.join("tls");
+    let (cert, key) = (tls.join("brain.crt.der"), tls.join("brain.key.der"));
+    match fs::read(&cert) {
+        Ok(der) => {
+            let short = jarvis_protocol::Fingerprint::of_der(&der).short();
+            writeln!(out, "✓ Certificat du cerveau (empreinte {short})")?;
+            match fs::metadata(&key) {
+                Ok(m) if m.permissions().mode() & 0o077 != 0 => writeln!(
+                    out,
+                    "! Clé privée du cerveau lisible par d'autres — lancez `chmod 600 {}`",
+                    key.display()
+                )?,
+                Ok(_) => {}
+                Err(_) => writeln!(
+                    out,
+                    "! Clé privée du cerveau absente — réseau des oreilles désactivé ; \
+                     recréer l'identité oblige à tout réappairer (voir docs/reseau.md)"
+                )?,
+            }
+        }
+        Err(_) => writeln!(
+            out,
+            "! Certificat du cerveau absent — créé au démarrage du cerveau : \
+             `jarvisctl restart cerveau`"
+        )?,
+    }
+
+    // Oreilles appairées : registre, puis connexions d'après le cerveau.
+    let registry = paths.data_dir.join("ears.toml");
+    let count = registry_count(&registry);
+    if let Err(e) = &count {
+        writeln!(
+            out,
+            "! Registre des oreilles illisible ({e}) — réseau des oreilles désactivé : \
+             corrigez ou supprimez {} (toutes les oreilles à réappairer)",
+            registry.display()
+        )?;
+    }
+    let none = "! Aucune oreille appairée — l'oreille du PC s'appaire seule à son démarrage ; \
+                une autre : `jarvis pair` (voir docs/reseau.md)";
+    let ears_reply = sys.brain_request(&ControlRequest::ListEars);
+    let known_ears: Vec<jarvis_protocol::EarSummary> = match &ears_reply {
+        Some(ControlResponse::Ears { ears }) => ears.clone(),
+        _ => Vec::new(),
+    };
+    match ears_reply {
+        Some(ControlResponse::Ears { ears }) if ears.is_empty() => writeln!(out, "{none}")?,
+        Some(ControlResponse::Ears { ears }) => {
+            let connected: Vec<&str> = ears
+                .iter()
+                .filter(|e| e.connected)
+                .map(|e| e.name.as_str())
+                .collect();
+            let detail = if connected.is_empty() {
+                "aucune connectée".to_string()
+            } else {
+                format!("connectées : {}", connected.join(", "))
+            };
+            writeln!(out, "✓ Oreilles appairées : {} ({detail})", ears.len())?;
+            // Simple information, jamais un avertissement : un téléphone peut être éteint.
+            // L'oreille du PC a son propre diagnostic (service `jarvis-ear`).
+            for e in ears.iter().filter(|e| !e.local && !e.connected) {
+                writeln!(out, "{}", disconnected_ear_line(&e.name, &e.platform))?;
+            }
+            if !ears.iter().any(|e| e.local) {
+                writeln!(
+                    out,
+                    "! Oreille du PC pas encore appairée — elle s'appaire seule à son \
+                     démarrage : `jarvisctl restart oreille`"
+                )?;
+            }
+        }
+        Some(ControlResponse::Error { message }) if message == "requête invalide" => writeln!(
+            out,
+            "! Cerveau trop ancien pour le réseau des oreilles — lancez `jarvisctl update` \
+             (cerveau et oreille ensemble)"
+        )?,
+        Some(ControlResponse::Error { .. }) => writeln!(
+            out,
+            "! Réseau des oreilles arrêté dans le cerveau — cherchez « réseau des oreilles » \
+             dans `jarvisctl logs` (identité TLS, registre, adresse ou port)"
+        )?,
+        _ => match count {
+            Ok(0) => writeln!(out, "{none}")?,
+            Ok(n) => writeln!(
+                out,
+                "✓ Oreilles appairées : {n} (cerveau injoignable : connexions inconnues)"
+            )?,
+            Err(_) => {}
+        },
+    }
+
+    people_diagnostics(sys, &known_ears, out)?;
+
+    // Port d'écoute.
+    let port = match listen.trim().parse::<std::net::SocketAddr>() {
+        Ok(addr) => addr.port(),
+        Err(_) => {
+            writeln!(
+                out,
+                "! [network] listen invalide (« {listen} », attendu ip:port) — réseau des \
+                 oreilles désactivé : mettez `listen = \"0.0.0.0:{}\"`",
+                jarvis_protocol::ear::DEFAULT_PORT
+            )?;
+            jarvis_protocol::ear::DEFAULT_PORT
+        }
+    };
+    match sys.run("ss", &["-Hltn"]) {
+        Ok(o) if o.code == 0 => {
+            let hosts = listening_hosts(&o.stdout, port);
+            let wildcard = |h: &String| matches!(h.as_str(), "0.0.0.0" | "*" | "::");
+            if hosts.is_empty() {
+                writeln!(
+                    out,
+                    "! Port {port} pas en écoute — cerveau arrêté ou réseau des oreilles \
+                     désactivé : voir `jarvisctl logs`"
+                )?;
+            } else if hosts.iter().any(wildcard) {
+                writeln!(out, "✓ Port {port} en écoute sur toutes les interfaces")?;
+            } else {
+                let who = if hosts.iter().all(|h| h.starts_with("127.") || h == "::1") {
+                    "les autres machines ne peuvent pas s'y connecter"
+                } else {
+                    "l'oreille du PC (127.0.0.1) ne peut pas s'y connecter"
+                };
+                writeln!(
+                    out,
+                    "! Port {port} en écoute sur {} seulement — {who} : mettez \
+                     `listen = \"0.0.0.0:{port}\"` dans [network]",
+                    hosts.join(", ")
+                )?;
+            }
+        }
+        _ => writeln!(out, "! Port {port} non vérifié (`ss` introuvable)")?,
+    }
+
+    // Pare-feu et mDNS.
+    let ufw = sys
+        .run("cat", &[UFW_CONF])
+        .map(|o| {
+            o.code == 0
+                && o.stdout.lines().any(|l| {
+                    l.trim()
+                        .strip_prefix("ENABLED=")
+                        .is_some_and(|v| v.trim_matches(['"', '\'']) == "yes")
+                })
+        })
+        .unwrap_or(false);
+    if ufw {
+        writeln!(
+            out,
+            "! Pare-feu ufw actif — si ce n'est pas déjà fait, ouvrez aux oreilles du réseau \
+             local le port {port} et mDNS (à lancer vous-même) : \
+             `sudo ufw allow from 192.168.0.0/16 to any port {port} proto tcp` et \
+             `sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp`"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "✓ Pare-feu ufw inactif (rien à ouvrir pour les oreilles)"
+        )?;
+    }
+    let avahi = sys
+        .run("systemctl", &["is-active", "avahi-daemon"])
+        .map(|o| o.stdout.trim() == "active")
+        .unwrap_or(false);
+    if avahi {
+        writeln!(
+            out,
+            "✓ avahi-daemon actif (cohabite avec l'annonce mDNS de Jarvis)"
+        )?;
+    } else {
+        writeln!(
+            out,
+            "! avahi-daemon inactif — information : Jarvis s'annonce seul en mDNS ; si une \
+             oreille ne trouve pas le PC, donnez-lui son adresse (`brain_address`, voir \
+             docs/reseau.md)"
+        )?;
+    }
+    Ok(())
+}
+
+/// Voix utilisable : `tokens.txt` et un modèle `.onnx` dans le dossier.
+fn voice_installed(dir: &Path) -> bool {
+    dir.join("tokens.txt").is_file()
+        && fs::read_dir(dir).into_iter().flatten().flatten().any(|e| {
+            let p = e.path();
+            p.is_file() && p.extension().is_some_and(|x| x == "onnx")
+        })
+}
+
+/// Écrit ou remplace la ligne `ANTHROPIC_API_KEY=` ; ne l'affiche jamais.
+pub fn set_api_key(paths: &Paths, key: &str, out: &mut dyn Write) -> Result<()> {
+    let key = key.trim();
+    if key.is_empty() || key.contains(['\n', '\r']) {
+        bail!("clé vide ou invalide");
+    }
+    let new_line = format!("{KEY_VAR}={key}");
+    let existing = fs::read_to_string(&paths.env_file).unwrap_or_default();
+    let is_var = |l: &str, commented: bool| {
+        let l = l.trim_start();
+        let l = if commented {
+            match l.strip_prefix('#') {
+                Some(r) => r.trim_start(),
+                None => return false,
+            }
+        } else {
+            l
+        };
+        l.strip_prefix(KEY_VAR)
+            .is_some_and(|r| r.trim_start().starts_with('='))
+    };
+    let mut lines: Vec<String> = existing.lines().map(String::from).collect();
+    if let Some(i) = lines.iter().position(|l| is_var(l, false)) {
+        lines[i] = new_line;
+    } else if let Some(i) = lines.iter().position(|l| is_var(l, true)) {
+        lines[i] = new_line;
+    } else {
+        lines.push(new_line);
+    }
+    write_private(&paths.env_file, &(lines.join("\n") + "\n"))?;
+    writeln!(
+        out,
+        "Clé enregistrée dans {}. Lancez `jarvisctl restart` pour l'appliquer.",
+        paths.env_file.display()
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::system::fake::Fake;
+    use jarvis_protocol::Mode;
+    use std::io;
+
+    fn setup() -> (tempfile::TempDir, Paths) {
+        let home = tempfile::tempdir().unwrap();
+        let paths = Paths::from_home(home.path());
+        (home, paths)
+    }
+
+    fn fake_source(home: &Path) -> PathBuf {
+        let src = home.join("src");
+        let rel = src.join("target/release");
+        fs::create_dir_all(&rel).unwrap();
+        for b in BINARIES {
+            fs::write(rel.join(b), format!("bin {b}")).unwrap();
+        }
+        for lib in [
+            "libsherpa-onnx-c-api.so",
+            "libsherpa-onnx-cxx-api.so",
+            "libonnxruntime.so",
+            "libonnxruntime.so.1.23.2",
+        ] {
+            fs::write(rel.join(lib), format!("lib {lib}")).unwrap();
+        }
+        fs::write(rel.join("libautre.so"), "pas à copier").unwrap();
+        src
+    }
+
+    fn text(out: Vec<u8>) -> String {
+        String::from_utf8(out).unwrap()
+    }
+
+    fn mode_of(p: &Path) -> u32 {
+        fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    fn do_install(home: &Path, paths: &Paths, sys: &Fake) -> String {
+        let opts = InstallOpts {
+            source: fake_source(home),
+            no_build: true,
+        };
+        let mut out = Vec::new();
+        install(paths, sys, &opts, &mut out).unwrap();
+        text(out)
+    }
+
+    #[test]
+    fn unite_systemd_exacte() {
+        let u = brain_unit();
+        assert!(u.starts_with("[Unit]\nDescription=Jarvis — cerveau de l'assistant vocal\n"));
+        assert!(u.contains("ExecStart=%h/.local/bin/jarvis-brain\n"));
+        assert!(u.contains("EnvironmentFile=-%h/.config/jarvis/env\n"));
+        assert!(u.contains("Environment=TMPDIR=%t\n"));
+        assert!(u.contains("Restart=on-failure\nRestartSec=3\n"));
+        assert!(u.ends_with("[Install]\nWantedBy=graphical-session.target\n"));
+    }
+
+    #[test]
+    fn unite_de_l_oreille_exacte() {
+        assert_eq!(
+            ear_unit(),
+            "[Unit]
+Description=Jarvis — oreille du PC (micro, mot d'éveil, icône)
+# Le cerveau n'est pas requis : sans lui, l'icône affiche « cerveau injoignable ».
+After=graphical-session.target jarvis-brain.service pipewire.service
+PartOf=graphical-session.target
+# Sans mot d'éveil enregistré (`jarvis-ear enroll`), le service est sauté, pas en échec.
+ConditionPathExists=%h/.local/share/jarvis/wakeword/jarvis.rpw
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/jarvis-ear
+# « Quitter l'oreille » sort avec le code 0 : le service reste arrêté jusqu'à la
+# prochaine session ou `jarvisctl start oreille`.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+"
+        );
+        // L'oreille vit sans le cerveau : ordre de démarrage seulement, aucune dépendance.
+        let deps = ear_unit()
+            .lines()
+            .filter(|l| l.starts_with("Requires=") || l.starts_with("BindsTo="))
+            .count();
+        assert_eq!(deps, 0);
+    }
+
+    #[test]
+    fn parse_systemctl_show() {
+        let m = parse_show(
+            "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n",
+        );
+        assert_eq!(m["ActiveState"], "active");
+        assert_eq!(m["MainPID"], "1234");
+        assert_eq!(since(&m["ActiveEnterTimestamp"]), Some("16:28"));
+        assert_eq!(since(""), None);
+    }
+
+    #[test]
+    fn install_ecrit_unite_env_et_config() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+
+        for b in BINARIES {
+            assert_eq!(
+                fs::read_to_string(paths.bin_dir.join(b)).unwrap(),
+                format!("bin {b}")
+            );
+            assert_eq!(mode_of(&paths.bin_dir.join(b)), 0o755);
+        }
+        assert_eq!(fs::read_to_string(&paths.unit_path).unwrap(), brain_unit());
+        assert_eq!(
+            fs::read_to_string(&paths.ear_unit_path).unwrap(),
+            ear_unit()
+        );
+        assert!(
+            paths
+                .ear_unit_path
+                .ends_with(".config/systemd/user/jarvis-ear.service")
+        );
+        assert_eq!(mode_of(&paths.env_file), 0o600);
+        assert!(
+            fs::read_to_string(&paths.env_file)
+                .unwrap()
+                .contains("# ANTHROPIC_API_KEY=")
+        );
+        assert!(paths.config_file.is_file());
+        let src = installed_source(&paths).unwrap();
+        assert_eq!(src, home.path().join("src"));
+
+        let cmds = sys.cmds.borrow();
+        let reload = cmds
+            .iter()
+            .position(|c| c == "systemctl --user daemon-reload")
+            .unwrap();
+        let enable = cmds
+            .iter()
+            .position(|c| c == "systemctl --user enable --now jarvis-brain.service")
+            .unwrap();
+        let enable_ear = cmds
+            .iter()
+            .position(|c| c == "systemctl --user enable --now jarvis-ear.service")
+            .unwrap();
+        assert!(reload < enable && enable < enable_ear);
+    }
+
+    #[test]
+    fn install_sans_mot_d_eveil_annonce_l_enrolement() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        let o = do_install(home.path(), &paths, &sys);
+        assert!(
+            o.contains(
+                "Service jarvis-ear.service activé ; il démarrera après `jarvis-ear enroll`."
+            ),
+            "{o}"
+        );
+        assert!(
+            o.contains("Service jarvis-brain.service activé et démarré."),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn install_echec_d_activation_de_l_oreille() {
+        let (home, paths) = setup();
+        let mut sys = Fake::default();
+        sys.replies.insert(
+            "systemctl --user enable --now jarvis-ear.service".into(),
+            (1, String::new()),
+        );
+        let opts = InstallOpts {
+            source: fake_source(home.path()),
+            no_build: true,
+        };
+        let err = install(&paths, &sys, &opts, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("jarvis-ear.service"), "{err}");
+    }
+
+    #[test]
+    fn install_ne_remplace_pas_config_existante() {
+        let (home, paths) = setup();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(&paths.config_file, "mode = \"online\"\n").unwrap();
+        fs::write(&paths.env_file, "ANTHROPIC_API_KEY=secret\n").unwrap();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        assert_eq!(
+            fs::read_to_string(&paths.config_file).unwrap(),
+            "mode = \"online\"\n"
+        );
+        assert_eq!(
+            fs::read_to_string(&paths.env_file).unwrap(),
+            "ANTHROPIC_API_KEY=secret\n"
+        );
+    }
+
+    #[test]
+    fn uninstall_sans_purge_garde_la_config() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        let mut out = Vec::new();
+        uninstall(
+            &paths,
+            &sys,
+            false,
+            false,
+            &mut io::BufReader::new(io::empty()),
+            &mut out,
+        )
+        .unwrap();
+        for b in BINARIES {
+            assert!(!paths.bin_dir.join(b).exists());
+        }
+        assert!(!paths.unit_path.exists());
+        assert!(!paths.ear_unit_path.exists());
+        assert!(paths.env_file.exists());
+        assert!(paths.config_file.exists());
+        let cmds = sys.cmds.borrow();
+        let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
+        // L'oreille s'arrête avant le cerveau.
+        assert!(
+            pos("systemctl --user stop jarvis-ear.service")
+                < pos("systemctl --user stop jarvis-brain.service")
+        );
+        pos("systemctl --user disable jarvis-ear.service");
+        pos("systemctl --user disable jarvis-brain.service");
+    }
+
+    #[test]
+    fn uninstall_purge_yes_efface_tout() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        fs::create_dir_all(&paths.state_dir).unwrap();
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        let mut out = Vec::new();
+        uninstall(
+            &paths,
+            &sys,
+            true,
+            true,
+            &mut io::BufReader::new(io::empty()),
+            &mut out,
+        )
+        .unwrap();
+        assert!(!paths.config_dir.exists());
+        assert!(!paths.state_dir.exists());
+        assert!(!paths.data_dir.exists());
+    }
+
+    #[test]
+    fn purge_refusee_sans_confirmation() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        let mut out = Vec::new();
+        let mut input = io::Cursor::new(b"n\n".to_vec());
+        uninstall(&paths, &sys, true, false, &mut input, &mut out).unwrap();
+        assert!(paths.config_dir.exists());
+    }
+
+    #[test]
+    fn set_api_key_remplace_la_ligne() {
+        let (_home, paths) = setup();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.env_file,
+            "FOO=1\nANTHROPIC_API_KEY=ancienne\nBAR=2\n",
+        )
+        .unwrap();
+        fs::set_permissions(&paths.env_file, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut out = Vec::new();
+        set_api_key(&paths, "sk-ant-nouvelle", &mut out).unwrap();
+        assert_eq!(
+            fs::read_to_string(&paths.env_file).unwrap(),
+            "FOO=1\nANTHROPIC_API_KEY=sk-ant-nouvelle\nBAR=2\n"
+        );
+        assert_eq!(mode_of(&paths.env_file), 0o600);
+        let o = text(out);
+        assert!(!o.contains("sk-ant-nouvelle"));
+        assert!(o.contains("jarvisctl restart"));
+    }
+
+    #[test]
+    fn status_service_inactif_code_3() {
+        let (_home, paths) = setup();
+        let mut sys = Fake::default();
+        sys.replies.insert(
+            "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp".into(),
+            (0, "ActiveState=inactive\nSubState=dead\nMainPID=0\nActiveEnterTimestamp=\n".into()),
+        );
+        let mut out = Vec::new();
+        assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 3);
+        let o = text(out);
+        assert!(o.contains("Cerveau   : inactif (inactive, dead)"), "{o}");
+        assert!(o.contains("Ollama    : injoignable"));
+        assert!(o.contains("Clé Claude: absente"));
+    }
+
+    #[test]
+    fn status_service_actif() {
+        let (_home, paths) = setup();
+        let mut sys = Fake::default();
+        sys.replies.insert(
+            "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp".into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n".into()),
+        );
+        sys.brain = Some((Mode::Local, "0.1.0".into(), String::new()));
+        sys.http.insert("/api/version".into(), "{}".into());
+        sys.http.insert(
+            "/api/ps".into(),
+            r#"{"models":[{"name":"llama3.2:3b"}]}"#.into(),
+        );
+        let mut out = Vec::new();
+        assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 0);
+        let o = text(out);
+        assert!(o.contains("Cerveau   : actif (pid 1234, depuis 16:28)"));
+        assert!(o.contains("Mode      : local (llama3.2:3b)"));
+        assert!(o.contains("Ollama    : joignable, modèle chargé"));
+    }
+
+    #[test]
+    fn doctor_signale_cle_absente() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        let mut out = Vec::new();
+        doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert!(o.contains("! Clé API Claude absente"), "{o}");
+        assert!(o.contains("✓ Binaires dans"), "{o}");
+        assert!(o.contains("✗ Ollama joignable"), "{o}");
+    }
+
+    #[test]
+    fn install_copie_les_bibliotheques_sherpa() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        for lib in [
+            "libsherpa-onnx-c-api.so",
+            "libsherpa-onnx-cxx-api.so",
+            "libonnxruntime.so",
+            "libonnxruntime.so.1.23.2",
+        ] {
+            let p = paths.lib_dir.join(lib);
+            assert_eq!(fs::read_to_string(&p).unwrap(), format!("lib {lib}"));
+            assert_eq!(mode_of(&p), 0o755);
+        }
+        assert!(!paths.lib_dir.join("libautre.so").exists());
+        // Aucun fichier temporaire ne reste.
+        assert_eq!(fs::read_dir(&paths.lib_dir).unwrap().count(), 4);
+        assert!(paths.lib_dir.ends_with(".local/lib/jarvis"));
+    }
+
+    #[test]
+    fn install_refuse_sans_bibliotheque_sherpa() {
+        let (home, paths) = setup();
+        let src = fake_source(home.path());
+        fs::remove_file(src.join("target/release/libsherpa-onnx-c-api.so")).unwrap();
+        let err = copy_libraries(&src, &paths, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("libsherpa-onnx-c-api.so"), "{err}");
+    }
+
+    #[test]
+    fn update_recopie_les_bibliotheques() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        let src = home.path().join("src/target/release");
+        fs::write(src.join("libonnxruntime.so"), "nouvelle version").unwrap();
+        update(&paths, &sys, &mut Vec::new()).unwrap();
+        assert_eq!(
+            fs::read_to_string(paths.lib_dir.join("libonnxruntime.so")).unwrap(),
+            "nouvelle version"
+        );
+    }
+
+    #[test]
+    fn uninstall_supprime_les_bibliotheques() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        assert!(paths.lib_dir.is_dir());
+        uninstall(
+            &paths,
+            &sys,
+            false,
+            false,
+            &mut io::BufReader::new(io::empty()),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(!paths.lib_dir.exists());
+    }
+
+    #[test]
+    fn doctor_avertit_pour_l_oreille_sans_echec() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        // Rien d'installé côté oreille : seulement des avertissements.
+        let mut out = Vec::new();
+        let sans_oreille = doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        for attendu in [
+            "! Bibliothèques sherpa-onnx",
+            "! Modèle Whisper absent",
+            "! Modèle d'empreinte vocale absent",
+            "! Voix de Jarvis absent — optionnel (oreille du PC) : lancez `scripts/download-models.sh voice`",
+            "! Mot d'éveil enregistré absent",
+            "! Empreinte vocale enregistrée absent",
+        ] {
+            assert!(o.contains(attendu), "{attendu}\n{o}");
+        }
+        // Tout est présent : cases cochées, et le code de sortie ne change pas.
+        do_install(home.path(), &paths, &sys);
+        let models = paths.data_dir.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join(WHISPER_MODEL), "").unwrap();
+        fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        let voice = models.join(VOICE_DIR);
+        fs::create_dir_all(&voice).unwrap();
+        fs::write(voice.join("fr_FR-upmc-medium.onnx"), "").unwrap();
+        fs::write(voice.join("tokens.txt"), "").unwrap();
+        fs::create_dir_all(paths.data_dir.join("wakeword")).unwrap();
+        fs::write(paths.data_dir.join("wakeword/jarvis.rpw"), "").unwrap();
+        fs::create_dir_all(paths.data_dir.join("voiceprint")).unwrap();
+        fs::write(paths.data_dir.join("voiceprint/charles.json"), "{}").unwrap();
+        let mut out = Vec::new();
+        let complet = doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        for attendu in [
+            "✓ Bibliothèques sherpa-onnx",
+            "✓ Modèle Whisper",
+            "✓ Modèle d'empreinte vocale",
+            "✓ Voix de Jarvis",
+            "✓ Mot d'éveil enregistré",
+            "✓ Empreinte vocale enregistrée",
+        ] {
+            assert!(o.contains(attendu), "{attendu}\n{o}");
+        }
+        assert_eq!(sans_oreille, 1);
+        assert_eq!(
+            complet, 1,
+            "échec Ollama inchangé, aucune dépendance à l'oreille"
+        );
+    }
+
+    #[test]
+    fn doctor_suit_les_chemins_de_modeles_configures() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        fs::create_dir_all(home.path().join("ailleurs")).unwrap();
+        fs::write(home.path().join("ailleurs/whisper.bin"), "").unwrap();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.config_file,
+            "[stt]\nmodel_path = \"~/ailleurs/whisper.bin\"\n\n[speaker]\nmodel_path = \"/inexistant/voix.onnx\"\n\n[tts]\nmodel_dir = \"~/ailleurs/voix\"\n",
+        )
+        .unwrap();
+        // Le modèle par défaut existe, mais la configuration pointe ailleurs.
+        let models = paths.data_dir.join("models");
+        fs::create_dir_all(&models).unwrap();
+        fs::write(models.join(SPEAKER_MODEL), "").unwrap();
+        // Voix configurée ailleurs : seul ce dossier compte.
+        let voice = home.path().join("ailleurs/voix");
+        fs::create_dir_all(&voice).unwrap();
+        fs::write(voice.join("autre.onnx"), "").unwrap();
+        fs::write(voice.join("tokens.txt"), "").unwrap();
+        let mut out = Vec::new();
+        doctor(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert!(o.contains("✓ Modèle Whisper"), "{o}");
+        assert!(o.contains("! Modèle d'empreinte vocale absent"), "{o}");
+        assert!(o.contains("✓ Voix de Jarvis"), "{o}");
+    }
+
+    fn enroll_wakeword(paths: &Paths) {
+        fs::create_dir_all(paths.data_dir.join("wakeword")).unwrap();
+        fs::write(paths.data_dir.join("wakeword/jarvis.rpw"), "").unwrap();
+    }
+
+    /// Installation faite, journal des commandes vidé.
+    fn installed() -> (tempfile::TempDir, Paths, Fake) {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        sys.cmds.borrow_mut().clear();
+        (home, paths, sys)
+    }
+
+    fn verb_out(paths: &Paths, sys: &Fake, verb: &str, services: &[Service]) -> (i32, String) {
+        let mut out = Vec::new();
+        let code = service_verb(paths, sys, verb, services, &mut out).unwrap();
+        (code, text(out))
+    }
+
+    #[test]
+    fn verbe_sans_cible_vise_cerveau_puis_oreille() {
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+        let (code, o) = verb_out(&paths, &sys, "restart", &targets(None));
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec![
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        assert!(o.contains("Service jarvis-brain.service redémarré."), "{o}");
+        assert!(o.contains("Service jarvis-ear.service redémarré."), "{o}");
+    }
+
+    #[test]
+    fn arret_et_desactivation_commencent_par_l_oreille() {
+        for verb in ["stop", "disable"] {
+            let (_home, paths, sys) = installed();
+            verb_out(&paths, &sys, verb, &Service::ALL);
+            assert_eq!(
+                *sys.cmds.borrow(),
+                vec![
+                    format!("systemctl --user {verb} jarvis-ear.service"),
+                    format!("systemctl --user {verb} jarvis-brain.service")
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn cible_unique() {
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+        let (code, o) = verb_out(&paths, &sys, "start", &[Service::Ear]);
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user start jarvis-ear.service"]
+        );
+        assert_eq!(o, "Service jarvis-ear.service démarré.\n");
+        sys.cmds.borrow_mut().clear();
+        verb_out(&paths, &sys, "enable", &[Service::Brain]);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user enable jarvis-brain.service"]
+        );
+    }
+
+    #[test]
+    fn premier_code_d_echec_renvoye_et_l_autre_service_tente() {
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            "systemctl --user start jarvis-brain.service".into(),
+            (5, String::new()),
+        );
+        let (code, o) = verb_out(&paths, &sys, "start", &Service::ALL);
+        assert_eq!(code, 5);
+        assert!(
+            o.contains("Impossible de démarrer jarvis-brain.service (code 5)."),
+            "{o}"
+        );
+        assert!(o.contains("Service jarvis-ear.service démarré."), "{o}");
+        // Les deux échouent : le premier code compte.
+        sys.replies.insert(
+            "systemctl --user start jarvis-ear.service".into(),
+            (1, String::new()),
+        );
+        assert_eq!(verb_out(&paths, &sys, "start", &Service::ALL).0, 5);
+    }
+
+    #[test]
+    fn oreille_sans_mot_d_eveil_signalee_non_demarree() {
+        let (_home, paths, sys) = installed();
+        let (code, o) = verb_out(&paths, &sys, "start", &Service::ALL);
+        assert_eq!(code, 0);
+        assert!(
+            o.contains(
+                "Service jarvis-ear.service non démarré : aucun mot d'éveil enregistré, lancez `jarvis-ear enroll`."
+            ),
+            "{o}"
+        );
+        // L'activation, elle, est normale.
+        let (_, o) = verb_out(&paths, &sys, "enable", &[Service::Ear]);
+        assert_eq!(o, "Service jarvis-ear.service activé au démarrage.\n");
+    }
+
+    #[test]
+    fn unite_de_l_oreille_absente_ignoree_sans_cible() {
+        let (_home, paths, sys) = installed();
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let (code, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user restart jarvis-brain.service"]
+        );
+        assert!(o.contains("jarvisctl update"), "{o}");
+        // Visée explicitement, la commande part quand même (systemctl dira pourquoi).
+        sys.cmds.borrow_mut().clear();
+        verb_out(&paths, &sys, "restart", &[Service::Ear]);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user restart jarvis-ear.service"]
+        );
+    }
+
+    #[test]
+    fn update_ajoute_et_active_l_oreille_d_une_ancienne_installation() {
+        let (_home, paths, sys) = installed();
+        // Installation antérieure : seule l'unité du cerveau existe.
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert_eq!(
+            fs::read_to_string(&paths.ear_unit_path).unwrap(),
+            ear_unit()
+        );
+        let cmds: Vec<String> = sys
+            .cmds
+            .borrow()
+            .iter()
+            .filter(|c| c.starts_with("systemctl"))
+            .cloned()
+            .collect();
+        assert_eq!(
+            cmds,
+            vec![
+                "systemctl --user daemon-reload",
+                "systemctl --user enable jarvis-ear.service",
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        assert!(
+            o.contains("Mise à jour terminée, cerveau et oreille redémarrés."),
+            "{o}"
+        );
+        assert!(o.contains("`jarvis-ear enroll`"), "{o}");
+    }
+
+    #[test]
+    fn update_garde_le_choix_d_activation_et_recharge_si_l_unite_change() {
+        let (_home, paths, sys) = installed();
+        enroll_wakeword(&paths);
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let systemctl_cmds = |sys: &Fake| -> Vec<String> {
+            sys.cmds
+                .borrow()
+                .iter()
+                .filter(|c| c.starts_with("systemctl"))
+                .cloned()
+                .collect()
+        };
+        // Unités à jour : ni rechargement ni activation, seulement les redémarrages.
+        assert_eq!(
+            systemctl_cmds(&sys),
+            vec![
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        assert!(!text(out).contains("jarvis-ear enroll"));
+
+        // Une unité ancienne est réécrite puis rechargée, sans réactivation.
+        sys.cmds.borrow_mut().clear();
+        fs::write(&paths.unit_path, "[Unit]\nancienne\n").unwrap();
+        update(&paths, &sys, &mut Vec::new()).unwrap();
+        assert_eq!(fs::read_to_string(&paths.unit_path).unwrap(), brain_unit());
+        assert_eq!(
+            systemctl_cmds(&sys),
+            vec![
+                "systemctl --user daemon-reload",
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+    }
+
+    #[test]
+    fn update_echec_du_redemarrage_de_l_oreille() {
+        let (_home, paths, mut sys) = installed();
+        sys.replies.insert(
+            "systemctl --user restart jarvis-ear.service".into(),
+            (1, String::new()),
+        );
+        let err = update(&paths, &sys, &mut Vec::new()).unwrap_err();
+        assert!(err.to_string().contains("l'oreille"), "{err}");
+    }
+
+    const SHOW_EAR: &str = "systemctl --user show jarvis-ear.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp";
+    const SHOW_BRAIN: &str = "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp";
+
+    fn status_out(paths: &Paths, sys: &Fake, services: &[Service]) -> (i32, String) {
+        let mut out = Vec::new();
+        let code = status(paths, sys, services, &mut out).unwrap();
+        (code, text(out))
+    }
+
+    #[test]
+    fn status_montre_les_deux_services() {
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            SHOW_BRAIN.into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n".into()),
+        );
+        sys.replies.insert(
+            SHOW_EAR.into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=4321\nActiveEnterTimestamp=Wed 2026-10-28 16:28:05 CET\n".into()),
+        );
+        let (code, o) = status_out(&paths, &sys, &Service::ALL);
+        assert_eq!(code, 0);
+        assert!(
+            o.contains("Cerveau   : actif (pid 1234, depuis 16:28)"),
+            "{o}"
+        );
+        assert!(
+            o.contains("Oreille   : active (pid 4321, depuis 16:28)"),
+            "{o}"
+        );
+        assert!(o.contains("Ollama    :"), "{o}");
+
+        // L'oreille seule : ni cerveau, ni Ollama, ni clé.
+        let (code, o) = status_out(&paths, &sys, &[Service::Ear]);
+        assert_eq!(code, 0);
+        assert_eq!(o, "Oreille   : active (pid 4321, depuis 16:28)\n");
+    }
+
+    #[test]
+    fn status_oreille_inactive_n_affecte_que_sa_propre_cible() {
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            SHOW_BRAIN.into(),
+            (
+                0,
+                "ActiveState=active\nSubState=running\nMainPID=1\n".into(),
+            ),
+        );
+        sys.replies.insert(
+            SHOW_EAR.into(),
+            (0, "ActiveState=inactive\nSubState=dead\nMainPID=0\n".into()),
+        );
+        let (code, o) = status_out(&paths, &sys, &Service::ALL);
+        assert_eq!(code, 0, "l'oreille est facultative");
+        assert!(
+            o.contains(
+                "Oreille   : inactive (inactive, dead) ; relance : `jarvisctl start oreille`"
+            ),
+            "{o}"
+        );
+        assert_eq!(status_out(&paths, &sys, &[Service::Ear]).0, 3);
+        let (code, o) = status_out(&paths, &sys, &[Service::Brain]);
+        assert_eq!(code, 0);
+        assert!(!o.contains("Oreille"), "{o}");
+    }
+
+    #[test]
+    fn status_oreille_sans_mot_d_eveil_ou_non_installee() {
+        let (_home, paths, sys) = installed();
+        let (_, o) = status_out(&paths, &sys, &[Service::Ear]);
+        assert!(
+            o.contains("non démarrée, aucun mot d'éveil enregistré (lancez `jarvis-ear enroll`)"),
+            "{o}"
+        );
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let (_, o) = status_out(&paths, &sys, &[Service::Ear]);
+        assert!(
+            o.contains("service non installé (lancez `jarvisctl update`)"),
+            "{o}"
+        );
+    }
+
+    fn doctor_out(paths: &Paths, sys: &Fake) -> (i32, String) {
+        let mut out = Vec::new();
+        let code = doctor(paths, sys, &mut out).unwrap();
+        (code, text(out))
+    }
+
+    #[test]
+    fn doctor_verifie_le_service_de_l_oreille() {
+        let (_home, paths, mut sys) = installed();
+        // Installé et activé, mais sauté faute de mot d'éveil.
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-ear.service".into(),
+            (0, "enabled\n".into()),
+        );
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-ear.service".into(),
+            (3, "inactive\n".into()),
+        );
+        let (code_saute, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Service de l'oreille installé"), "{o}");
+        assert!(o.contains("✓ Oreille activée au démarrage"), "{o}");
+        assert!(
+            o.contains(
+                "! Oreille non démarrée : pas de mot d'éveil enregistré — lancez `jarvis-ear enroll`"
+            ),
+            "{o}"
+        );
+
+        // Mot d'éveil présent mais service arrêté (« Quitter l'oreille »).
+        enroll_wakeword(&paths);
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Oreille inactive"), "{o}");
+        assert!(o.contains("`jarvisctl start oreille`"), "{o}");
+
+        // Tout va bien.
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-ear.service".into(),
+            (0, "active\n".into()),
+        );
+        let (code_actif, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Oreille active"), "{o}");
+
+        // Désactivée puis non installée : avertissements seulement.
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-ear.service".into(),
+            (1, "disabled\n".into()),
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Oreille non activée au démarrage"), "{o}");
+        assert!(o.contains("`jarvisctl enable oreille`"), "{o}");
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let (code_absent, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Service de l'oreille non installé"), "{o}");
+        assert!(!o.contains("Oreille active"), "{o}");
+
+        // L'oreille ne change jamais le code de sortie (ici 1 : Ollama injoignable).
+        assert_eq!((code_saute, code_actif, code_absent), (1, 1, 1));
+    }
+
+    const AIDE_CLAUDE: &str = "Usage: claude [options]\n\
+        --append-system-prompt <prompt>\n\
+        --disallowedTools, --disallowed-tools <tools...>\n\
+        --mcp-config <configs...>\n\
+        --output-format <format>  \"text\", \"json\", or \"stream-json\"\n\
+        --permission-mode <mode>\n\
+        --permission-prompts <target>\n\
+        --restricted  Restricted mode\n\
+        --session-id <uuid>\n\
+        --settings <file-or-json>\n\
+        --strict-mcp-config\n\
+        --tools <tools...>\n\
+        --verbose\n";
+
+    /// Faux `claude` exécutable à l'emplacement par défaut (`~/.local/bin/claude`).
+    fn fake_claude(paths: &Paths, sys: &mut Fake, help: &str) -> PathBuf {
+        let claude = paths.bin_dir.join("claude");
+        fs::create_dir_all(&paths.bin_dir).unwrap();
+        fs::write(&claude, "#!/bin/sh\n").unwrap();
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).unwrap();
+        sys.replies.insert(
+            format!("{} --version", claude.display()),
+            (0, "2.1.312 (Claude Code)\n".into()),
+        );
+        sys.replies
+            .insert(format!("{} --help", claude.display()), (0, help.into()));
+        claude
+    }
+
+    fn write_config(paths: &Paths, text: &str) {
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(&paths.config_file, text).unwrap();
+    }
+
+    #[test]
+    fn doctor_signale_claude_absent() {
+        let (_home, paths, sys) = installed();
+        let (code, o) = doctor_out(&paths, &sys);
+        let claude = paths.bin_dir.join("claude");
+        assert!(
+            o.contains(&format!("! Claude Code introuvable ({})", claude.display())),
+            "{o}"
+        );
+        assert!(o.contains("`claude_path`"), "{o}");
+        // Rien n'est lancé à la place de claude, et le code de sortie ne change pas.
+        assert!(
+            !sys.cmds.borrow().iter().any(|c| c.contains("claude")),
+            "{:?}",
+            sys.cmds.borrow()
+        );
+        assert!(!o.contains("✗ Claude"), "{o}");
+        assert_eq!(code, 1, "seul Ollama (injoignable) fait échouer");
+
+        // Agent désactivé : un seul avertissement, aucune autre vérification.
+        write_config(&paths, "[agent]\nenabled = false\n");
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Agent de code désactivé"), "{o}");
+        assert!(!o.contains("Claude Code introuvable"), "{o}");
+        assert!(!o.contains("Projet"), "{o}");
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_compte_les_projets() {
+        let (home, paths, mut sys) = installed();
+        let projets = home.path().join("projets");
+        for p in ["jarvis", "pas-git", "sans-base"] {
+            fs::create_dir_all(projets.join(p)).unwrap();
+        }
+        write_config(
+            &paths,
+            "[[agent.projects]]\nname = \"Jarvis\"\npath = \"~/projets/jarvis\"\n\n\
+             [[agent.projects]]\nname = \"Absent\"\npath = \"~/projets/absent\"\n\n\
+             [[agent.projects]]\nname = \"PasGit\"\npath = \"~/projets/pas-git\"\n\n\
+             [[agent.projects]]\nname = \"SansBase\"\npath = \"~/projets/sans-base\"\n",
+        );
+        let git = |p: &str, args: &str| format!("git -C {} {args}", projets.join(p).display());
+        sys.replies
+            .insert(git("pas-git", "rev-parse --git-dir"), (128, String::new()));
+        sys.replies.insert(
+            git("sans-base", "config --get gitflow.branch.develop"),
+            (0, "dev\n".into()),
+        );
+        sys.replies.insert(
+            git("sans-base", "rev-parse --verify --quiet refs/heads/dev"),
+            (1, String::new()),
+        );
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ 4 projets pour l'agent de code"), "{o}");
+        assert!(
+            o.contains(&format!(
+                "✓ Projet Jarvis ({}, branche develop)",
+                projets.join("jarvis").display()
+            )),
+            "{o}"
+        );
+        assert!(
+            o.contains(&format!(
+                "! Projet Absent : dossier introuvable ({})",
+                projets.join("absent").display()
+            )),
+            "{o}"
+        );
+        assert!(o.contains("! Projet PasGit : pas un dépôt git"), "{o}");
+        assert!(
+            o.contains("! Projet SansBase : branche de base dev absente"),
+            "{o}"
+        );
+        assert_eq!(code, 1, "avertissements seulement");
+
+        // Une base explicite remplace celle de git flow.
+        write_config(
+            &paths,
+            "[[agent.projects]]\nname = \"Jarvis\"\npath = \"~/projets/jarvis\"\nbase = \"main\"\n",
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ 1 projet pour l'agent de code"), "{o}");
+        assert!(o.contains("branche main)"), "{o}");
+
+        // Aucun projet.
+        write_config(&paths, "[agent]\nprojects = []\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Aucun projet pour l'agent de code"), "{o}");
+    }
+
+    #[test]
+    fn doctor_signale_option_manquante() {
+        let (_home, paths, mut sys) = installed();
+        fake_claude(&paths, &mut sys, AIDE_CLAUDE);
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Claude Code présent (2.1.312)"), "{o}");
+        assert!(
+            o.contains("✓ Options requises de Claude Code présentes"),
+            "{o}"
+        );
+        assert!(o.contains("✓ notify-send présent"), "{o}");
+
+        // Ancienne version : ni --session-id ni stream-json.
+        let ancienne = AIDE_CLAUDE
+            .replace("--session-id <uuid>\n", "")
+            .replace(", or \"stream-json\"", "");
+        fake_claude(&paths, &mut sys, &ancienne);
+        sys.replies
+            .insert("sh -c command -v notify-send".into(), (1, String::new()));
+        let (code_ancienne, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Options absentes de `claude --help` : --session-id, stream-json"),
+            "{o}"
+        );
+        assert!(o.contains("! notify-send absent"), "{o}");
+        assert_eq!((code, code_ancienne), (1, 1), "avertissements seulement");
+
+        // Options du lancement restreint, cherchées comme mots entiers : « --tools »
+        // n'est pas « --disallowed-tools », ni « --mcp-config » « --strict-mcp-config ».
+        let sans_restreint = AIDE_CLAUDE
+            .replace("--restricted  Restricted mode\n", "")
+            .replace("--tools <tools...>\n", "")
+            .replace("--mcp-config <configs...>\n", "")
+            .replace("--verbose\n", "");
+        fake_claude(&paths, &mut sys, &sans_restreint);
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "! Options absentes de `claude --help` : --restricted, --tools, --mcp-config, --verbose"
+            ),
+            "{o}"
+        );
+        // `--setting-sources` n'est plus exigée.
+        assert!(!AIDE_CLAUDE.contains("--setting-sources"));
+    }
+
+    #[test]
+    fn aide_de_claude_lue_mot_a_mot() {
+        let aide = "  --append-system-prompt[-file], --add-dir\n  --disallowed-tools <tools...>\n  \"text\", \"stream-json\")";
+        assert!(help_has(aide, "--append-system-prompt"));
+        assert!(help_has(aide, "--add-dir"));
+        assert!(help_has(aide, "stream-json"));
+        assert!(!help_has(aide, "--tools"));
+        assert!(!help_has(aide, "--append-system"));
+    }
+
+    #[test]
+    fn doctor_verifie_le_bac_a_sable() {
+        const BWRAP: &str = "bwrap --ro-bind / / --unshare-net true";
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ socat présent"), "{o}");
+        assert!(o.contains("✓ bwrap présent et utilisable"), "{o}");
+        assert!(sys.cmds.borrow().iter().any(|c| c == BWRAP));
+
+        // Espaces de noms refusés (AppArmor) : avertissement, code inchangé.
+        sys.replies.insert(BWRAP.into(), (1, String::new()));
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! bwrap ne peut pas isoler l'agent"), "{o}");
+        assert!(o.contains("AppArmor"), "{o}");
+        assert_eq!(code, 1, "seul Ollama (injoignable) fait échouer");
+
+        // Outils absents : bwrap n'est pas lancé.
+        sys.replies
+            .insert("sh -c command -v bwrap".into(), (1, String::new()));
+        sys.replies
+            .insert("sh -c command -v socat".into(), (1, String::new()));
+        sys.cmds.borrow_mut().clear();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! bwrap absent — bac à sable de l'agent : sudo apt install bubblewrap"),
+            "{o}"
+        );
+        assert!(
+            o.contains("! socat absent — bac à sable de l'agent : sudo apt install socat"),
+            "{o}"
+        );
+        assert!(!sys.cmds.borrow().iter().any(|c| c == BWRAP));
+        assert_eq!(code, 1);
+
+        // Agent désactivé : rien de tout cela.
+        write_config(&paths, "[agent]\nenabled = false\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("bwrap"), "{o}");
+    }
+
+    #[test]
+    fn registre_des_taches_suit_xdg_state_home() {
+        let (home, paths) = setup();
+        let defaut = home.path().join(".local/state/jarvis/tasks");
+        assert_eq!(paths.tasks_dir(None), defaut);
+        assert_eq!(paths.tasks_dir(Some("")), defaut);
+        assert_eq!(paths.tasks_dir(Some("relatif/state")), defaut);
+        assert_eq!(
+            paths.tasks_dir(Some("/srv/state")),
+            PathBuf::from("/srv/state/jarvis/tasks")
+        );
+
+        // L'avertissement lit le registre au même endroit que le cerveau.
+        use jarvis_skills::agent::TaskState;
+        let (_home, paths, mut sys) = installed();
+        let state = tempfile::tempdir().unwrap();
+        sys.env.insert(
+            "XDG_STATE_HOME".into(),
+            state.path().to_string_lossy().into_owned(),
+        );
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-brain.service".into(),
+            (0, "active\n".into()),
+        );
+        running_task(&paths, "a11e", TaskState::Running);
+        let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
+        assert!(!o.contains("Attention"), "registre par défaut ignoré : {o}");
+        save_task(
+            &state.path().join("jarvis/tasks"),
+            "1c1",
+            TaskState::Running,
+        );
+        let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
+        assert!(o.contains("Attention : 1 tâche"), "{o}");
+    }
+
+    #[test]
+    fn taches_d_un_cerveau_arrete_sans_avertissement() {
+        use jarvis_skills::agent::TaskState;
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        // Reste d'un cerveau planté : le service est inactif, rien ne tourne.
+        running_task(&paths, "0f", TaskState::Running);
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-brain.service".into(),
+            (3, "inactive\n".into()),
+        );
+        for verb in ["restart", "stop"] {
+            let (_, o) = verb_out(&paths, &sys, verb, &Service::ALL);
+            assert!(!o.contains("Attention"), "{verb} : {o}");
+        }
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        assert!(!text(out).contains("Attention"));
+    }
+
+    fn running_task(paths: &Paths, id: &str, state: jarvis_skills::agent::TaskState) {
+        save_task(&paths.tasks_dir(None), id, state);
+    }
+
+    fn save_task(dir: &Path, id: &str, state: jarvis_skills::agent::TaskState) {
+        use jarvis_skills::agent::{TaskId, TaskRecord, registry::Registry};
+        let reg = Registry::open(dir.to_path_buf()).unwrap();
+        let id = TaskId(id.into());
+        reg.save(&TaskRecord {
+            log: reg.log_path(&id),
+            id,
+            project: "Jarvis".into(),
+            instruction: "finis les tests".into(),
+            branch: "feature/jarvis-finis-tests".into(),
+            worktree: PathBuf::from("/tmp/w"),
+            base: "develop".into(),
+            base_sha: "0123".into(),
+            started_at: 10,
+            ended_at: None,
+            state,
+            summary: None,
+            files_changed: None,
+            violations: vec![],
+            cost_usd: None,
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn redemarrage_previent_des_taches_en_cours() {
+        use jarvis_skills::agent::TaskState;
+        const UNE: &str = "Attention : 1 tâche d'agent en cours sera interrompue.\n";
+        let (_home, paths, mut sys) = installed();
+        enroll_wakeword(&paths);
+        sys.replies.insert(
+            "systemctl --user is-active jarvis-brain.service".into(),
+            (0, "active\n".into()),
+        );
+
+        // Aucune tâche (ni dossier) : aucun avertissement.
+        let (_, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert!(!o.contains("Attention"), "{o}");
+
+        // Une tâche terminée ne compte pas.
+        running_task(&paths, "finie", TaskState::Succeeded);
+        let (_, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert!(!o.contains("Attention"), "{o}");
+
+        // Une tâche en cours : avertissement en tête, et le redémarrage a lieu quand même.
+        running_task(&paths, "a", TaskState::Running);
+        sys.cmds.borrow_mut().clear();
+        let (code, o) = verb_out(&paths, &sys, "restart", &Service::ALL);
+        assert_eq!(code, 0);
+        assert!(o.starts_with(UNE), "{o}");
+        // État du cerveau, puis les deux redémarrages.
+        assert_eq!(
+            *sys.cmds.borrow(),
+            [
+                "systemctl --user is-active jarvis-brain.service",
+                "systemctl --user restart jarvis-brain.service",
+                "systemctl --user restart jarvis-ear.service"
+            ]
+        );
+        let (_, o) = verb_out(&paths, &sys, "stop", &[Service::Brain]);
+        assert!(o.starts_with(UNE), "{o}");
+        // L'oreille seule n'interrompt rien ; démarrer non plus.
+        let (_, o) = verb_out(&paths, &sys, "restart", &[Service::Ear]);
+        assert!(!o.contains("Attention"), "{o}");
+        let (_, o) = verb_out(&paths, &sys, "start", &Service::ALL);
+        assert!(!o.contains("Attention"), "{o}");
+
+        // Pluriel, et la mise à jour prévient aussi.
+        running_task(&paths, "b", TaskState::Running);
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let o = text(out);
+        assert!(
+            o.contains("Attention : 2 tâches d'agent en cours seront interrompues.\n"),
+            "{o}"
+        );
+        assert!(o.contains("Mise à jour terminée"), "{o}");
+    }
+
+    /// Identité TLS du cerveau (`~/.local/share/jarvis/tls/`), clé en 0600.
+    fn brain_identity(paths: &Paths, cert: &[u8]) {
+        let dir = paths.data_dir.join("tls");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("brain.crt.der"), cert).unwrap();
+        fs::write(dir.join("brain.key.der"), b"cle").unwrap();
+        fs::set_permissions(dir.join("brain.key.der"), fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
+    #[test]
+    fn doctor_affiche_l_empreinte() {
+        let (_home, paths, sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Certificat du cerveau absent"), "{o}");
+        assert!(o.contains("`jarvisctl restart cerveau`"), "{o}");
+
+        brain_identity(&paths, b"certificat");
+        let short = jarvis_protocol::Fingerprint::of_der(b"certificat").short();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(&format!("✓ Certificat du cerveau (empreinte {short})")),
+            "{o}"
+        );
+        assert!(!o.contains("Clé privée"), "{o}");
+
+        // Clé lisible par d'autres, puis absente : avertissements.
+        let key = paths.data_dir.join("tls/brain.key.der");
+        fs::set_permissions(&key, fs::Permissions::from_mode(0o644)).unwrap();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Clé privée du cerveau lisible par d'autres"),
+            "{o}"
+        );
+        assert!(o.contains(&format!("`chmod 600 {}`", key.display())), "{o}");
+        fs::remove_file(&key).unwrap();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Clé privée du cerveau absente"), "{o}");
+        assert!(o.contains("docs/reseau.md"), "{o}");
+        // Le réseau ne change jamais le code de sortie (ici 1 : Ollama injoignable).
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_verifie_le_port_des_oreilles() {
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Port 7341 pas en écoute"), "{o}");
+        assert!(sys.cmds.borrow().iter().any(|c| c == "ss -Hltn"));
+
+        let ss = |sys: &mut Fake, text: &str| {
+            sys.replies.insert("ss -Hltn".into(), (0, text.into()));
+        };
+        ss(
+            &mut sys,
+            "LISTEN 0 5 127.0.0.1:953 0.0.0.0:*\nLISTEN 0 128 0.0.0.0:7341 0.0.0.0:*\n",
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Port 7341 en écoute sur toutes les interfaces"),
+            "{o}"
+        );
+
+        ss(&mut sys, "LISTEN 0 128 127.0.0.1:7341 0.0.0.0:*\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Port 7341 en écoute sur 127.0.0.1 seulement — les autres machines"),
+            "{o}"
+        );
+        ss(&mut sys, "LISTEN 0 128 192.168.1.20:7341 0.0.0.0:*\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Port 7341 en écoute sur 192.168.1.20 seulement — l'oreille du PC"),
+            "{o}"
+        );
+
+        // Port choisi dans la configuration ; IPv6 sur toutes les interfaces.
+        write_config(&paths, "[network]\nlisten = \"0.0.0.0:7400\"\n");
+        ss(&mut sys, "LISTEN 0 128 [::]:7400 [::]:*\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Port 7400 en écoute sur toutes les interfaces"),
+            "{o}"
+        );
+
+        // Adresse invalide, puis réseau désactivé : rien d'autre n'est vérifié.
+        write_config(&paths, "[network]\nlisten = \"7341\"\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! [network] listen invalide (« 7341 »"), "{o}");
+        write_config(&paths, "[network]\nenabled = false\n");
+        sys.cmds.borrow_mut().clear();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Réseau des oreilles désactivé"), "{o}");
+        assert!(!o.contains("Port "), "{o}");
+        assert!(!sys.cmds.borrow().iter().any(|c| c == "ss -Hltn"));
+        assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_liste_les_oreilles() {
+        use jarvis_protocol::{ControlResponse, EarId, EarSummary};
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Aucune oreille appairée"), "{o}");
+        assert!(o.contains("`jarvis pair`"), "{o}");
+
+        // Cerveau injoignable : nombre lu dans le registre.
+        let ears = paths.data_dir.join("ears.toml");
+        fs::create_dir_all(&paths.data_dir).unwrap();
+        fs::write(
+            &ears,
+            "[[ear]]\nid = \"a1\"\nname = \"PC\"\n\n[[ear]]\nid = \"b2\"\nname = \"Salon\"\n",
+        )
+        .unwrap();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Oreilles appairées : 2 (cerveau injoignable : connexions inconnues)"),
+            "{o}"
+        );
+
+        let ear = |name: &str, connected, local| EarSummary {
+            id: EarId::new(name.to_lowercase()),
+            name: name.into(),
+            platform: "linux".into(),
+            connected,
+            local,
+            person: None,
+        };
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![ear("PC", true, true), ear("Salon", false, false)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Oreilles appairées : 2 (connectées : PC)"),
+            "{o}"
+        );
+        assert!(!o.contains("Oreille du PC pas encore appairée"), "{o}");
+
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![ear("Salon", false, false)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Oreilles appairées : 1 (aucune connectée)"),
+            "{o}"
+        );
+        assert!(o.contains("! Oreille du PC pas encore appairée"), "{o}");
+
+        sys.ears = Some(ControlResponse::Error {
+            message: "Le réseau des oreilles est désactivé (voir les journaux du cerveau).".into(),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Réseau des oreilles arrêté dans le cerveau"),
+            "{o}"
+        );
+
+        // Cerveau d'avant le réseau : `ListEars` inconnu.
+        sys.ears = Some(ControlResponse::Error {
+            message: "requête invalide".into(),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "! Cerveau trop ancien pour le réseau des oreilles — lancez `jarvisctl update`"
+            ),
+            "{o}"
+        );
+
+        fs::write(&ears, "pas du toml [[").unwrap();
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Registre des oreilles illisible"), "{o}");
+        assert_eq!(code, 1);
+    }
+
+    fn summary(
+        name: &str,
+        platform: &str,
+        connected: bool,
+        local: bool,
+    ) -> jarvis_protocol::EarSummary {
+        jarvis_protocol::EarSummary {
+            id: jarvis_protocol::EarId::new(name.to_lowercase()),
+            name: name.into(),
+            platform: platform.into(),
+            connected,
+            local,
+            person: None,
+        }
+    }
+
+    fn person(name: &str, role: &str) -> jarvis_protocol::PersonSummary {
+        jarvis_protocol::PersonSummary {
+            name: name.into(),
+            role: role.into(),
+            owner: role == "admin",
+            ears: vec![],
+            voiceprint: false,
+        }
+    }
+
+    fn role(name: &str, builtin: bool) -> jarvis_protocol::RoleSummary {
+        jarvis_protocol::RoleSummary {
+            name: name.into(),
+            tools: vec![],
+            confirm: false,
+            agent: false,
+            builtin,
+            people: 0,
+        }
+    }
+
+    #[test]
+    fn doctor_affiche_les_personnes() {
+        let (_home, paths, mut sys) = installed();
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: None,
+        });
+        sys.roles = Some(ControlResponse::Roles {
+            roles: vec![role("admin", true)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin), 1 rôle intégré\n"),
+            "{o}"
+        );
+        // Des rôles créés sont comptés.
+        sys.roles = Some(ControlResponse::Roles {
+            roles: vec![
+                role("admin", true),
+                role("famille", false),
+                role("amis", false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("1 personne (Charles, admin), 1 rôle intégré, 2 rôles créés"),
+            "{o}"
+        );
+        // Sans réponse sur les rôles, la mention disparaît.
+        sys.roles = None;
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes et rôles : 1 personne (Charles, admin)\n"),
+            "{o}"
+        );
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin"), person("Léa", "famille")],
+            degraded: None,
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Personnes : 2 (Charles admin, Léa famille)"),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_annuaire_illisible_ne_liste_pas_les_oreilles() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![summary("Salon", "linux", true, false)],
+        });
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: Some("TOML invalide".into()),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Annuaire des personnes illisible"), "{o}");
+        assert!(!o.contains("sans personne reconnue"), "{o}");
+    }
+
+    #[test]
+    fn doctor_signale_l_annuaire_illisible() {
+        let (_home, paths, mut sys) = installed();
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: Some("/x/people.toml : TOML invalide".into()),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "! Annuaire des personnes illisible (/x/people.toml : TOML invalide) — mode \
+                 dégradé : seule votre voix reconnue et le texte tapé ont des droits"
+            ),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_signale_l_oreille_sans_personne() {
+        let (_home, paths, mut sys) = installed();
+        let mut lea = summary("Chambre", "linux", true, false);
+        lea.person = Some("Léa".into());
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", true, true),
+                lea,
+                summary("Salon", "linux", true, false),
+            ],
+        });
+        sys.people = Some(ControlResponse::People {
+            people: vec![person("Charles", "admin")],
+            degraded: None,
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Oreille « Salon » sans personne reconnue"),
+            "{o}"
+        );
+        assert!(!o.contains("« Chambre » sans personne"), "{o}");
+        assert!(!o.contains("« PC » sans personne"), "{o}");
+    }
+
+    #[test]
+    fn doctor_cerveau_sans_personnes() {
+        let (_home, paths, mut sys) = installed();
+        sys.people = Some(ControlResponse::Error {
+            message: "requête invalide".into(),
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("· Cerveau d'avant les personnes et les rôles"),
+            "{o}"
+        );
+        assert!(!o.contains("! Cerveau d'avant"), "{o}");
+    }
+
+    #[test]
+    fn doctor_cerveau_injoignable_ne_dit_rien_des_personnes() {
+        let (_home, paths, sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("Personnes"), "{o}");
+        assert!(!o.contains("personnes"), "{o}");
+    }
+
+    #[test]
+    fn doctor_signale_l_oreille_android_deconnectee() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", true, true),
+                summary("Pixel 4 XL", "android", false, false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "· Oreille « Pixel 4 XL » (android) déconnectée — \
+                 ouvrez l'appli Jarvis sur le téléphone"
+            ),
+            "{o}"
+        );
+        // Information seulement : ni avertissement ni échec pour cette oreille.
+        assert!(!o.contains("! Oreille « Pixel 4 XL »"), "{o}");
+        assert!(!o.contains("✗ Oreille « Pixel 4 XL »"), "{o}");
+
+        // Reconnectée : plus de ligne.
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", true, true),
+                summary("Pixel 4 XL", "android", true, false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("Oreille « Pixel 4 XL »"), "{o}");
+
+        // Autre machine distante : conseil adapté.
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![summary("Salon", "linux", false, false)],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains(
+                "· Oreille « Salon » (linux) déconnectée — \
+                 vérifiez que la machine est allumée et que l'oreille y tourne"
+            ),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_ne_signale_pas_l_oreille_locale_deconnectee() {
+        let (_home, paths, mut sys) = installed();
+        sys.ears = Some(ControlResponse::Ears {
+            ears: vec![
+                summary("PC", "linux", false, true),
+                summary("Pixel 4 XL", "android", true, false),
+            ],
+        });
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("· Oreille"), "{o}");
+        assert!(
+            o.contains("✓ Oreilles appairées : 2 (connectées : Pixel 4 XL)"),
+            "{o}"
+        );
+    }
+
+    #[test]
+    fn doctor_signale_le_pare_feu() {
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Pare-feu ufw inactif"), "{o}");
+        assert!(o.contains("! avahi-daemon inactif"), "{o}");
+
+        sys.replies.insert(
+            "cat /etc/ufw/ufw.conf".into(),
+            (0, "# commentaire\nENABLED=yes\nLOGLEVEL=low\n".into()),
+        );
+        sys.replies.insert(
+            "systemctl is-active avahi-daemon".into(),
+            (0, "active\n".into()),
+        );
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("! Pare-feu ufw actif"), "{o}");
+        assert!(
+            o.contains("`sudo ufw allow from 192.168.0.0/16 to any port 7341 proto tcp`"),
+            "{o}"
+        );
+        assert!(
+            o.contains("`sudo ufw allow from 192.168.0.0/16 to any port 5353 proto udp`"),
+            "{o}"
+        );
+        assert!(o.contains("✓ avahi-daemon actif"), "{o}");
+        // Le port des oreilles suit la configuration.
+        write_config(&paths, "[network]\nlisten = \"0.0.0.0:7400\"\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("to any port 7400 proto tcp`"), "{o}");
+        assert_eq!(code, 1);
+    }
+}

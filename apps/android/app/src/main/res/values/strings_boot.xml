@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="boot_tap_to_start">Jarvis : touchez pour démarrer l\'écoute</string>
+    <string name="boot_tap_to_start_text">Le micro ne peut être ouvert qu\'avec l\'appli visible.</string>
+</resources>

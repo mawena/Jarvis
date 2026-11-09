@@ -1,0 +1,27 @@
+pub mod announce;
+pub mod arbiter;
+pub mod brain;
+pub mod config;
+pub mod discovery;
+pub mod ducking;
+pub mod ears;
+pub mod fastpath;
+pub mod identity;
+pub mod intent;
+pub mod listen;
+pub mod llm;
+pub mod logging;
+pub mod mode_store;
+pub mod net;
+pub mod pairing;
+pub mod people;
+pub mod persona;
+pub mod server;
+pub mod speaker;
+pub mod stt;
+pub mod summarizer;
+pub mod system_skill;
+#[cfg(any(test, feature = "test-util"))]
+pub mod testing;
+pub mod tls;
+pub mod tts;

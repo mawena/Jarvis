@@ -1,0 +1,31 @@
+[package]
+name = "jarvis-ear"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "jarvis-ear"
+path = "src/main.rs"
+
+[dependencies]
+jarvis-protocol.workspace = true
+jarvis-ear-core.workspace = true
+cpal.workspace = true
+ksni.workspace = true
+rustpotter.workspace = true
+earshot.workspace = true
+clap.workspace = true
+tokio.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+hound.workspace = true
+directories.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

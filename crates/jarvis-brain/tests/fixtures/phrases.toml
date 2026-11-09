@@ -1,0 +1,359 @@
+# Jeu de phrases de référence.
+# fast = true : doit être reconnue par match_fast (outil et arguments exacts).
+# fast = false : formulation libre, réservée à l'IA (seul l'outil est vérifié).
+
+[[phrase]]
+text = "suivant"
+tool = "media_next"
+args = {}
+fast = true
+
+[[phrase]]
+text = "Jarvis, chanson précédente"
+tool = "media_previous"
+args = {}
+fast = true
+
+[[phrase]]
+text = "mets en pause"
+tool = "media_pause"
+args = {}
+fast = true
+
+[[phrase]]
+text = "reprends"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "plus fort"
+tool = "volume_up"
+args = {}
+fast = true
+
+[[phrase]]
+text = "baisse le son"
+tool = "volume_down"
+args = {}
+fast = true
+
+[[phrase]]
+text = "c'est quoi cette chanson"
+tool = "media_now_playing"
+args = {}
+fast = true
+
+[[phrase]]
+text = "passe en mode local"
+tool = "set_mode"
+args = { mode = "local" }
+fast = true
+
+[[phrase]]
+text = "mode en ligne"
+tool = "set_mode"
+args = { mode = "online" }
+fast = true
+
+[[phrase]]
+text = "qu'est-ce que tu fais"
+tool = "status"
+args = {}
+fast = true
+
+[[phrase]]
+text = "lance VS Code"
+tool = "app_launch"
+args = { name = "vs code" }
+fast = true
+
+[[phrase]]
+text = "ouvre Firefox"
+tool = "app_launch"
+args = { name = "firefox" }
+fast = true
+
+[[phrase]]
+text = "démarre Spotify"
+tool = "app_launch"
+args = { name = "spotify" }
+fast = true
+
+[[phrase]]
+text = "musique suivante"
+tool = "media_next"
+args = {}
+fast = true
+
+[[phrase]]
+text = "monte le volume"
+tool = "volume_up"
+args = {}
+fast = true
+
+[[phrase]]
+text = "mets un peu plus de son"
+tool = "volume_up"
+args = {}
+fast = false
+
+[[phrase]]
+text = "ouvre-moi le navigateur"
+tool = "app_launch"
+args = { name = "navigateur" }
+fast = true
+
+[[phrase]]
+text = "je veux écouter autre chose"
+tool = "media_next"
+args = {}
+fast = false
+
+[[phrase]]
+text = "tu peux baisser un peu le volume"
+tool = "volume_down"
+args = {}
+fast = false
+
+[[phrase]]
+text = "remets la chanson d'avant"
+tool = "media_previous"
+args = {}
+fast = false
+
+[[phrase]]
+text = "stoppe la musique deux secondes"
+tool = "media_pause"
+args = {}
+fast = false
+
+[[phrase]]
+text = "c'est quel morceau là"
+tool = "media_now_playing"
+args = {}
+fast = false
+
+[[phrase]]
+text = "je n'entends rien, augmente le son"
+tool = "volume_up"
+args = {}
+fast = false
+
+[[phrase]]
+text = "mets un peu plus de son s'il te plaît"
+tool = "volume_up"
+args = {}
+fast = false
+
+[[phrase]]
+text = "mets la musique en pause un instant"
+tool = "media_pause"
+args = {}
+fast = false
+
+[[phrase]]
+text = "j'aimerais bien avoir la calculatrice"
+tool = "app_launch"
+args = { name = "calculatrice" }
+fast = false
+
+[[phrase]]
+text = "lance-moi le terminal"
+tool = "app_launch"
+args = { name = "terminal" }
+fast = true
+
+[[phrase]]
+text = "chanson précédente"
+tool = "media_previous"
+args = {}
+fast = true
+
+[[phrase]]
+text = "relance la musique"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "moins fort"
+tool = "volume_down"
+args = {}
+fast = true
+
+[[phrase]]
+text = "qu'est-ce qui passe"
+tool = "media_now_playing"
+args = {}
+fast = true
+
+[[phrase]]
+text = "reprendre"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "Jarvis, tu peux reprendre s'il te plaît"
+tool = "media_play"
+args = {}
+fast = true
+
+[[phrase]]
+text = "peux-tu mettre pause merci"
+tool = "media_pause"
+args = {}
+fast = true
+
+[[phrase]]
+text = "coupe la musique"
+tool = "media_pause"
+args = {}
+fast = true
+
+[[phrase]]
+text = "passe à la suivante"
+tool = "media_next"
+args = {}
+fast = true
+
+[[phrase]]
+text = "est-ce que tu peux remettre la précédente"
+tool = "media_previous"
+args = {}
+fast = true
+
+[[phrase]]
+text = "augmente le volume stp"
+tool = "volume_up"
+args = {}
+fast = true
+
+[[phrase]]
+text = "mets moins fort"
+tool = "volume_down"
+args = {}
+fast = true
+
+[[phrase]]
+text = "c'est quoi ce morceau"
+tool = "media_now_playing"
+args = {}
+fast = true
+
+[[phrase]]
+text = "est-ce que tu peux lancer spotify"
+tool = "app_launch"
+args = { name = "spotify" }
+fast = true
+
+# Recherche, résultats et vidéos (phase 6).
+
+[[phrase]]
+text = "cherche la météo de demain"
+tool = "web_search"
+args = { query = "la météo de demain" }
+fast = true
+
+[[phrase]]
+text = "Jarvis, cherche la météo à Lomé s'il te plaît"
+tool = "web_search"
+args = { query = "la météo à Lomé" }
+fast = true
+
+[[phrase]]
+text = "recherche sur internet les horaires du TER"
+tool = "web_search"
+args = { query = "les horaires du TER" }
+fast = true
+
+[[phrase]]
+text = "cherche le prix du cacao sur internet"
+tool = "web_search"
+args = { query = "le prix du cacao" }
+fast = true
+
+[[phrase]]
+text = "fais-moi une recherche sur Kofi Annan"
+tool = "web_search"
+args = { query = "Kofi Annan" }
+fast = true
+
+[[phrase]]
+text = "trouve-moi des infos sur la Coupe d'Afrique"
+tool = "web_search"
+args = { query = "la Coupe d'Afrique" }
+fast = true
+
+[[phrase]]
+text = "ouvre les résultats"
+tool = "open_results"
+args = {}
+fast = true
+
+[[phrase]]
+text = "montre-moi les liens"
+tool = "open_results"
+args = {}
+fast = true
+
+[[phrase]]
+text = "ouvre le deuxième résultat"
+tool = "open_results"
+args = { index = 2 }
+fast = true
+
+[[phrase]]
+text = "ouvre le résultat numéro 3"
+tool = "open_results"
+args = { index = 3 }
+fast = true
+
+[[phrase]]
+text = "lance la vidéo de Squeezie"
+tool = "play_video"
+args = { query = "Squeezie" }
+fast = true
+
+[[phrase]]
+text = "mets une vidéo de chats"
+tool = "play_video"
+args = { query = "chats" }
+fast = true
+
+[[phrase]]
+text = "lance Stromae sur YouTube"
+tool = "play_video"
+args = { query = "Stromae" }
+fast = true
+
+[[phrase]]
+text = "lance la bande-annonce de Dune"
+tool = "play_video"
+args = { query = "bande-annonce de Dune" }
+fast = true
+
+[[phrase]]
+text = "j'aimerais savoir ce qui se passe à Lomé aujourd'hui"
+tool = "web_search"
+args = { query = "ce qui se passe à Lomé aujourd'hui" }
+fast = false
+
+[[phrase]]
+text = "qu'est-ce qu'on dit sur internet du nouveau téléphone de Samsung"
+tool = "web_search"
+args = { query = "nouveau téléphone Samsung" }
+fast = false
+
+[[phrase]]
+text = "trouve-moi un tuto vidéo pour changer une roue"
+tool = "play_video"
+args = { query = "tuto changer une roue" }
+fast = false
+
+[[phrase]]
+text = "affiche-moi les liens de tout à l'heure"
+tool = "open_results"
+args = {}
+fast = false

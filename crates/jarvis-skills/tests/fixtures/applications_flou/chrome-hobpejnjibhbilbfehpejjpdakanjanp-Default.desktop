@@ -1,0 +1,4 @@
+[Desktop Entry]
+Type=Application
+Name=Snapchat
+Exec=chrome --app=x

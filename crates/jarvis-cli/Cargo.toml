@@ -1,0 +1,17 @@
+[package]
+name = "jarvis-cli"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "jarvis"
+path = "src/main.rs"
+
+[dependencies]
+jarvis-protocol.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+qrcode.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

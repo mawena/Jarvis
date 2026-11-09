@@ -1,0 +1,18 @@
+# Questions libres : aucun outil ne correspond, le modèle doit répondre en texte.
+
+questions = [
+  "quelle est la capitale du Pérou",
+  "raconte-moi une blague courte",
+  "combien font 12 fois 7",
+  "quelle heure est-il",
+  "qui a écrit les Misérables",
+  "traduis bonjour en anglais",
+  "quel temps fait-il demain ?",
+  "pourquoi le ciel est bleu",
+  "c'est quoi un trou noir",
+  "explique-moi la photosynthèse en deux phrases",
+  "dis-moi quelque chose de drôle",
+  "combien y a-t-il de jours dans une année",
+  "qui est le président de la France",
+  "comment fait-on des crêpes",
+]

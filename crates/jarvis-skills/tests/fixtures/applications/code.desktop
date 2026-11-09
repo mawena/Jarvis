@@ -1,0 +1,5 @@
+[Desktop Entry]
+Type=Application
+Name=Visual Studio Code
+Exec=/usr/share/code/code --no-sandbox %F
+StartupWMClass=Code

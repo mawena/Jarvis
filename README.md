@@ -6,8 +6,9 @@ pause », « Jarvis, cherche la météo de demain à Lomé »), il comprend, agi
 Jarvis tournent **entièrement sur le PC**. Seul le mode « en ligne », choisi exprès, envoie le
 texte des phrases à Claude.
 
-> **État :** en développement sur `develop`, utilisé au quotidien sur le PC de son auteur.
-> `main` recevra la première version (`1.0.0`). Avancement détaillé :
+> **État :** préversion `0.1.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
+> développement continue sur `develop`. La `1.0.0` viendra après la mise en service et les essais
+> réels. Nouveautés : [CHANGELOG.md](CHANGELOG.md) ; avancement détaillé :
 > [ROADMAP.md](ROADMAP.md).
 
 ## Ce qu'il sait faire
@@ -43,7 +44,9 @@ Garde-fous :
 
 - **L'oreille** écoute en permanence, mais n'envoie rien avant d'avoir entendu « Jarvis ». Elle
   joue les bips et la voix de Jarvis, et affiche une icône avec un menu (couper l'écoute, mode,
-  statut). Aujourd'hui sur le PC ; téléphone Android et iPhone prévus.
+  statut). Sur le PC, et sur toute machine Linux de la maison appairée par `jarvis pair`
+  (réseau local, TLS) ; téléphone Android (voir [docs/android.md](docs/android.md)), iPhone prévu. Si plusieurs oreilles entendent
+  « Jarvis », une seule répond.
 - **Le cerveau** transcrit la phrase (Whisper), vérifie la voix (CAM++), comprend la demande
   et exécute la bonne compétence. Il répond avec une voix française (Piper).
 - **Aucun son n'est enregistré sur le disque** : seule une empreinte de la voix est gardée,
@@ -85,6 +88,8 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 | « Jarvis, … » | parler à Jarvis (l'oreille tourne en service) |
 | `jarvis say "lance VS Code"` | même chose, par écrit |
 | `jarvis mode local` / `jarvis mode en-ligne` | choisir l'IA |
+| `jarvis pair` / `jarvis ears` / `jarvis unpair <nom ou id>` | appairer, lister, retirer une oreille |
+| `jarvis person …` / `jarvis role …` | personnes et rôles (qui a le droit de demander quoi) |
 | `jarvisctl status` | état du cerveau, de l'oreille, du mode, d'Ollama |
 | `jarvisctl logs [-f] [--oreille]` | journaux |
 | `jarvisctl start` / `stop` / `restart` `[cerveau\|oreille]` | piloter les services |
@@ -93,11 +98,21 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 Les réglages sont dans `~/.config/jarvis/config.toml` (cerveau) et `~/.config/jarvis/ear.toml`
 (oreille). Toutes les clés sont facultatives.
 
+## Personnes et rôles
+
+Jarvis peut connaître plusieurs personnes, chacune avec un rôle (la liste de ce qu'elle peut
+demander). Par défaut il n'y a que Charles, `admin`, et rien ne change pour lui. On peut par
+exemple rattacher l'oreille d'un proche à un rôle `famille` qui ne permet que la musique : la
+personne qui parle est déduite de l'oreille, sauf la voix reconnue de Charles qui vaut Charles
+partout. Un invité ne peut jamais faire d'action risquée ni lancer l'agent. Tout se gère au
+clavier (`jarvis person …`, `jarvis role …`). Le détail est dans
+[docs/personnes.md](docs/personnes.md).
+
 ## Ce qui quitte le PC
 
 | | Mode local | Mode en ligne |
 | --- | --- | --- |
-| Son du micro | jamais | jamais |
+| Son du micro | jamais (une autre oreille l'envoie au PC après « Jarvis », chiffré, sur le réseau local) | pareil |
 | Texte des phrases | reste sur le PC | phrases non reconnues par les raccourcis → Claude |
 | Recherche | SearXNG local, qui relaie la requête aux moteurs | pareil, résumé par Claude |
 
@@ -110,6 +125,9 @@ Le détail est dans [docs/recherche.md](docs/recherche.md) et
   désinstallation.
 - [docs/oreille.md](docs/oreille.md) : l'oreille du PC, enrôlement, icône, commandes vocales,
   voix, réglages, dépannage (dont les mots mal compris).
+- [docs/reseau.md](docs/reseau.md) : oreilles en réseau, appairage, pare-feu, certificat.
+- [docs/android.md](docs/android.md) : l'oreille Android (construire, installer, appairer, batterie).
+- [docs/personnes.md](docs/personnes.md) : personnes, rôles et droits, qui parle, `people.toml`.
 - [docs/recherche.md](docs/recherche.md) : recherche sur internet et vidéos.
 - [docs/ia-locale.md](docs/ia-locale.md) : choix du modèle local et de Whisper, mesures.
 - [docs/essais/](docs/essais/README.md) : fiches d'essai en conditions réelles.
@@ -125,8 +143,9 @@ Espace de travail Cargo (Rust, édition 2024) :
 | `jarvis-protocol` | messages échangés entre oreilles, outils et cerveau |
 | `jarvis-skills` | compétences : médias (MPRIS, PipeWire), applications, recherche, vidéos, alimentation… |
 | `jarvis-brain` | le cerveau : service, compréhension, IA, Whisper, empreinte vocale, voix |
-| `jarvis-ear-core` | cœur commun des oreilles : mot d'éveil, fin de phrase |
+| `jarvis-ear-core` | cœur commun des oreilles : mot d'éveil, fin de phrase, réseau (connexion, appairage, découverte) |
 | `jarvis-ear` | l'oreille du PC : micro, haut-parleur, icône |
+| `jarvis-ear-ffi` | façade UniFFI de l'oreille pour l'appli Android (`apps/android`) |
 | `jarvis-cli` | l'outil `jarvis` |
 | `jarvisctl` | installation, services, diagnostic, mises à jour |
 
@@ -150,3 +169,8 @@ cargo test -p jarvis-brain    # une seule crate
 - **Dépendances :** ne jamais lancer `cargo update` sans `-p` : `half` doit rester en 2.4.1,
   figé dans `Cargo.lock`.
 - **Langue :** le code est commenté en français, comme les messages et la documentation.
+
+## Licence
+
+Aucune licence n'est encore choisie : le code est publié pour être lu, tous droits réservés à son
+auteur.

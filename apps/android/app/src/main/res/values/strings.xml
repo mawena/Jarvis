@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Chaînes communes. Chaque tâche a son fichier : strings_service.xml,
+     strings_screens.xml, strings_boot.xml. -->
+<resources>
+    <string name="app_name">Jarvis</string>
+    <string name="library_loaded">Bibliothèque chargée : %1$s</string>
+</resources>

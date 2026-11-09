@@ -1,0 +1,59 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[workspace.dependencies]
+jarvis-protocol = { path = "crates/jarvis-protocol" }
+jarvis-skills = { path = "crates/jarvis-skills" }
+jarvis-brain = { path = "crates/jarvis-brain" }
+jarvis-ear-core = { path = "crates/jarvis-ear-core" }
+
+tokio = { version = "1.54", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1.1"
+clap = { version = "4.6", features = ["derive"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+zbus = { version = "6.1", default-features = false, features = ["tokio", "proxy"] }
+freedesktop-desktop-entry = "0.8"
+fuzzy-matcher = "0.3"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+directories = "6"
+cpal = "0.18"
+rustpotter = "3.0"
+earshot = "1.2"
+whisper-rs = { version = "0.16", features = ["tracing_backend"] }
+ksni = { version = "0.3", default-features = false, features = ["tokio"] }
+base64 = "0.22"
+hound = "3"
+# Liaison dynamique : la liaison statique entre en conflit de symboles avec whisper-rs (ggml).
+sherpa-onnx = { version = "2.0.1", default-features = false, features = ["shared"] }
+# Texte → phonèmes pour la voix Piper (espeak-ng embarqué, liaison statique).
+piper-phonemize = "1.5.9"
+
+# Phase 4 : oreilles en réseau. TLS par rustls avec le fournisseur `ring`, toujours
+# donné explicitement (aws-lc-rs est aussi lié, par reqwest).
+tokio-tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }
+mdns-sd = "0.21"
+qrcode = { version = "0.14", default-features = false }
+sha2 = "0.11"
+getrandom = "0.4"
+subtle = "2.6"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+
+# Phase 5 : oreille Android. Liaisons Kotlin par macros procédurales (pas d'UDL).
+uniffi = "0.32"
+
+wiremock = "0.6"
+tempfile = "3"

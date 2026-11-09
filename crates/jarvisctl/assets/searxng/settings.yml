@@ -1,0 +1,26 @@
+# Réglages de SearXNG pour Jarvis. Écrit une seule fois par jarvisctl :
+# vos changements sont gardés. Après un changement : `docker restart jarvis-searxng`.
+# Le secret est dans .env (SEARXNG_SECRET).
+use_default_settings: true
+
+general:
+  instance_name: Jarvis
+  enable_metrics: false
+
+search:
+  # json : utilisé par Jarvis, à garder.
+  formats:
+    - html
+    - json
+  default_lang: fr-FR
+  autocomplete: ""
+  safe_search: 1
+
+server:
+  limiter: false
+  public_instance: false
+  image_proxy: false
+
+outgoing:
+  request_timeout: 3.0
+  max_request_timeout: 5.0

@@ -1,0 +1,1303 @@
+//! Écoute côté cerveau : mot d'éveil (baisse du son) et phrases captées.
+
+use crate::brain::{Answer, Brain, REFUSED, ReplyVoice};
+use crate::ducking::Ducker;
+use crate::fastpath::{
+    BrainCommand, is_shortcut, match_brain_command, match_confirmation, match_ear_command,
+};
+use crate::identity::{Identity, identify};
+use crate::people::Trust;
+use crate::speaker::{SpeakerGate, SpeakerState, Verdict};
+use crate::stt::Transcriber;
+use jarvis_protocol::{ControlResponse, EarAction, EarId, Sound};
+use jarvis_skills::Outcome;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tracing::{info, warn};
+
+/// Dit quand une empreinte existe mais que le modèle de vérification manque.
+pub const VERIFICATION_UNAVAILABLE: &str = "La vérification de votre voix est indisponible.";
+
+const NOT_UNDERSTOOD: &str = "Pardon, je n'ai pas compris.";
+const MUTED: &str = "Bien, je n'écoute plus.";
+const UNMUTED: &str = "Je vous écoute.";
+const ALREADY_LISTENING: &str = "Je vous écoute déjà.";
+
+/// La reconnaissance vocale n'est pas disponible : le message est dit tel quel.
+#[derive(Debug, thiserror::Error)]
+#[error("La reconnaissance vocale n'est pas installée.")]
+pub struct SttUnavailable;
+
+/// Transcripteur provisoire, tant qu'aucun modèle n'est branché.
+pub struct NoTranscriber;
+
+#[async_trait::async_trait]
+impl Transcriber for NoTranscriber {
+    async fn transcribe(&self, _audio: &[f32]) -> anyhow::Result<String> {
+        Err(SttUnavailable.into())
+    }
+}
+
+pub struct ListenService {
+    brain: Arc<Brain>,
+    stt: Arc<dyn Transcriber>,
+    ducker: Arc<dyn Ducker>,
+    speaker: SpeakerState,
+}
+
+fn heard(text: &str, speech: &str, ear_action: Option<EarAction>) -> ControlResponse {
+    ControlResponse::Heard {
+        text: text.into(),
+        speech: speech.into(),
+        ear_action,
+        audio: None,
+        sound: None,
+    }
+}
+
+/// Réponse du cerveau : bip selon l'issue, écoute de la réponse si une question est posée.
+/// `sound_only_for_success` : une réussite d'un raccourci n'est dite que par le bip
+/// (une phrase vide n'est pas synthétisée).
+fn answered(text: &str, answer: Answer, sound_only_for_success: bool) -> ControlResponse {
+    let beep_only =
+        sound_only_for_success && answer.fast_path && answer.reply.outcome == Outcome::Done;
+    ControlResponse::Heard {
+        text: text.into(),
+        speech: if beep_only {
+            String::new()
+        } else {
+            answer.reply.speech
+        },
+        ear_action: answer.awaits_reply.then_some(EarAction::AwaitReply),
+        audio: None,
+        sound: match answer.reply.outcome {
+            Outcome::Done => Some(Sound::Success),
+            Outcome::Failed => Some(Sound::Failure),
+            Outcome::Info => None,
+        },
+    }
+}
+
+fn awaits_reply(r: &ControlResponse) -> bool {
+    matches!(
+        r,
+        ControlResponse::Heard {
+            ear_action: Some(EarAction::AwaitReply),
+            ..
+        }
+    )
+}
+
+/// Durée d'un audio à 16 kHz.
+fn duration(audio: &[i16]) -> Duration {
+    Duration::from_secs_f64(audio.len() as f64 / 16_000.0)
+}
+
+impl ListenService {
+    pub fn new(brain: Arc<Brain>, stt: Arc<dyn Transcriber>, ducker: Arc<dyn Ducker>) -> Self {
+        Self {
+            brain,
+            stt,
+            ducker,
+            speaker: SpeakerState::Disabled,
+        }
+    }
+
+    /// Active la vérification du locuteur avant toute transcription.
+    pub fn with_speaker(self, speaker: Option<Arc<SpeakerGate>>) -> Self {
+        self.with_speaker_state(speaker.map_or(SpeakerState::Disabled, SpeakerState::Ready))
+    }
+
+    /// Comme [`Self::with_speaker`], en tenant compte d'un modèle indisponible.
+    pub fn with_speaker_state(mut self, speaker: SpeakerState) -> Self {
+        self.speaker = speaker;
+        self
+    }
+
+    fn answered(&self, text: &str, answer: Answer) -> ControlResponse {
+        answered(text, answer, self.brain.persona().sound_only_for_success)
+    }
+
+    /// Voix d'une réponse courte de session (moins d'une seconde, non vérifiée par
+    /// `check`). Le « oui » de Charles dure souvent moins d'une seconde : un « oui » ou
+    /// un « répète » passe donc la vérification stricte de l'audio court (jamais la
+    /// session). Toute autre phrase reste non vérifiée : elle ne peut qu'annuler.
+    async fn short_reply_voice(&self, ear: &EarId, text: &str, samples: Vec<f32>) -> ReplyVoice {
+        let wants_check = match_confirmation(text) == Some(true)
+            || match_brain_command(text) == Some(BrainCommand::Repeat);
+        let SpeakerState::Ready(gate) = &self.speaker else {
+            return ReplyVoice::Unverified;
+        };
+        if !wants_check {
+            return ReplyVoice::Unverified;
+        }
+        let (g, job_ear) = (gate.clone(), ear.clone());
+        let passed = tokio::task::spawn_blocking(move || g.check_short_strict(&job_ear, &samples))
+            .await
+            .unwrap_or(false);
+        if passed {
+            info!(oreille = %ear, "réponse courte : voix reconnue (vérification stricte)");
+            ReplyVoice::Verified
+        } else {
+            info!(oreille = %ear, "réponse courte : voix non reconnue (vérification stricte)");
+            ReplyVoice::Unverified
+        }
+    }
+
+    /// « Jarvis » entendu : baisse le son.
+    pub async fn wake(&self) {
+        self.ducker.duck().await;
+    }
+
+    /// Rétablit le son sans phrase (abandon, oreille perdue).
+    pub async fn restore(&self) {
+        self.ducker.restore().await;
+    }
+
+    /// Phrase abandonnée en plein traitement (trop longue, interrompue) : son rétabli,
+    /// et plus aucune action n'attend de confirmation (comme après toute phrase qui ne
+    /// repose pas de question).
+    pub async fn abandoned(&self) {
+        self.brain.clear_pending();
+        self.ducker.restore().await;
+    }
+
+    /// Phrase captée (i16 16 kHz mono) par l'oreille `ear`. Rétablit toujours le son
+    /// d'abord. `follow_up` : réponse à une question du cerveau (`EarAction::AwaitReply`).
+    pub async fn listen(
+        &self,
+        ear: &EarId,
+        audio: &[i16],
+        muted: bool,
+        follow_up: bool,
+    ) -> ControlResponse {
+        let arrived = self.brain.now();
+        let response = self.hear(ear, audio, muted, follow_up, arrived).await;
+        // L'action en attente ne vit que jusqu'à la phrase suivante, quelle qu'elle soit
+        // (silence, voix inconnue, autre commande…), sauf si cette phrase repose une question.
+        if !awaits_reply(&response) {
+            self.brain.clear_pending();
+        }
+        response
+    }
+
+    async fn hear(
+        &self,
+        ear: &EarId,
+        audio: &[i16],
+        muted: bool,
+        follow_up: bool,
+        arrived: Instant,
+    ) -> ControlResponse {
+        self.ducker.restore().await;
+        if audio.is_empty() {
+            return heard("", "", None);
+        }
+        let samples: Vec<f32> = audio.iter().map(|&s| f32::from(s) / 32768.0).collect();
+        if let SpeakerState::Unavailable { enrolled: true } = self.speaker {
+            warn!("vérification du locuteur indisponible (modèle absent) : phrase refusée");
+            let speech = if muted { "" } else { VERIFICATION_UNAVAILABLE };
+            return heard("", speech, None);
+        }
+        // `Unavailable { enrolled: false }` : jamais enrôlé, tout est accepté sauf
+        // l'agent de code (voir `SpeakerState::unavailable`).
+        // Verdict de la voix (`None` : aucune vérification) puis qui parle : l'oreille et
+        // la voix décident (voir `identity::identify`).
+        let mut verdict = None;
+        if let SpeakerState::Ready(gate) = &self.speaker {
+            let (g, audio, job_ear) = (gate.clone(), samples.clone(), ear.clone());
+            // L'empreinte prend des dizaines de ms : hors du runtime. Le verdict est
+            // écrit au journal par `check`, avec l'oreille, le score et le seuil.
+            verdict = Some(
+                tokio::task::spawn_blocking(move || g.check(&job_ear, &audio))
+                    .await
+                    .unwrap_or_else(|e| {
+                        warn!(oreille = %ear, erreur = %e, "vérification de la voix interrompue");
+                        Verdict::NoMatch(0.0)
+                    }),
+            );
+        }
+        let (mut who, short_only) = match identify(self.brain.people(), ear, verdict) {
+            Identity::Ignore => return heard("", "", None),
+            Identity::Speak {
+                speaker,
+                short_only,
+            } => (speaker, short_only),
+        };
+        info!(
+            oreille = %ear,
+            personne = %who.person,
+            confiance = ?who.trust,
+            raccourcis_seuls = short_only,
+            "qui parle"
+        );
+        let text = match self.stt.transcribe(&samples).await {
+            Ok(t) => t.trim().to_string(),
+            Err(e) => {
+                warn!(erreur = %e, "transcription impossible");
+                let speech = match e.downcast_ref::<SttUnavailable>() {
+                    Some(u) => u.to_string(),
+                    None => NOT_UNDERSTOOD.into(),
+                };
+                return heard("", &speech, None);
+            }
+        };
+        if text.is_empty() {
+            return heard("", "", None);
+        }
+        let action = match_ear_command(&text);
+        if muted {
+            // Écoute coupée : seule la réactivation est retenue, le reste n'est pas journalisé.
+            return match action {
+                Some(EarAction::Unmute) => {
+                    info!(phrase = %text, "écoute réactivée");
+                    heard(&text, UNMUTED, Some(EarAction::Unmute))
+                }
+                _ => heard("", "", None),
+            };
+        }
+        if follow_up && action.is_none() {
+            // Réponse à une question : seulement oui / non (ou « répète »), jamais une
+            // nouvelle commande.
+            let voice = if who.trust == Trust::Unverified {
+                self.short_reply_voice(ear, &text, samples).await
+            } else {
+                ReplyVoice::Verified
+            };
+            if who.trust == Trust::Unverified && voice == ReplyVoice::Verified {
+                // La voix de Charles passe la vérification stricte : c'est lui qui répond,
+                // quelle que soit l'oreille.
+                who = self.brain.people().owner_speaker(Trust::Recognized);
+            }
+            if voice == ReplyVoice::Unverified
+                && match_brain_command(&text) == Some(BrainCommand::Repeat)
+            {
+                // Ni question reposée (délai prolongé), ni dernière réponse redite.
+                info!("« répète » court non vérifié, ignoré");
+                return heard("", "", None);
+            }
+            info!(phrase = %text, verifiee = voice == ReplyVoice::Verified, "réponse entendue");
+            let spoken_at = arrived.checked_sub(duration(audio)).unwrap_or(arrived);
+            let answer = self
+                .brain
+                .answer_follow_up_as(ear, &text, spoken_at, voice, &who)
+                .await;
+            return self.answered(&text, answer);
+        }
+        if short_only && action.is_none() && !is_shortcut(&text) {
+            // Jamais l'IA pour une voix non vérifiée : ignorée comme une voix inconnue.
+            info!("phrase courte non vérifiée, ignorée");
+            return heard("", "", None);
+        }
+        info!(phrase = %text, "texte entendu");
+        match action {
+            Some(EarAction::Mute) => heard(&text, MUTED, Some(EarAction::Mute)),
+            Some(EarAction::Unmute) => heard(&text, ALREADY_LISTENING, None),
+            // `AwaitReply` ne vient jamais d'une commande d'écoute.
+            Some(EarAction::AwaitReply) | None if short_only => {
+                match self.brain.answer_fast_as(ear, &text, &who).await {
+                    // Droit refusé sur une phrase courte (télévision, voix de passage) :
+                    // silence, comme une voix inconnue. Rien n'a été lancé pour autant.
+                    Some(a) if a.reply.speech == REFUSED => {
+                        info!("phrase courte non vérifiée refusée par les droits, sans réponse");
+                        heard("", "", None)
+                    }
+                    Some(a) => self.answered(&text, a),
+                    // Action risquée : jamais pour une voix non vérifiée.
+                    None => heard("", "", None),
+                }
+            }
+            Some(EarAction::AwaitReply) | None => {
+                let answer = self.brain.answer_as(ear, &text, &who).await;
+                self.answered(&text, answer)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::llm::Understanding;
+    use crate::mode_store::ModeStore;
+    use crate::people::People;
+    use crate::persona::Persona;
+    use crate::testing::{FakeDucker, FakeLlm, FakeSkill, FakeTranscriber};
+    use jarvis_protocol::Mode;
+
+    /// Oreille des tests (une seule).
+    fn ear() -> EarId {
+        EarId::new("test")
+    }
+
+    struct Setup {
+        service: ListenService,
+        skill: Arc<FakeSkill>,
+        ducker: Arc<FakeDucker>,
+        stt: Arc<FakeTranscriber>,
+        /// IA locale et en ligne (la même doublure).
+        llm: Arc<FakeLlm>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn llm() -> Arc<FakeLlm> {
+        Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))))
+    }
+
+    fn brain_with(dir: &tempfile::TempDir, skill: Arc<FakeSkill>, llm: Arc<FakeLlm>) -> Arc<Brain> {
+        Arc::new(Brain::new(
+            vec![skill],
+            llm.clone(),
+            llm,
+            Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+        ))
+    }
+
+    fn brain(dir: &tempfile::TempDir, skill: Arc<FakeSkill>) -> Arc<Brain> {
+        brain_with(dir, skill, llm())
+    }
+
+    fn setup(stt: FakeTranscriber) -> Setup {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = Arc::new(FakeSkill::new(&["media_next"]));
+        let ducker = Arc::new(FakeDucker::new());
+        let stt = Arc::new(stt);
+        let llm = llm();
+        Setup {
+            service: ListenService::new(
+                brain_with(&dir, skill.clone(), llm.clone()),
+                stt.clone(),
+                ducker.clone(),
+            ),
+            skill,
+            ducker,
+            stt,
+            llm,
+            _dir: dir,
+        }
+    }
+
+    const AUDIO: &[i16] = &[1, 2, 3];
+
+    /// Voix de Charles : premier échantillon bas ; voix inconnue : premier échantillon haut.
+    struct ByFirstSample;
+
+    impl crate::speaker::SpeakerVerifier for ByFirstSample {
+        fn embed(&self, audio: &[f32]) -> anyhow::Result<Vec<f32>> {
+            Ok(if audio[0] < 0.5 {
+                vec![1.0, 0.0]
+            } else {
+                vec![0.0, 1.0]
+            })
+        }
+    }
+
+    fn voice(first: i16) -> Vec<i16> {
+        let mut a = vec![0i16; 3 * 16_000];
+        a[0] = first;
+        a
+    }
+
+    fn with_gate(enrolled: bool) -> Setup {
+        with_gate_text(enrolled, "suivant")
+    }
+
+    fn with_gate_text(enrolled: bool, text: &str) -> Setup {
+        let mut s = setup(FakeTranscriber::new(text));
+        let path = s._dir.path().join("voiceprint/charles.json");
+        let gate = SpeakerGate::new(Arc::new(ByFirstSample), path, 0.55, 0.65);
+        if enrolled {
+            gate.enroll(&[vec![0.0; 16_000]]).unwrap();
+        }
+        s.service = s.service.with_speaker(Some(Arc::new(gate)));
+        s
+    }
+
+    #[tokio::test]
+    async fn voix_inconnue_ignoree_sans_transcription() {
+        let s = with_gate(true);
+        let r = s.service.listen(&ear(), &voice(20_000), false, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.stt.calls(), 0);
+        assert!(s.skill.calls().is_empty());
+        // Écoute coupée : même vérification.
+        let r = s.service.listen(&ear(), &voice(20_000), true, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.stt.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn voix_reconnue_executee() {
+        let s = with_gate(true);
+        let r = s.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.stt.calls(), 1);
+    }
+
+    /// Phrase de moins d'une seconde, voix inconnue : acceptée seulement par la session.
+    fn short_voice() -> Vec<i16> {
+        let mut a = vec![0i16; 8_000];
+        a[0] = 20_000;
+        a
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_suivant_executee() {
+        let s = with_gate(true);
+        s.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(s.skill.calls().len(), 1);
+        let r = s.service.listen(&ear(), &short_voice(), false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.skill.calls().len(), 2);
+        assert_eq!(s.llm.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_question_libre_ignoree() {
+        let s = with_gate_text(true, "quel temps fait-il");
+        s.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(s.llm.calls(), 1);
+        let r = s.service.listen(&ear(), &short_voice(), false, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.llm.calls(), 1);
+    }
+
+    #[tokio::test]
+    async fn phrase_courte_de_session_coupe_l_ecoute() {
+        let s = with_gate_text(true, "Jarvis, coupe l'écoute.");
+        s.service.listen(&ear(), &voice(0), false, false).await;
+        let r = s.service.listen(&ear(), &short_voice(), false, false).await;
+        assert_eq!(
+            r,
+            heard("Jarvis, coupe l'écoute.", MUTED, Some(EarAction::Mute))
+        );
+    }
+
+    #[tokio::test]
+    async fn sans_empreinte_executee() {
+        let s = with_gate(false);
+        let r = s.service.listen(&ear(), &voice(20_000), false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+    }
+
+    #[tokio::test]
+    async fn modele_indisponible_avec_empreinte_refuse() {
+        let mut s = setup(FakeTranscriber::new("suivant"));
+        s.service = s
+            .service
+            .with_speaker_state(SpeakerState::Unavailable { enrolled: true });
+        let r = s.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(r, heard("", VERIFICATION_UNAVAILABLE, None));
+        assert_eq!(s.stt.calls(), 0);
+        assert!(s.skill.calls().is_empty());
+        // Écoute coupée : refusée sans rien dire.
+        let r = s.service.listen(&ear(), &voice(0), true, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.stt.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn modele_indisponible_sans_empreinte_executee() {
+        let mut s = setup(FakeTranscriber::new("suivant"));
+        s.service = s
+            .service
+            .with_speaker_state(SpeakerState::Unavailable { enrolled: false });
+        let r = s.service.listen(&ear(), &voice(20_000), false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+    }
+
+    #[tokio::test]
+    async fn voix_inconnue_restaure_la_musique() {
+        let s = with_gate(true);
+        s.service.listen(&ear(), &voice(20_000), false, false).await;
+        assert_eq!(s.ducker.events(), ["restore"]);
+    }
+
+    #[tokio::test]
+    async fn listen_transcrit_puis_agit() {
+        let s = setup(FakeTranscriber::new("suivant"));
+        let r = s.service.listen(&ear(), AUDIO, false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.skill.calls()[0].0, "media_next");
+        assert_eq!(s.ducker.events(), ["restore"]);
+    }
+
+    #[tokio::test]
+    async fn listen_vide_retablit_volume() {
+        let s = setup(FakeTranscriber::new("suivant"));
+        let r = s.service.listen(&ear(), &[], false, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.ducker.events(), ["restore"]);
+        assert_eq!(s.stt.calls(), 0);
+    }
+
+    #[tokio::test]
+    async fn transcription_vide_ou_en_echec() {
+        let s = setup(FakeTranscriber::new("  "));
+        assert_eq!(
+            s.service.listen(&ear(), AUDIO, false, false).await,
+            heard("", "", None)
+        );
+        let s = setup(FakeTranscriber::failing());
+        assert_eq!(
+            s.service.listen(&ear(), AUDIO, false, false).await,
+            heard("", NOT_UNDERSTOOD, None)
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let svc = ListenService::new(
+            brain(&dir, Arc::new(FakeSkill::new(&[]))),
+            Arc::new(NoTranscriber),
+            Arc::new(FakeDucker::new()),
+        );
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard("", "La reconnaissance vocale n'est pas installée.", None)
+        );
+    }
+
+    #[tokio::test]
+    async fn wake_baisse_le_son() {
+        let s = setup(FakeTranscriber::new("x"));
+        s.service.wake().await;
+        assert_eq!(s.ducker.events(), ["duck"]);
+    }
+
+    #[tokio::test]
+    async fn ecoute_coupee_ignore_le_reste() {
+        let s = setup(FakeTranscriber::new("suivant"));
+        let r = s.service.listen(&ear(), AUDIO, true, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(s.skill.calls().is_empty());
+        assert_eq!(s.ducker.events(), ["restore"]);
+    }
+
+    #[tokio::test]
+    async fn ecoute_coupee_ignore_aussi_coupe_l_ecoute() {
+        let s = setup(FakeTranscriber::new("Jarvis, coupe l'écoute."));
+        let r = s.service.listen(&ear(), AUDIO, true, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(s.skill.calls().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ecoute_coupee_accepte_reactivation() {
+        let s = setup(FakeTranscriber::new("Jarvis, réactive l'écoute."));
+        let r = s.service.listen(&ear(), AUDIO, true, false).await;
+        assert_eq!(
+            r,
+            heard(
+                "Jarvis, réactive l'écoute.",
+                UNMUTED,
+                Some(EarAction::Unmute)
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn coupe_l_ecoute_renvoie_mute() {
+        let s = setup(FakeTranscriber::new("Jarvis, coupe l'écoute."));
+        let r = s.service.listen(&ear(), AUDIO, false, false).await;
+        assert_eq!(
+            r,
+            heard("Jarvis, coupe l'écoute.", MUTED, Some(EarAction::Mute))
+        );
+        assert!(s.skill.calls().is_empty());
+    }
+
+    // --- Confirmations et bips ---
+
+    use crate::testing::ManualClock;
+    use jarvis_skills::power::{POWER_DELAY, PowerSkill};
+    use jarvis_skills::{FakeRunner, Reply, SkillError};
+
+    /// Transcripteur qui renvoie les phrases données, dans l'ordre.
+    struct Script(std::sync::Mutex<std::collections::VecDeque<String>>);
+
+    #[async_trait::async_trait]
+    impl Transcriber for Script {
+        async fn transcribe(&self, _audio: &[f32]) -> anyhow::Result<String> {
+            Ok(self.0.lock().unwrap().pop_front().unwrap_or_default())
+        }
+    }
+
+    struct Confirm {
+        service: ListenService,
+        brain: Arc<Brain>,
+        runner: Arc<FakeRunner>,
+        clock: Arc<ManualClock>,
+        _dir: tempfile::TempDir,
+    }
+
+    /// Compétence d'alimentation, empreinte de Charles enregistrée.
+    fn confirm(lines: &[&str]) -> Confirm {
+        confirm_with(lines, Persona::default())
+    }
+
+    fn confirm_with(lines: &[&str], persona: Persona) -> Confirm {
+        confirm_people(lines, persona, People::admin_only("Charles"))
+    }
+
+    /// Comme `confirm`, avec Léa (rôle `famille` : `media_*`) sur l'oreille « chambre ».
+    fn confirm_guest(lines: &[&str]) -> Confirm {
+        let people = People::admin_only("Charles");
+        let tools = ["media_next".to_string()];
+        people
+            .add_role("famille", vec!["media_*".into()], false, false, &tools)
+            .unwrap();
+        people.add_person("Léa", "famille").unwrap();
+        people.attach("Léa", &chambre()).unwrap();
+        confirm_people(lines, Persona::default(), people)
+    }
+
+    fn chambre() -> EarId {
+        EarId::new("chambre")
+    }
+
+    fn confirm_people(lines: &[&str], persona: Persona, people: People) -> Confirm {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = Arc::new(FakeRunner::new());
+        let clock = Arc::new(ManualClock::new());
+        let brain = Arc::new(
+            Brain::new(
+                vec![
+                    Arc::new(PowerSkill::new(runner.clone())),
+                    Arc::new(FakeSkill::new(&["media_next"])),
+                ],
+                llm(),
+                llm(),
+                Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+            )
+            .with_persona(persona)
+            .with_people(Arc::new(people))
+            .with_clock(clock.clone()),
+        );
+        let script = Script(std::sync::Mutex::new(
+            lines.iter().map(|l| l.to_string()).collect(),
+        ));
+        let gate = SpeakerGate::new(
+            Arc::new(ByFirstSample),
+            dir.path().join("voiceprint/charles.json"),
+            0.55,
+            0.65,
+        );
+        gate.enroll(&[vec![0.0; 16_000]]).unwrap();
+        let service =
+            ListenService::new(brain.clone(), Arc::new(script), Arc::new(FakeDucker::new()))
+                .with_speaker(Some(Arc::new(gate)));
+        Confirm {
+            service,
+            brain,
+            runner,
+            clock,
+            _dir: dir,
+        }
+    }
+
+    fn suspend_call() -> Vec<(String, Vec<String>)> {
+        vec![("systemctl".to_string(), vec!["suspend".to_string()])]
+    }
+
+    impl Confirm {
+        /// Commandes lancées, une fois passé le délai de l'alimentation (horloge de
+        /// tokio en pause : l'attente est instantanée).
+        async fn ran(&self) -> Vec<(String, Vec<String>)> {
+            tokio::time::sleep(POWER_DELAY + Duration::from_secs(1)).await;
+            self.runner.calls()
+        }
+    }
+
+    fn question() -> ControlResponse {
+        heard(
+            "mets le PC en veille",
+            "Je mets le PC en veille, Monsieur ?",
+            Some(EarAction::AwaitReply),
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn question_puis_oui_avec_bip_de_reussite() {
+        let c = confirm(&["mets le PC en veille", "oui"]);
+        assert_eq!(
+            c.service.listen(&ear(), &voice(0), false, false).await,
+            question()
+        );
+        assert!(c.ran().await.is_empty());
+        let r = c.service.listen(&ear(), &voice(0), false, true).await;
+        assert_eq!(
+            r,
+            ControlResponse::Heard {
+                text: "oui".into(),
+                speech: "Je mets le PC en veille.".into(),
+                ear_action: None,
+                audio: None,
+                sound: Some(Sound::Success),
+            }
+        );
+        assert_eq!(c.ran().await, suspend_call());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phrase_abandonnee_oublie_la_question() {
+        let c = confirm(&["mets le PC en veille", "oui"]);
+        assert_eq!(
+            c.service.listen(&ear(), &voice(0), false, false).await,
+            question()
+        );
+        assert!(c.brain.has_pending());
+        // La phrase suivante est abandonnée (trop longue) : la question avec elle.
+        c.service.abandoned().await;
+        assert!(!c.brain.has_pending());
+        c.service.listen(&ear(), &voice(0), false, true).await;
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_d_une_autre_oreille_n_execute_pas() {
+        let (salon, cuisine) = (EarId::new("salon"), EarId::new("cuisine"));
+        let c = confirm(&["mets le PC en veille", "oui", "oui"]);
+        assert_eq!(
+            c.service.listen(&salon, &voice(0), false, false).await,
+            question()
+        );
+        // Voix de Charles, mais sur une autre oreille : rien.
+        let r = c.service.listen(&cuisine, &voice(0), false, true).await;
+        assert_eq!(r, heard("oui", "", None));
+        assert!(!c.brain.has_pending());
+        c.service.listen(&salon, &voice(0), false, true).await;
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn session_vocale_propre_a_chaque_oreille() {
+        let (salon, cuisine) = (EarId::new("salon"), EarId::new("cuisine"));
+        let s = with_gate(true);
+        s.service.listen(&salon, &voice(0), false, false).await;
+        assert_eq!(s.skill.calls().len(), 1);
+        // Phrase courte sur une autre oreille : hors session, ignorée.
+        let r = s
+            .service
+            .listen(&cuisine, &short_voice(), false, false)
+            .await;
+        assert_eq!(r, heard("", "", None));
+        assert_eq!(s.skill.calls().len(), 1);
+        // Sur la même oreille : acceptée.
+        let r = s.service.listen(&salon, &short_voice(), false, false).await;
+        assert_eq!(r, heard("suivant", "ok", None));
+        assert_eq!(s.skill.calls().len(), 2);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voix_inconnue_n_execute_pas_la_confirmation() {
+        let c = confirm(&["mets le PC en veille", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c.service.listen(&ear(), &voice(20_000), false, true).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(c.ran().await.is_empty());
+        // L'attente est effacée : un « oui » de Charles ensuite ne fait rien.
+        assert!(!c.brain.has_pending());
+        let r = c.service.listen(&ear(), &voice(0), false, true).await;
+        assert_eq!(r, heard("oui", "Il n'y a rien à confirmer.", None));
+        assert!(c.ran().await.is_empty());
+    }
+
+    /// « oui » de moins d'une seconde, voix de Charles (vérifiable seulement par la
+    /// vérification stricte).
+    fn short_charles() -> Vec<i16> {
+        vec![0i16; 8_000]
+    }
+
+    const REDEMANDE: &str =
+        "Je n'ai pas bien reconnu votre voix. Dites « oui, vas-y » pour confirmer, Monsieur.";
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_court_voix_inconnue_n_execute_pas() {
+        let c = confirm(&["mets le PC en veille", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        // Phrase courte de session (télévision, invité) : la vérification stricte échoue.
+        let r = c.service.listen(&ear(), &short_voice(), false, true).await;
+        assert!(c.ran().await.is_empty());
+        assert!(!matches!(
+            r,
+            ControlResponse::Heard {
+                sound: Some(Sound::Success),
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_court_voix_de_charles_execute() {
+        let c = confirm(&["mets le PC en veille", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c
+            .service
+            .listen(&ear(), &short_charles(), false, true)
+            .await;
+        assert_eq!(
+            r,
+            ControlResponse::Heard {
+                text: "oui".into(),
+                speech: "Je mets le PC en veille.".into(),
+                ear_action: None,
+                audio: None,
+                sound: Some(Sound::Success),
+            }
+        );
+        assert_eq!(c.ran().await, suspend_call());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_court_non_reconnu_redemande_une_fois() {
+        let c = confirm(&["mets le PC en veille", "oui", "oui, vas-y"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        c.clock.advance(Duration::from_secs(10));
+        let r = c.service.listen(&ear(), &short_voice(), false, true).await;
+        assert_eq!(r, heard("oui", REDEMANDE, Some(EarAction::AwaitReply)));
+        assert!(c.brain.has_pending());
+        assert!(c.ran().await.is_empty());
+        // Le délai repart de la nouvelle question : 20 s après la première, accepté.
+        c.clock.advance(Duration::from_secs(10));
+        c.service.listen(&ear(), &voice(0), false, true).await;
+        assert_eq!(c.ran().await, suspend_call());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deuxieme_echec_annule() {
+        let c = confirm(&["mets le PC en veille", "oui", "oui", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        c.service.listen(&ear(), &short_voice(), false, true).await;
+        let r = c.service.listen(&ear(), &short_voice(), false, true).await;
+        assert_eq!(
+            r,
+            heard(
+                "oui",
+                "Je ne reconnais toujours pas votre voix : je ne fais rien.",
+                None
+            )
+        );
+        assert!(!c.brain.has_pending());
+        let r = c.service.listen(&ear(), &voice(0), false, true).await;
+        assert_eq!(r, heard("oui", "Il n'y a rien à confirmer.", None));
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn non_court_voix_inconnue_annule() {
+        let c = confirm(&["mets le PC en veille", "non", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c.service.listen(&ear(), &short_voice(), false, true).await;
+        assert_eq!(r, heard("non", "Entendu, j'annule.", None));
+        assert!(!c.brain.has_pending());
+        c.service.listen(&ear(), &voice(0), false, true).await;
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_long_voix_inconnue_n_execute_pas() {
+        let c = confirm(&["mets le PC en veille", "oui, vas-y"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c.service.listen(&ear(), &voice(20_000), false, true).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(!c.brain.has_pending());
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_court_hors_session_n_execute_pas() {
+        // Question posée sans phrase reconnue juste avant : pas de session ouverte. Même
+        // la voix de Charles, trop courte, est refusée (jamais de vérification stricte).
+        let c = confirm(&["oui"]);
+        c.brain.answer_text(&ear(), "mets le PC en veille").await;
+        let r = c
+            .service
+            .listen(&ear(), &short_charles(), false, true)
+            .await;
+        assert_eq!(r, heard("", "", None));
+        assert!(!c.brain.has_pending());
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repete_pendant_la_question_redemande() {
+        let c = confirm(&["mets le PC en veille", "répète", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        c.clock.advance(Duration::from_secs(10));
+        // « répète » court de Charles : vérifié strictement, la question est reposée.
+        let r = c
+            .service
+            .listen(&ear(), &short_charles(), false, true)
+            .await;
+        assert_eq!(
+            r,
+            heard(
+                "répète",
+                "Je mets le PC en veille, Monsieur ?",
+                Some(EarAction::AwaitReply)
+            )
+        );
+        c.clock.advance(Duration::from_secs(10));
+        c.service
+            .listen(&ear(), &short_charles(), false, true)
+            .await;
+        assert_eq!(c.ran().await, suspend_call());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voix_non_verifiee_ne_prolonge_pas_l_attente() {
+        // En réponse à la question, puis après « Jarvis » : ignoré, attente effacée.
+        for follow_up in [true, false] {
+            let c = confirm(&["mets le PC en veille", "répète", "oui"]);
+            c.service.listen(&ear(), &voice(0), false, false).await;
+            let r = c
+                .service
+                .listen(&ear(), &short_voice(), false, follow_up)
+                .await;
+            assert_eq!(r, heard("", "", None), "suivi : {follow_up}");
+            assert!(!c.brain.has_pending(), "suivi : {follow_up}");
+            c.service.listen(&ear(), &voice(0), false, true).await;
+            assert!(c.ran().await.is_empty(), "suivi : {follow_up}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voix_non_verifiee_ne_repete_pas() {
+        let c = confirm(&["suivant", "répète", "répète"]);
+        assert_eq!(
+            c.service.listen(&ear(), &voice(0), false, false).await,
+            heard("suivant", "ok", None)
+        );
+        for follow_up in [false, true] {
+            let r = c
+                .service
+                .listen(&ear(), &short_voice(), false, follow_up)
+                .await;
+            assert_eq!(r, heard("", "", None), "suivi : {follow_up}");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_court_hors_reponse_n_execute_rien() {
+        // Un « oui » court qui n'est pas la réponse attendue (après « Jarvis ») : ignoré.
+        let c = confirm(&["mets le PC en veille", "oui", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c.service.listen(&ear(), &short_voice(), false, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(!c.brain.has_pending());
+        c.service.listen(&ear(), &short_voice(), false, true).await;
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn phrase_courte_ne_demande_pas_d_action_risquee() {
+        let c = confirm(&["suivant", "mets le PC en veille", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c.service.listen(&ear(), &short_voice(), false, false).await;
+        assert_eq!(r, heard("", "", None));
+        assert!(!c.brain.has_pending());
+        c.service.listen(&ear(), &voice(0), false, true).await;
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn suivi_vide_ou_ecoute_coupee_n_execute_rien() {
+        let c = confirm(&["mets le PC en veille", "mets le PC en veille", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(
+            c.service.listen(&ear(), &[], false, true).await,
+            heard("", "", None)
+        );
+        assert!(!c.brain.has_pending());
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(
+            c.service.listen(&ear(), &voice(0), true, true).await,
+            heard("", "", None)
+        );
+        assert!(!c.brain.has_pending());
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn repete_redemande_et_garde_l_attente() {
+        let c = confirm(&["mets le PC en veille", "répète", "oui"]);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        let r = c.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(
+            r,
+            heard(
+                "répète",
+                "Je mets le PC en veille, Monsieur ?",
+                Some(EarAction::AwaitReply)
+            )
+        );
+        c.service.listen(&ear(), &voice(0), false, true).await;
+        assert_eq!(c.ran().await, suspend_call());
+    }
+
+    fn with_result(result: Result<Reply, SkillError>) -> (ListenService, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = Arc::new(FakeSkill::new(&["media_next"]).with_result(result));
+        let svc = ListenService::new(
+            brain(&dir, skill),
+            Arc::new(FakeTranscriber::new("suivant")),
+            Arc::new(FakeDucker::new()),
+        );
+        (svc, dir)
+    }
+
+    #[tokio::test]
+    async fn echec_donne_le_bip_d_echec() {
+        let (svc, _dir) = with_result(Err(SkillError::Failed("boum".into())));
+        let r = svc.listen(&ear(), AUDIO, false, false).await;
+        assert_eq!(
+            r,
+            ControlResponse::Heard {
+                text: "suivant".into(),
+                speech: "Désolé, cela n'a pas fonctionné, Monsieur.".into(),
+                ear_action: None,
+                audio: None,
+                sound: Some(Sound::Failure),
+            }
+        );
+    }
+
+    // --- Bip seul pour une réussite (`sound_only_for_success`) ---
+
+    /// `text` entendu ; l'IA comprend `media_next` ; option `sound_only_for_success`.
+    fn bip_seul(
+        result: Result<Reply, SkillError>,
+        text: &str,
+        sound_only: bool,
+    ) -> (ListenService, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let skill = Arc::new(FakeSkill::new(&["media_next"]).with_result(result));
+        let llm = Arc::new(FakeLlm::new(Ok(crate::testing::tool_understanding(
+            "media_next",
+        ))));
+        let persona = Persona {
+            sound_only_for_success: sound_only,
+            ..Persona::default()
+        };
+        let brain = Arc::new(
+            Brain::new(
+                vec![skill],
+                llm.clone(),
+                llm,
+                Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+            )
+            .with_persona(persona),
+        );
+        let svc = ListenService::new(
+            brain,
+            Arc::new(FakeTranscriber::new(text)),
+            Arc::new(FakeDucker::new()),
+        );
+        (svc, dir)
+    }
+
+    fn heard_with(text: &str, speech: &str, sound: Option<Sound>) -> ControlResponse {
+        ControlResponse::Heard {
+            text: text.into(),
+            speech: speech.into(),
+            ear_action: None,
+            audio: None,
+            sound,
+        }
+    }
+
+    #[tokio::test]
+    async fn succes_par_bip_si_option() {
+        for result in [Reply::done(""), Reply::done("Je lance Spotify.")] {
+            let (svc, _dir) = bip_seul(Ok(result), "suivant", true);
+            assert_eq!(
+                svc.listen(&ear(), AUDIO, false, false).await,
+                heard_with("suivant", "", Some(Sound::Success))
+            );
+        }
+        // Par l'IA, ce n'est pas un raccourci : la phrase est dite.
+        let (svc, _dir) = bip_seul(Ok(Reply::done("")), "la suite, je te prie", true);
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard_with("la suite, je te prie", "Bien.", Some(Sound::Success))
+        );
+    }
+
+    #[tokio::test]
+    async fn option_desactivee_phrase_dite() {
+        // Réussite sans phrase de la compétence : le cerveau dit « Bien. ».
+        let (svc, _dir) = bip_seul(Ok(Reply::done("")), "suivant", false);
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard_with("suivant", "Bien.", Some(Sound::Success))
+        );
+        let (svc, _dir) = bip_seul(Ok(Reply::done("Je lance Spotify.")), "suivant", false);
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard_with("suivant", "Je lance Spotify.", Some(Sound::Success))
+        );
+    }
+
+    #[tokio::test]
+    async fn echec_toujours_dit() {
+        let (svc, _dir) = bip_seul(Err(SkillError::Failed("boum".into())), "suivant", true);
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard_with(
+                "suivant",
+                "Désolé, cela n'a pas fonctionné, Monsieur.",
+                Some(Sound::Failure)
+            )
+        );
+        let (svc, _dir) = bip_seul(
+            Ok(Reply::failed("Aucun lecteur n'est ouvert.")),
+            "suivant",
+            true,
+        );
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard_with(
+                "suivant",
+                "Aucun lecteur n'est ouvert.",
+                Some(Sound::Failure)
+            )
+        );
+        // Une information (pas une réussite) reste dite.
+        let (svc, _dir) = bip_seul(Ok(Reply::new("C'est Hello.")), "suivant", true);
+        assert_eq!(
+            svc.listen(&ear(), AUDIO, false, false).await,
+            heard_with("suivant", "C'est Hello.", None)
+        );
+    }
+
+    #[tokio::test]
+    async fn action_confirmee_toujours_dite() {
+        let persona = Persona {
+            sound_only_for_success: true,
+            ..Persona::default()
+        };
+        let c = confirm_with(&["mets le PC en veille", "oui"], persona);
+        c.service.listen(&ear(), &voice(0), false, false).await;
+        assert_eq!(
+            c.service.listen(&ear(), &voice(0), false, true).await,
+            heard_with("oui", "Je mets le PC en veille.", Some(Sound::Success))
+        );
+    }
+
+    // --- Invités (phase 8) ---
+
+    #[tokio::test(start_paused = true)]
+    async fn invite_phrase_longue_inconnue_executee_selon_ses_droits() {
+        // Voix inconnue sur l'oreille de Léa : Léa, non vérifiée ; l'IA est permise et
+        // « media_next » est dans son rôle.
+        let mut s = with_gate_text(true, "passe à la suite");
+        let people = People::admin_only("Charles");
+        let tools = ["media_next".to_string()];
+        people
+            .add_role("famille", vec!["media_*".into()], false, false, &tools)
+            .unwrap();
+        people.add_person("Léa", "famille").unwrap();
+        people.attach("Léa", &chambre()).unwrap();
+        let llm = Arc::new(FakeLlm::new(Ok(crate::testing::tool_understanding(
+            "media_next",
+        ))));
+        let skill = Arc::new(FakeSkill::new(&["media_next"]));
+        let brain = Arc::new(
+            Brain::new(
+                vec![skill.clone()],
+                llm.clone(),
+                llm.clone(),
+                Arc::new(ModeStore::new(s._dir.path().join("mode2"), Mode::Local)),
+            )
+            .with_people(Arc::new(people)),
+        );
+        let gate = SpeakerGate::new(
+            Arc::new(ByFirstSample),
+            s._dir.path().join("voiceprint/charles.json"),
+            0.55,
+            0.65,
+        );
+        s.service = ListenService::new(brain, s.stt.clone(), s.ducker.clone())
+            .with_speaker(Some(Arc::new(gate)));
+        s.service
+            .listen(&chambre(), &voice(20_000), false, false)
+            .await;
+        assert_eq!(llm.calls(), 1);
+        assert_eq!(skill.calls().len(), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invite_phrase_courte_refusee_en_silence() {
+        // Rôle sans aucun outil : « suivant » (media_next) est refusé par les droits.
+        let people = People::admin_only("Charles");
+        people
+            .add_role("muet", vec![], false, false, &["media_next".to_string()])
+            .unwrap();
+        people.add_person("Léa", "muet").unwrap();
+        people.attach("Léa", &chambre()).unwrap();
+        let c = confirm_people(&["suivant", "suivant"], Persona::default(), people);
+        let r = c
+            .service
+            .listen(&chambre(), &short_voice(), false, false)
+            .await;
+        assert_eq!(r, heard("", "", None));
+        // Une phrase longue garde le refus parlé.
+        let r = c
+            .service
+            .listen(&chambre(), &voice(20_000), false, false)
+            .await;
+        assert_eq!(
+            r,
+            ControlResponse::Heard {
+                text: "suivant".into(),
+                speech: REFUSED.into(),
+                ear_action: None,
+                audio: None,
+                sound: Some(Sound::Failure),
+            }
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn invite_veille_refusee() {
+        let c = confirm_guest(&["mets le PC en veille"]);
+        let r = c
+            .service
+            .listen(&chambre(), &voice(20_000), false, false)
+            .await;
+        assert!(!awaits_reply(&r));
+        assert!(!c.brain.has_pending());
+        assert!(c.ran().await.is_empty());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn voix_de_charles_sur_l_oreille_d_un_invite_peut_tout() {
+        let c = confirm_guest(&["mets le PC en veille"]);
+        let r = c.service.listen(&chambre(), &voice(0), false, false).await;
+        assert!(awaits_reply(&r));
+        assert!(c.brain.has_pending());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_court_de_charles_sur_l_oreille_d_un_invite_confirme_sa_propre_action() {
+        let c = confirm_guest(&["mets le PC en veille", "oui"]);
+        c.service.listen(&chambre(), &voice(0), false, false).await;
+        c.service
+            .listen(&chambre(), &short_charles(), false, true)
+            .await;
+        assert_eq!(c.ran().await, suspend_call());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn oui_d_un_invite_ne_confirme_rien() {
+        let c = confirm_guest(&["mets le PC en veille", "oui, vas-y", "oui"]);
+        c.service
+            .listen(&chambre(), &voice(20_000), false, false)
+            .await;
+        c.service
+            .listen(&chambre(), &voice(20_000), false, true)
+            .await;
+        c.service
+            .listen(&chambre(), &short_voice(), false, true)
+            .await;
+        assert!(c.ran().await.is_empty());
+    }
+}
