@@ -162,3 +162,16 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 12.1 Rédiger le plan de la phase 12
 - [ ] 12.2 Jarvis lance et interprète lui-même les tests d'un projet
 - [ ] 12.3 Jarvis corrige lui-même les cas simples avant de déléguer à l'agent
+
+## Phase 13 : IA locale Qwen3.5 4B par LM Studio
+*Branche `feature/lmstudio`. Remplace `llama3.2:3b` servi par Ollama ; Ollama reste une option (`[local] provider`).*
+
+- [x] 13.1 Réglage `[local] provider = "lmstudio" | "ollama"` (LM Studio par défaut, port 1234, Qwen3.5 4B)
+- [x] 13.2 Backend LM Studio (API compatible OpenAI `/v1/chat/completions`, outils), tests avec serveur simulé
+- [x] 13.3 Couper la réflexion de Qwen3.5 et le vérifier sur le vrai serveur
+- [x] 13.4 Déchargement automatique (`ttl`) et préchauffage
+- [x] 13.5 Serveur LM Studio sans interface graphique au login (`jarvisctl` : install, status, doctor)
+- [x] 13.6 Remplacer les mentions de `llama3.2:3b` ; README, `docs/ia-locale.md`, `docs/installation.md`, CHANGELOG
+- [x] 13.7 `scripts/check.sh` au vert (via la file d'attente), feature terminée dans `develop`
+- [x] 13.8 Banc de `docs/ia-locale.md` refait avec Qwen3.5 4B (précision, latence, comparaison à llama3.2:3b)
+- [x] 13.9 Installation des binaires, redémarrage du cerveau, essai de bout en bout, modèle déchargé ensuite

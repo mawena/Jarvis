@@ -1,10 +1,10 @@
 //! Jeu de phrases de référence : raccourcis (toujours) et IA réelle (`--ignored`).
 
 use async_trait::async_trait;
-use jarvis_brain::config::{LocalLlmConfig, OnlineLlmConfig};
+use jarvis_brain::config::{LocalLlmConfig, LocalProvider, OnlineLlmConfig};
 use jarvis_brain::fastpath::match_fast;
 use jarvis_brain::intent::Intent;
-use jarvis_brain::llm::{ClaudeBackend, LlmBackend, OllamaBackend, Understanding};
+use jarvis_brain::llm::{ClaudeBackend, LlmBackend, Understanding, local_backend};
 use jarvis_skills::apps::{AppIndex, AppsSkill};
 use jarvis_skills::media::{MediaPlayers, MediaSkill, PlayerCommand, PlayerInfo};
 use jarvis_skills::{FakeRunner, Skill, ToolSpec, search, video};
@@ -104,6 +104,10 @@ fn phrases_ia_ne_passent_pas_par_les_raccourcis() {
 
 async fn run_set(label: &str, backend: &dyn LlmBackend) {
     let tools = real_tools();
+    // Comme le cerveau au démarrage : le chargement du modèle ne compte pas dans les mesures.
+    if let Err(e) = backend.warm_up(&tools).await {
+        println!("préchauffage impossible : {e}");
+    }
     // Les outils système ne sont pas proposés à l'IA : leurs phrases passent par les raccourcis.
     let all: Vec<Phrase> = phrases()
         .into_iter()
@@ -132,25 +136,34 @@ async fn run_set(label: &str, backend: &dyn LlmBackend) {
     assert!(rate >= 0.80, "taux de réussite {rate:.2} < 0.80");
 }
 
-#[tokio::test]
-#[ignore = "nécessite Ollama et un modèle installé"]
-async fn ollama_jeu_de_phrases() {
+/// Modèle local du banc : LM Studio par défaut ; `JARVIS_TEST_PROVIDER=ollama` et
+/// `JARVIS_TEST_MODEL` (identifiant du modèle) pour comparer.
+fn local_test_config() -> LocalLlmConfig {
     let mut cfg = LocalLlmConfig::default();
+    if std::env::var("JARVIS_TEST_PROVIDER").as_deref() == Ok("ollama") {
+        let defaut = LocalProvider::Ollama;
+        cfg.provider = defaut;
+        cfg.url = defaut.default_url().into();
+        cfg.model = defaut.default_model().into();
+    }
     if let Ok(model) = std::env::var("JARVIS_TEST_MODEL") {
         cfg.model = model;
     }
-    let label = format!("ollama {}", cfg.model);
-    run_set(&label, &OllamaBackend::new(&cfg, "Charles")).await;
+    cfg
 }
 
 #[tokio::test]
-#[ignore = "nécessite Ollama et un modèle installé"]
-async fn ollama_questions_libres() {
-    let mut cfg = LocalLlmConfig::default();
-    if let Ok(model) = std::env::var("JARVIS_TEST_MODEL") {
-        cfg.model = model;
-    }
-    let backend = OllamaBackend::new(&cfg, "Charles");
+#[ignore = "nécessite LM Studio et un modèle installé"]
+async fn local_jeu_de_phrases() {
+    let cfg = local_test_config();
+    let label = format!("{} {}", cfg.provider.label(), cfg.model);
+    run_set(&label, local_backend(&cfg, "Charles").as_ref()).await;
+}
+
+#[tokio::test]
+#[ignore = "nécessite LM Studio et un modèle installé"]
+async fn local_questions_libres() {
+    let backend = local_backend(&local_test_config(), "Charles");
     let tools = real_tools();
     for q in [
         "quelle est la capitale du Pérou",
@@ -188,13 +201,9 @@ fn questions_libres_sont_aiguillees_vers_la_conversation() {
 }
 
 #[tokio::test]
-#[ignore = "nécessite Ollama et un modèle installé"]
-async fn ollama_questions_libres_repondent() {
-    let mut cfg = LocalLlmConfig::default();
-    if let Ok(model) = std::env::var("JARVIS_TEST_MODEL") {
-        cfg.model = model;
-    }
-    let backend = OllamaBackend::new(&cfg, "Charles");
+#[ignore = "nécessite LM Studio et un modèle installé"]
+async fn local_questions_libres_repondent() {
+    let backend = local_backend(&local_test_config(), "Charles");
     let tools = real_tools();
     let raw = include_str!("fixtures/questions.toml");
     let qs = toml::from_str::<Questions>(raw)

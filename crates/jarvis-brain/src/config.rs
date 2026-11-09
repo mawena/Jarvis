@@ -91,23 +91,96 @@ impl Default for Config {
     }
 }
 
+/// Serveur qui fait tourner le modèle local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LocalProvider {
+    /// LM Studio (API compatible OpenAI, port 1234) : le serveur par défaut.
+    LmStudio,
+    /// Ollama (port 11434) : conservé en option.
+    Ollama,
+}
+
+impl LocalProvider {
+    pub fn default_url(self) -> &'static str {
+        match self {
+            Self::LmStudio => "http://127.0.0.1:1234",
+            Self::Ollama => "http://127.0.0.1:11434",
+        }
+    }
+
+    pub fn default_model(self) -> &'static str {
+        match self {
+            Self::LmStudio => DEFAULT_LMSTUDIO_MODEL,
+            Self::Ollama => "llama3.2:3b",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LmStudio => "LM Studio",
+            Self::Ollama => "Ollama",
+        }
+    }
+}
+
+/// Identifiant du modèle local par défaut dans LM Studio (Qwen3.5 4B).
+pub const DEFAULT_LMSTUDIO_MODEL: &str = "qwen3.5-4b";
+
+/// Section `[local]`. `url` et `model` absents prennent la valeur par défaut du `provider`.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
-#[serde(default)]
+#[serde(from = "RawLocalConfig")]
 pub struct LocalLlmConfig {
+    pub provider: LocalProvider,
     pub url: String,
     pub model: String,
-    /// Durée pendant laquelle Ollama garde le modèle en mémoire après un appel.
+    /// Durée pendant laquelle le serveur garde le modèle en mémoire après un appel
+    /// (`keep_alive` d'Ollama, `ttl` de LM Studio) : « 30m », « 1h », « 90s ».
     pub keep_alive: String,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(default)]
+struct RawLocalConfig {
+    provider: Option<LocalProvider>,
+    url: Option<String>,
+    model: Option<String>,
+    keep_alive: Option<String>,
+}
+
+impl From<RawLocalConfig> for LocalLlmConfig {
+    fn from(raw: RawLocalConfig) -> Self {
+        let provider = raw.provider.unwrap_or(LocalProvider::LmStudio);
+        Self {
+            provider,
+            url: raw
+                .url
+                .unwrap_or_else(|| provider.default_url().to_string()),
+            model: raw
+                .model
+                .unwrap_or_else(|| provider.default_model().to_string()),
+            keep_alive: raw.keep_alive.unwrap_or_else(|| "30m".to_string()),
+        }
+    }
 }
 
 impl Default for LocalLlmConfig {
     fn default() -> Self {
-        Self {
-            url: "http://127.0.0.1:11434".to_string(),
-            model: "llama3.2:3b".to_string(),
-            keep_alive: "30m".to_string(),
-        }
+        RawLocalConfig::default().into()
     }
+}
+
+/// « 30m », « 1h », « 90s » ou un nombre de secondes → secondes. None si illisible ou négatif
+/// (Ollama accepte -1 pour « jamais »).
+pub fn keep_alive_secs(text: &str) -> Option<u64> {
+    let t = text.trim();
+    let (digits, factor) = match t.chars().last()? {
+        'h' => (&t[..t.len() - 1], 3600),
+        'm' => (&t[..t.len() - 1], 60),
+        's' => (&t[..t.len() - 1], 1),
+        _ => (t, 1),
+    };
+    digits.trim().parse::<u64>().ok().map(|n| n * factor)
 }
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -313,10 +386,47 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = Config::load(&dir.path().join("absent.toml")).unwrap();
         assert_eq!(c.mode, Mode::Local);
-        assert_eq!(c.local.model, "llama3.2:3b");
+        assert_eq!(c.local.provider, LocalProvider::LmStudio);
+        assert_eq!(c.local.url, "http://127.0.0.1:1234");
+        assert_eq!(c.local.model, "qwen3.5-4b");
         assert_eq!(c.local.keep_alive, "30m");
         assert_eq!(c.online.model, "claude-haiku-5-5");
         assert_eq!(c.address, "Monsieur");
+    }
+
+    #[test]
+    fn provider_ollama_reprend_ses_valeurs() {
+        let (_d, p) = write("[local]\nprovider = \"ollama\"\n");
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.local.provider, LocalProvider::Ollama);
+        assert_eq!(c.local.url, "http://127.0.0.1:11434");
+        assert_eq!(c.local.model, "llama3.2:3b");
+    }
+
+    #[test]
+    fn local_url_et_modele_explicites_gagnent() {
+        let (_d, p) = write("[local]\nurl = \"http://x:1\"\nmodel = \"autre\"\n");
+        let c = Config::load(&p).unwrap();
+        assert_eq!(c.local.provider, LocalProvider::LmStudio);
+        assert_eq!(c.local.url, "http://x:1");
+        assert_eq!(c.local.model, "autre");
+    }
+
+    #[test]
+    fn provider_inconnu_refuse() {
+        let (_d, p) = write("[local]\nprovider = \"truc\"\n");
+        assert!(Config::load(&p).is_err());
+    }
+
+    #[test]
+    fn duree_de_garde_en_secondes() {
+        assert_eq!(keep_alive_secs("30m"), Some(1800));
+        assert_eq!(keep_alive_secs("1h"), Some(3600));
+        assert_eq!(keep_alive_secs("90s"), Some(90));
+        assert_eq!(keep_alive_secs("45"), Some(45));
+        assert_eq!(keep_alive_secs("-1"), None);
+        assert_eq!(keep_alive_secs("bof"), None);
+        assert_eq!(keep_alive_secs(""), None);
     }
 
     #[test]

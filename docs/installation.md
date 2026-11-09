@@ -4,7 +4,7 @@
 
 - Ubuntu 24.04, GNOME sur X11, session systemd utilisateur
 - Rust (cargo) et git
-- [Ollama](https://ollama.com/download) avec le modèle local : `ollama pull llama3.2:3b`
+- [LM Studio](https://lmstudio.ai/download) (lancé une fois pour installer la commande `lms`) avec le modèle local Qwen3.5 4B : `lms get lmstudio-community/Qwen3.5-4B-GGUF` (détails et variante Ollama : [docs/ia-locale.md](ia-locale.md)). Le service `jarvis-lmstudio.service` (créé par `jarvisctl install`) démarre le serveur de LM Studio sans interface graphique à l'ouverture de session.
 - Outils système : `sudo apt install wmctrl xdotool wireplumber libglib2.0-bin`
 
 ## Installer
@@ -53,7 +53,7 @@ services. Avec une cible, sur un seul : `cerveau` (ou `brain`), `oreille` (ou `e
 
 | Commande | Effet |
 | --- | --- |
-| `jarvisctl status [cible]` | état du cerveau et de l'oreille, mode, Ollama, clé (code 3 si le cerveau est inactif ; avec `oreille` seule, si l'oreille l'est) |
+| `jarvisctl status [cible]` | état du cerveau et de l'oreille, mode, LM Studio (ou Ollama), clé (code 3 si le cerveau est inactif ; avec `oreille` seule, si l'oreille l'est) |
 | `jarvisctl start` / `stop` / `restart` `[cible]` | pilote les services |
 | `jarvisctl enable` / `disable` `[cible]` | démarrage automatique à la session |
 | `jarvisctl logs [-f] [-n N]` | journaux du cerveau |
@@ -140,4 +140,4 @@ jarvisctl uninstall           # arrête et retire les deux services, garde la co
 jarvisctl uninstall --purge   # efface aussi config, état et données (confirmation o/N, ou --yes)
 ```
 
-Ollama et ses modèles ne sont jamais touchés.
+LM Studio, Ollama et leurs modèles ne sont jamais touchés.

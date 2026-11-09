@@ -6,13 +6,13 @@
 //!
 //! ```text
 //!   reconnaissance vocale (marge)           2 s
-//! + compréhension par l'IA du mode         20 s en local (Ollama), 15 s en ligne (Claude)
+//! + compréhension par l'IA du mode         20 s en local (LM Studio), 15 s en ligne (Claude)
 //! + compétence la plus lente               15 s en local (recherche : 4 + 10 + 1)
 //! + synthèse vocale                         8 s
 //! ```
 //!
 //! Les délais des compétences sont lus sur les vraies compétences, réglages par
-//! défaut. Les constantes (Ollama, Claude, synthèse, oreille) sont lues dans leur
+//! défaut. Les constantes (LM Studio, Claude, synthèse, oreille) sont lues dans leur
 //! source : jarvis-brain ne dépend pas de jarvis-ear-core, et celles du cerveau ne
 //! sont pas publiques.
 
@@ -34,7 +34,7 @@ use std::time::Duration;
 /// Marge de la reconnaissance vocale (Whisper sur une phrase courte).
 const STT_MARGIN: Duration = Duration::from_secs(2);
 
-const OLLAMA_SRC: &str = include_str!("../src/llm/ollama.rs");
+const LOCAL_SRC: &str = include_str!("../src/llm/lmstudio.rs");
 const CLAUDE_SRC: &str = include_str!("../src/llm/claude.rs");
 const TTS_SRC: &str = include_str!("../src/tts/mod.rs");
 const EAR_SESSION_SRC: &str = include_str!("../../jarvis-ear-core/src/session/mod.rs");
@@ -80,7 +80,7 @@ fn slowest_skill(mode: Mode) -> Duration {
 
 fn worst_case(mode: Mode) -> Duration {
     let llm = match mode {
-        Mode::Local => const_secs(OLLAMA_SRC, "TIMEOUT"),
+        Mode::Local => const_secs(LOCAL_SRC, "TIMEOUT"),
         Mode::Online => const_secs(CLAUDE_SRC, "TIMEOUT"),
     };
     STT_MARGIN + llm + slowest_skill(mode) + const_secs(TTS_SRC, "SYNTH_DEADLINE")
@@ -88,7 +88,7 @@ fn worst_case(mode: Mode) -> Duration {
 
 #[test]
 fn constantes_lues_dans_les_sources() {
-    assert_eq!(const_secs(OLLAMA_SRC, "TIMEOUT"), Duration::from_secs(20));
+    assert_eq!(const_secs(LOCAL_SRC, "TIMEOUT"), Duration::from_secs(20));
     assert_eq!(
         const_secs(TTS_SRC, "SYNTH_DEADLINE"),
         Duration::from_secs(8)

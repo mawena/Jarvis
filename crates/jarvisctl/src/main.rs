@@ -66,7 +66,7 @@ enum Cmd {
         #[arg(value_enum)]
         service: Option<Service>,
     },
-    /// Affiche l'état du cerveau, de l'oreille et d'Ollama (code 3 si le cerveau est inactif)
+    /// Affiche l'état du cerveau, de l'oreille et du serveur du modèle local (LM Studio ou Ollama) (code 3 si le cerveau est inactif)
     Status {
         #[arg(value_enum)]
         service: Option<Service>,
