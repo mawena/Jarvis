@@ -174,4 +174,4 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 13.6 Remplacer les mentions de `llama3.2:3b` ; README, `docs/ia-locale.md`, `docs/installation.md`, CHANGELOG
 - [x] 13.7 `scripts/check.sh` au vert (via la file d'attente), feature terminée dans `develop`
 - [x] 13.8 Banc de `docs/ia-locale.md` refait avec Qwen3.5 4B (précision, latence, comparaison à llama3.2:3b)
-- [ ] 13.9 Installation des binaires, redémarrage du cerveau, essai de bout en bout, modèle déchargé ensuite
+- [x] 13.9 Installation des binaires, redémarrage du cerveau, essai de bout en bout, modèle déchargé ensuite
