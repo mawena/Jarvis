@@ -1,12 +1,41 @@
 # IA locale et jeu de phrases de référence
 
-## Installer Ollama
+## Modèle local : Qwen3.5 4B par LM Studio
+
+Le mode local utilise **Qwen3.5 4B** (quantifié Q4_K_M) servi par [LM Studio](https://lmstudio.ai/download)
+via son API compatible OpenAI (`POST /v1/chat/completions`, port 1234).
 
 ```bash
-curl -fsSL https://ollama.com/install.sh | sh
-ollama pull qwen2.5:3b
-ollama pull llama3.2:3b
+# Une fois LM Studio installé et lancé une fois (cela installe la commande `lms`)
+~/.lmstudio/bin/lms get lmstudio-community/Qwen3.5-4B-GGUF   # ou depuis l'interface
+~/.lmstudio/bin/lms ls                                       # identifiant exact du modèle
+jarvisctl status                                             # vérifie le serveur et le modèle
 ```
+
+Aucune étape de chargement : LM Studio charge le modèle à la première requête (chargement à la
+demande) et le décharge de lui-même après `keep_alive` d'inactivité (le `ttl` de LM Studio). Le
+cerveau préchauffe le modèle au démarrage (consignes et outils lus, rien généré).
+
+Le serveur démarre à l'ouverture de session sans l'interface graphique : l'unité systemd du cerveau
+lance `lms daemon up` puis `lms server start` avant le cerveau (échec ignoré si LM Studio est absent
+ou déjà lancé). Si l'interface graphique de LM Studio est ouverte, c'est elle qui sert.
+
+### Réglages
+
+```toml
+[local]
+provider = "lmstudio"              # "lmstudio" (défaut) ou "ollama"
+url = "http://127.0.0.1:1234"      # défaut selon le provider (Ollama : http://127.0.0.1:11434)
+model = "qwen3.5-4b"               # identifiant donné par `lms ls` (Ollama : llama3.2:3b)
+keep_alive = "30m"                 # déchargement après cette durée d'inactivité
+```
+
+`url` et `model` absents prennent la valeur du `provider`. Pour revenir à Ollama :
+`provider = "ollama"` (puis `ollama pull llama3.2:3b`).
+
+### Réflexion (thinking) coupée
+
+@@REFLEXION@@
 
 ## Mesurer un modèle
 
@@ -14,9 +43,10 @@ Le jeu de phrases (`crates/jarvis-brain/tests/fixtures/phrases.toml`) est rejou�
 le test échoue sous 80 % de réussite et affiche le temps médian.
 
 ```bash
+# Local (LM Studio par défaut ; JARVIS_TEST_MODEL = identifiant du modèle)
+cargo test -p jarvis-brain --test phrases -- --ignored local_jeu_de_phrases --nocapture
 # Local (Ollama)
-JARVIS_TEST_MODEL=qwen2.5:3b cargo test -p jarvis-brain --test phrases -- --ignored ollama_jeu_de_phrases --nocapture
-JARVIS_TEST_MODEL=llama3.2:3b cargo test -p jarvis-brain --test phrases -- --ignored ollama_jeu_de_phrases --nocapture
+JARVIS_TEST_PROVIDER=ollama JARVIS_TEST_MODEL=llama3.2:3b cargo test -p jarvis-brain --test phrases -- --ignored local_jeu_de_phrases --nocapture
 
 # En ligne (Claude)
 ANTHROPIC_API_KEY=... cargo test -p jarvis-brain --test phrases -- --ignored claude_jeu_de_phrases --nocapture
@@ -24,19 +54,21 @@ ANTHROPIC_API_KEY=... cargo test -p jarvis-brain --test phrases -- --ignored cla
 
 ## Résultats
 
-Mesuré le 2026-10-28 sur le portable de Charles (Intel Core Ultra 7 155U, sans GPU dédié, 14 Go de RAM), Ollama 0.40.12, 31 phrases.
+@@RESULTATS@@
+
+### Ancien banc (Ollama, 2026-10-28)
+
+Mesuré sur le portable de Charles (Intel Core Ultra 7 155U, sans GPU dédié, 14 Go de RAM), Ollama 0.40.12, 31 phrases.
 
 | Modèle | Réussite | Temps médian |
 |--------|----------|--------------|
 | `llama3.2:3b` | 26/31 (84 %) | 2,4 s |
 | `qwen2.5:3b` | 20/31 (65 %) | 3,0 s |
 
-**Modèle retenu : `llama3.2:3b`** (défaut de `LocalLlmConfig`).
-
 Constats :
 - `qwen2.5:3b` répond souvent par une phrase au lieu d'appeler l'outil (« Voulez-vous que je la fasse maintenant ? »).
 - `llama3.2:3b` se trompe parfois d'outil (« reprends » → pause, « qu'est-ce qui passe » → suivant) ; ces phrases courtes passent de toute façon par les raccourcis rapides, sans IA.
-- **Premier chargement trop lent** : la toute première phrase après le démarrage d'Ollama (ou après un changement de modèle) dépasse le délai de 20 s et échoue. À corriger : préchauffer le modèle au démarrage du cerveau et garder le modèle chargé (`keep_alive`).
+- La toute première phrase après le démarrage du serveur dépassait le délai de 20 s : d'où le préchauffage au démarrage du cerveau et la durée de garde en mémoire (`keep_alive`).
 
 ## Reconnaissance vocale (Whisper)
 

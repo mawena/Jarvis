@@ -844,7 +844,7 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
             "lancez `systemctl start ollama` ou `ollama serve`",
         )?;
         let pulled = tags
-            .map(|b| model_names(&b, "models").iter().any(|n| *n == local.model))
+            .map(|b| model_names(&b, "models").contains(&local.model))
             .unwrap_or(false);
         check(
             out,
