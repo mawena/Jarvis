@@ -72,7 +72,29 @@ ANTHROPIC_API_KEY=... cargo test -p jarvis-brain --test phrases -- --ignored cla
 
 ## Résultats
 
-@@RESULTATS@@
+Mesuré le 2026-11-09 sur le même portable (Intel Core Ultra 7 155U, sans GPU dédié, 14 Go de RAM),
+LM Studio 0.4.28, `lmstudio-community/Qwen3.5-4B-GGUF` (Q4_K_M, contexte 8192), réflexion coupée
+(`reasoning_effort: "none"`), modèle préchauffé comme au démarrage du cerveau. Le jeu de phrases
+compte désormais **56 phrases** (31 lors du banc d'Ollama) ; le poste était partagé avec d'autres
+travaux, donc les durées sont des majorants.
+
+| Modèle (serveur) | Réussite | Temps médian |
+|------------------|----------|--------------|
+| `qwen3.5-4b` (LM Studio) | 56/56 (100 %) | 5,6 s |
+| `llama3.2:3b` (Ollama, ancien banc, 31 phrases) | 26/31 (84 %) | 2,4 s |
+
+Questions libres (sans outils) : 14/14 réponses non vides, temps médian 7,0 s. Les réponses sont
+correctes dans l'ensemble, mais le modèle se trompe parfois (« 12 fois 7 » → « soixante-huit ») et
+ajoute souvent « Bien, Charles, » en tête.
+
+Constats :
+- **Précision meilleure** (100 % contre 84 %) : plus d'appel d'outil écrit en texte ni de phrase à la place de l'outil.
+- **Plus lent** : environ 2,3 fois le temps médian de `llama3.2:3b`, car le modèle est plus gros ; c'est
+  un majorant (machine chargée). Reste sous le délai de 20 s (`TIMEOUT`). Le premier chargement du modèle
+  prend près d'une minute : le préchauffage au démarrage du cerveau et le `ttl` de 30 min l'évitent.
+- **Déchargement** : avec `ttl` envoyé à la première requête (15 s pour l'essai), le modèle est
+  `loaded` juste après puis `not-loaded` 40 s plus tard. Le `ttl` n'est pas modifié sur un modèle
+  déjà chargé par une requête sans `ttl` : le cerveau en envoie toujours un.
 
 ### Ancien banc (Ollama, 2026-10-28)
 
