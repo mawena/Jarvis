@@ -17,7 +17,8 @@ pub const WHISPER_MODEL: &str = "ggml-small-q5_1.bin";
 pub const SPEAKER_MODEL: &str = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
 /// Dossier de la voix de Jarvis (un `.onnx` et `tokens.txt`).
 pub const VOICE_DIR: &str = "vits-piper-fr_FR-upmc-medium";
-pub const DEFAULT_MODEL: &str = "llama3.2:3b";
+/// Modèle local par défaut (identifiant dans LM Studio).
+pub const DEFAULT_MODEL: &str = "qwen3.5-4b";
 /// Image SearXNG épinglée : la mettre à jour = changer cette constante (et `compose.yml`).
 pub const SEARXNG_IMAGE: &str = "docker.io/searxng/searxng:2026.10.28-c360868e5";
 /// Adresse de SearXNG, sur la machine seulement (8080 est déjà pris).

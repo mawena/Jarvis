@@ -730,7 +730,7 @@ const ASK_ALOUD: &str = "Pour cela, demandez-le-moi à voix haute.";
 pub const NEEDS_KNOWN_VOICE: &str = "Je ne confie une tâche à l'agent qu'à une voix reconnue : \
                                      enregistrez votre voix avec jarvis-ear enroll.";
 
-const LOCAL_UNREACHABLE: &str = "L'IA locale ne répond pas. Ollama est-il lancé ?";
+const LOCAL_UNREACHABLE: &str = "L'IA locale ne répond pas. LM Studio est-il lancé ?";
 const ONLINE_UNREACHABLE: &str =
     "L'IA en ligne est injoignable. Dites « passe en mode local » pour vous en passer.";
 const LOCAL_REJECTED: &str = "L'IA locale refuse la demande. Le modèle est-il installé ?";
@@ -870,13 +870,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ollama_injoignable() {
+    async fn serveur_local_injoignable() {
         let s = setup(
             FakeLlm::new(Err(LlmError::Unreachable("x".into()))),
             answer("y"),
         );
         let r = s.brain.handle_text("quel temps fait-il").await;
-        assert_eq!(r.speech, "L'IA locale ne répond pas. Ollama est-il lancé ?");
+        assert_eq!(
+            r.speech,
+            "L'IA locale ne répond pas. LM Studio est-il lancé ?"
+        );
         assert_eq!(s.brain.mode(), Mode::Local);
         assert_eq!(s.online.calls(), 0);
     }
@@ -1526,7 +1529,7 @@ mod tests {
         );
         assert_eq!(
             got(s.brain.handle_text("quel temps").await),
-            failed("L'IA locale ne répond pas. Ollama est-il lancé ?")
+            failed("L'IA locale ne répond pas. LM Studio est-il lancé ?")
         );
         let s = setup(
             FakeLlm::new(Err(LlmError::Rejected("x".into()))),

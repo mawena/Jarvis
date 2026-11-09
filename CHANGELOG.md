@@ -4,6 +4,19 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 [Keep a Changelog](https://keepachangelog.com/fr/1.1.0/), versions en
 [SemVer](https://semver.org/lang/fr/).
 
+## [Non publié]
+
+### Modifié
+
+- **IA locale : Qwen3.5 4B servi par LM Studio** (API compatible OpenAI) à la place de
+  `llama3.2:3b` servi par Ollama. Nouveau réglage `[local] provider = "lmstudio" | "ollama"`
+  (LM Studio par défaut, `http://127.0.0.1:1234`) ; le backend Ollama reste disponible. La
+  réflexion de Qwen3.5 est coupée, `keep_alive` devient le `ttl` de LM Studio (déchargement
+  automatique), le modèle est préchauffé au démarrage.
+- Le service du cerveau démarre le serveur LM Studio sans interface graphique
+  (`lms daemon up`, `lms server start`).
+- `jarvisctl status` et `doctor` vérifient LM Studio (ou Ollama selon le réglage).
+
 ## [0.1.0] - 2026-11-09
 
 Première préversion. Jarvis est utilisable au quotidien sur le PC, mais plusieurs essais en
