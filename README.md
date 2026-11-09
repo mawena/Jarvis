@@ -6,8 +6,9 @@ pause », « Jarvis, cherche la météo de demain à Lomé »), il comprend, agi
 Jarvis tournent **entièrement sur le PC**. Seul le mode « en ligne », choisi exprès, envoie le
 texte des phrases à Claude.
 
-> **État :** en développement sur `develop`, utilisé au quotidien sur le PC de son auteur.
-> `main` recevra la première version (`1.0.0`). Avancement détaillé :
+> **État :** préversion `0.1.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
+> développement continue sur `develop`. La `1.0.0` viendra après la mise en service et les essais
+> réels. Nouveautés : [CHANGELOG.md](CHANGELOG.md) ; avancement détaillé :
 > [ROADMAP.md](ROADMAP.md).
 
 ## Ce qu'il sait faire
@@ -168,3 +169,8 @@ cargo test -p jarvis-brain    # une seule crate
 - **Dépendances :** ne jamais lancer `cargo update` sans `-p` : `half` doit rester en 2.4.1,
   figé dans `Cargo.lock`.
 - **Langue :** le code est commenté en français, comme les messages et la documentation.
+
+## Licence
+
+Aucune licence n'est encore choisie : le code est publié pour être lu, tous droits réservés à son
+auteur.
