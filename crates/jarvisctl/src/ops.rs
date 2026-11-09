@@ -1,8 +1,8 @@
 //! Logique des sous-commandes de `jarvisctl`.
 
 use crate::paths::{
-    BINARIES, DEFAULT_MODEL, EAR_SERVICE, LMSTUDIO_SERVICE, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, Service,
-    VOICE_DIR, WHISPER_MODEL,
+    BINARIES, DEFAULT_MODEL, EAR_SERVICE, LMSTUDIO_SERVICE, Paths, SERVICE, SHARED_LIBS,
+    SPEAKER_MODEL, Service, VOICE_DIR, WHISPER_MODEL,
 };
 use crate::system::{LMSTUDIO_ADDR, OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
