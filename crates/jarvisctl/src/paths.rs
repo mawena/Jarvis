@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 pub const SERVICE: &str = "jarvis-brain.service";
 pub const EAR_SERVICE: &str = "jarvis-ear.service";
+/// Serveur LM Studio sans interface graphique (démon + serveur), réclamé par le cerveau.
+pub const LMSTUDIO_SERVICE: &str = "jarvis-lmstudio.service";
 /// Modèle du mot d'éveil, relatif au dossier de données : sans lui, l'unité de l'oreille
 /// ne démarre pas (`ConditionPathExists`).
 pub const WAKEWORD_FILE: &str = "wakeword/jarvis.rpw";
@@ -34,6 +36,7 @@ pub struct Paths {
     pub cargo_bin: PathBuf,
     pub unit_path: PathBuf,
     pub ear_unit_path: PathBuf,
+    pub lmstudio_unit_path: PathBuf,
     pub config_dir: PathBuf,
     pub config_file: PathBuf,
     pub env_file: PathBuf,
@@ -55,6 +58,7 @@ impl Paths {
             cargo_bin: home.join(".cargo/bin"),
             unit_path: units.join(SERVICE),
             ear_unit_path: units.join(EAR_SERVICE),
+            lmstudio_unit_path: units.join(LMSTUDIO_SERVICE),
             config_file: config_dir.join("config.toml"),
             searx_dir: config_dir.join("searxng"),
             env_file: config_dir.join("env"),

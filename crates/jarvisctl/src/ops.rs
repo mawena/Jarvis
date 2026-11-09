@@ -1,7 +1,7 @@
 //! Logique des sous-commandes de `jarvisctl`.
 
 use crate::paths::{
-    BINARIES, DEFAULT_MODEL, EAR_SERVICE, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, Service,
+    BINARIES, DEFAULT_MODEL, EAR_SERVICE, LMSTUDIO_SERVICE, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, Service,
     VOICE_DIR, WHISPER_MODEL,
 };
 use crate::system::{LMSTUDIO_ADDR, OLLAMA_ADDR, System};
@@ -21,16 +21,15 @@ const KEY_VAR: &str = "ANTHROPIC_API_KEY";
 pub fn brain_unit() -> String {
     "[Unit]
 Description=Jarvis — cerveau de l'assistant vocal
-After=graphical-session.target
+After=graphical-session.target jarvis-lmstudio.service
+# Serveur du modèle local, dans son propre cgroup : il survit au redémarrage du cerveau.
+Wants=jarvis-lmstudio.service
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/jarvis-brain
 EnvironmentFile=-%h/.config/jarvis/env
-# Serveur LM Studio sans interface graphique (ignoré s'il est déjà lancé ou absent).
-ExecStartPre=-%h/.lmstudio/bin/lms daemon up
-ExecStartPre=-%h/.lmstudio/bin/lms server start
 # Données temporaires (espeak-ng de la voix) dans le dossier privé de la session, pas /tmp.
 Environment=TMPDIR=%t
 Restart=on-failure
@@ -67,6 +66,28 @@ RestartSec=5
 
 [Install]
 WantedBy=graphical-session.target
+"
+    .to_string()
+}
+
+/// Contenu exact de l'unité du serveur LM Studio : démarre le démon et le serveur (port 1234)
+/// sans l'interface graphique. Aucun modèle n'est chargé : LM Studio le charge à la première
+/// requête et le décharge après le `ttl` envoyé par le cerveau. Sautée si `lms` est absent.
+pub fn lmstudio_unit() -> String {
+    "[Unit]
+Description=Jarvis — serveur LM Studio sans interface (modèles chargés à la demande)
+After=network.target
+ConditionPathExists=%h/.lmstudio/bin/lms
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.lmstudio/bin/lms daemon up
+ExecStart=%h/.lmstudio/bin/lms server start
+ExecStop=-%h/.lmstudio/bin/lms server stop
+
+[Install]
+WantedBy=default.target
 "
     .to_string()
 }
@@ -220,6 +241,7 @@ pub fn install(
     copy_binaries(&opts.source, paths, out)?;
     copy_libraries(&opts.source, paths, out)?;
     write_units(paths, out)?;
+    write_lmstudio_unit(paths, out)?;
 
     fs::create_dir_all(&paths.config_dir)?;
     if !paths.env_file.exists() {
@@ -234,6 +256,7 @@ pub fn install(
     fs::write(&paths.install_file, format!("source = {source}\n"))?;
 
     systemctl(sys, &["daemon-reload"])?;
+    enable_lmstudio(sys, out)?;
     for svc in Service::ALL {
         let unit = svc.unit();
         let r = systemctl(sys, &["enable", "--now", unit])?;
@@ -313,6 +336,33 @@ fn write_units(paths: &Paths, out: &mut dyn Write) -> Result<(Vec<Service>, bool
     Ok((created, written))
 }
 
+/// Écrit l'unité du serveur LM Studio si son contenu a changé ; renvoie (créée, écrite).
+fn write_lmstudio_unit(paths: &Paths, out: &mut dyn Write) -> Result<(bool, bool)> {
+    let content = lmstudio_unit();
+    let path = &paths.lmstudio_unit_path;
+    let existing = fs::read_to_string(path).ok();
+    if existing.as_deref() == Some(content.as_str()) {
+        return Ok((false, false));
+    }
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, content)?;
+    writeln!(out, "Unité écrite : {}", path.display())?;
+    Ok((existing.is_none(), true))
+}
+
+/// Active et démarre l'unité du serveur LM Studio (sans effet sur les modèles).
+fn enable_lmstudio(sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let r = systemctl(sys, &["enable", "--now", LMSTUDIO_SERVICE])?;
+    if r.code != 0 {
+        bail!(
+            "`systemctl --user enable --now {LMSTUDIO_SERVICE}` a échoué (code {})",
+            r.code
+        );
+    }
+    writeln!(out, "Service {LMSTUDIO_SERVICE} activé et démarré.")?;
+    Ok(())
+}
+
 /// Registre des tâches du cerveau (`XDG_STATE_HOME` compris).
 fn tasks_dir(paths: &Paths, sys: &dyn System) -> PathBuf {
     paths.tasks_dir(sys.env_var("XDG_STATE_HOME").as_deref())
@@ -354,8 +404,12 @@ pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()
     copy_libraries(&source, paths, out)?;
     // Une installation antérieure à l'oreille en service n'a que l'unité du cerveau.
     let (created, written) = write_units(paths, out)?;
-    if written {
+    let (lm_created, lm_written) = write_lmstudio_unit(paths, out)?;
+    if written || lm_written {
         systemctl(sys, &["daemon-reload"])?;
+    }
+    if lm_created {
+        enable_lmstudio(sys, out)?;
     }
     // Une unité déjà là garde son choix d'activation (`jarvisctl disable oreille`).
     for svc in created {
@@ -404,10 +458,15 @@ pub fn uninstall(
             fs::remove_file(path)?;
         }
     }
+    let _ = systemctl(sys, &["stop", LMSTUDIO_SERVICE]);
+    let _ = systemctl(sys, &["disable", LMSTUDIO_SERVICE]);
+    if paths.lmstudio_unit_path.exists() {
+        fs::remove_file(&paths.lmstudio_unit_path)?;
+    }
     let _ = systemctl(sys, &["daemon-reload"]);
     writeln!(
         out,
-        "Services du cerveau et de l'oreille arrêtés, désactivés et unités supprimées."
+        "Services du cerveau, de l'oreille et du serveur LM Studio arrêtés, désactivés et unités supprimées."
     )?;
 
     // jarvisctl en dernier.
@@ -731,6 +790,11 @@ pub fn status(
             None => writeln!(out, "Ollama    : injoignable")?,
         }
     } else {
+        if paths.lmstudio_unit_path.exists() {
+            let (active, detail) = unit_state(sys, LMSTUDIO_SERVICE)?;
+            let state = if active { "actif" } else { "inactif" };
+            writeln!(out, "Serveur   : {LMSTUDIO_SERVICE} {state} ({detail})")?;
+        }
         match sys.http_get(&local.addr, "/api/v0/models") {
             Some(body) => {
                 let models = lmstudio_models(&body);
@@ -1670,6 +1734,38 @@ mod tests {
     }
 
     #[test]
+    fn unite_lmstudio_separee_du_cerveau() {
+        let u = lmstudio_unit();
+        assert!(u.contains("ExecStart=%h/.lmstudio/bin/lms daemon up\n"));
+        assert!(u.contains("ExecStart=%h/.lmstudio/bin/lms server start\n"));
+        assert!(u.contains("ConditionPathExists=%h/.lmstudio/bin/lms\n"));
+        assert!(u.contains("RemainAfterExit=yes"));
+        assert!(!u.contains("load"), "aucun modèle n'est chargé par l'unité");
+        let b = brain_unit();
+        assert!(b.contains("Wants=jarvis-lmstudio.service\n"));
+        assert!(b.contains("After=graphical-session.target jarvis-lmstudio.service\n"));
+        assert!(!b.contains("ExecStartPre"));
+    }
+
+    #[test]
+    fn install_ecrit_et_active_l_unite_lmstudio() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        assert_eq!(
+            fs::read_to_string(&paths.lmstudio_unit_path).unwrap(),
+            lmstudio_unit()
+        );
+        let cmds = sys.cmds.borrow();
+        let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
+        // Le serveur est activé avant le cerveau qui le réclame.
+        assert!(
+            pos("systemctl --user enable --now jarvis-lmstudio.service")
+                < pos("systemctl --user enable --now jarvis-brain.service")
+        );
+    }
+
+    #[test]
     fn unite_systemd_exacte() {
         let u = brain_unit();
         assert!(u.starts_with("[Unit]\nDescription=Jarvis — cerveau de l'assistant vocal\n"));
@@ -1843,9 +1939,11 @@ WantedBy=graphical-session.target
         }
         assert!(!paths.unit_path.exists());
         assert!(!paths.ear_unit_path.exists());
+        assert!(!paths.lmstudio_unit_path.exists());
         assert!(paths.env_file.exists());
         assert!(paths.config_file.exists());
         let cmds = sys.cmds.borrow();
+        assert!(cmds.contains(&"systemctl --user disable jarvis-lmstudio.service".to_string()));
         let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
         // L'oreille s'arrête avant le cerveau.
         assert!(

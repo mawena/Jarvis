@@ -13,8 +13,9 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
   (LM Studio par défaut, `http://127.0.0.1:1234`) ; le backend Ollama reste disponible. La
   réflexion de Qwen3.5 est coupée, `keep_alive` devient le `ttl` de LM Studio (déchargement
   automatique), le modèle est préchauffé au démarrage.
-- Le service du cerveau démarre le serveur LM Studio sans interface graphique
-  (`lms daemon up`, `lms server start`).
+- Nouvelle unité `jarvis-lmstudio.service`, installée, activée et retirée par `jarvisctl`, qui
+  démarre le serveur LM Studio sans interface graphique (`lms daemon up`, `lms server start`) ;
+  le cerveau la réclame. `jarvisctl status` affiche son état.
 - `jarvisctl status` et `doctor` vérifient LM Studio (ou Ollama selon le réglage).
 
 ## [0.1.0] - 2026-11-09

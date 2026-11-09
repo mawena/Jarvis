@@ -4,7 +4,7 @@
 
 - Ubuntu 24.04, GNOME sur X11, session systemd utilisateur
 - Rust (cargo) et git
-- [LM Studio](https://lmstudio.ai/download) (lancé une fois pour installer la commande `lms`) avec le modèle local Qwen3.5 4B : `lms get lmstudio-community/Qwen3.5-4B-GGUF` (détails et variante Ollama : [docs/ia-locale.md](ia-locale.md)). Le service du cerveau démarre le serveur de LM Studio sans interface graphique à l'ouverture de session.
+- [LM Studio](https://lmstudio.ai/download) (lancé une fois pour installer la commande `lms`) avec le modèle local Qwen3.5 4B : `lms get lmstudio-community/Qwen3.5-4B-GGUF` (détails et variante Ollama : [docs/ia-locale.md](ia-locale.md)). Le service `jarvis-lmstudio.service` (créé par `jarvisctl install`) démarre le serveur de LM Studio sans interface graphique à l'ouverture de session.
 - Outils système : `sudo apt install wmctrl xdotool wireplumber libglib2.0-bin`
 
 ## Installer

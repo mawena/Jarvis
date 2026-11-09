@@ -16,9 +16,11 @@ Aucune étape de chargement : LM Studio charge le modèle à la première requê
 demande) et le décharge de lui-même après `keep_alive` d'inactivité (le `ttl` de LM Studio). Le
 cerveau préchauffe le modèle au démarrage (consignes et outils lus, rien généré).
 
-Le serveur démarre à l'ouverture de session sans l'interface graphique : l'unité systemd du cerveau
-lance `lms daemon up` puis `lms server start` avant le cerveau (échec ignoré si LM Studio est absent
-ou déjà lancé). Si l'interface graphique de LM Studio est ouverte, c'est elle qui sert.
+Le serveur démarre à l'ouverture de session sans l'interface graphique : `jarvisctl install` crée
+l'unité utilisateur `jarvis-lmstudio.service` (`lms daemon up`, `lms server start`), séparée du
+cerveau (elle survit à son redémarrage) et réclamée par lui (`Wants=`/`After=`). Elle ne charge
+aucun modèle et est sautée si `lms` est absent. Si l'interface graphique de LM Studio est ouverte,
+c'est elle qui sert.
 
 ### Réglages
 
