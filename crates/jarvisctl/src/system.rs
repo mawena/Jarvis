@@ -8,6 +8,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+pub const LMSTUDIO_ADDR: &str = "127.0.0.1:1234";
 pub const OLLAMA_ADDR: &str = "127.0.0.1:11434";
 
 pub struct Output {

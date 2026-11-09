@@ -5,7 +5,7 @@ use jarvis_brain::config::{Config, LocalLlmConfig};
 use jarvis_brain::ducking::{Ducker, WpctlDucker};
 use jarvis_brain::ears::EarRegistry;
 use jarvis_brain::listen::{ListenService, NoTranscriber};
-use jarvis_brain::llm::{ClaudeBackend, OllamaBackend};
+use jarvis_brain::llm::{ClaudeBackend, LlmBackend, local_backend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, NetworkPaths, Services};
@@ -89,7 +89,7 @@ async fn main() -> anyhow::Result<()> {
             "registre des tâches illisible : agent de code désactivé"
         ),
     }
-    let local = Arc::new(OllamaBackend::new(&config.local, &config.address));
+    let local: Arc<dyn LlmBackend> = local_backend(&config.local, &config.address);
     let online = Arc::new(ClaudeBackend::from_env(&config.online, &config.address));
 
     // Outils proposés à l'IA, connus une fois le cerveau construit : le
@@ -100,14 +100,14 @@ async fn main() -> anyhow::Result<()> {
             let client = Arc::new(client);
             // Modèle de résumé distinct si `local_summary_model` est renseigné.
             let summary_model = config.search.local_summary_model.trim();
-            let local_summary: Arc<OllamaBackend> = if summary_model.is_empty() {
+            let local_summary: Arc<dyn LlmBackend> = if summary_model.is_empty() {
                 local.clone()
             } else {
                 let cfg = LocalLlmConfig {
                     model: summary_model.to_string(),
                     ..config.local.clone()
                 };
-                Arc::new(OllamaBackend::new(&cfg, &config.address))
+                local_backend(&cfg, &config.address)
             };
             let (rewarm_local, rewarm_tools) = (local.clone(), warm_tools.clone());
             let warm: WarmUp = Arc::new(move || {
@@ -122,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                 })
             });
-            // La consigne du résumé a pris la place des outils dans le cache d'Ollama :
+            // La consigne du résumé a pris la place des outils dans le cache du serveur :
             // on les lui refait lire, en tâche de fond, sans retarder la réponse
             // (sauf modèle de résumé distinct, mode passé en ligne ou re-préchauffage
             // déjà en cours : voir `Rewarmer`).

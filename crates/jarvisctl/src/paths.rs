@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 
 pub const SERVICE: &str = "jarvis-brain.service";
 pub const EAR_SERVICE: &str = "jarvis-ear.service";
+/// Serveur LM Studio sans interface graphique (démon + serveur), réclamé par le cerveau.
+pub const LMSTUDIO_SERVICE: &str = "jarvis-lmstudio.service";
 /// Modèle du mot d'éveil, relatif au dossier de données : sans lui, l'unité de l'oreille
 /// ne démarre pas (`ConditionPathExists`).
 pub const WAKEWORD_FILE: &str = "wakeword/jarvis.rpw";
@@ -17,7 +19,8 @@ pub const WHISPER_MODEL: &str = "ggml-small-q5_1.bin";
 pub const SPEAKER_MODEL: &str = "3dspeaker_speech_campplus_sv_en_voxceleb_16k.onnx";
 /// Dossier de la voix de Jarvis (un `.onnx` et `tokens.txt`).
 pub const VOICE_DIR: &str = "vits-piper-fr_FR-upmc-medium";
-pub const DEFAULT_MODEL: &str = "llama3.2:3b";
+/// Modèle local par défaut (identifiant dans LM Studio).
+pub const DEFAULT_MODEL: &str = "qwen3.5-4b";
 /// Image SearXNG épinglée : la mettre à jour = changer cette constante (et `compose.yml`).
 pub const SEARXNG_IMAGE: &str = "docker.io/searxng/searxng:2026.10.28-c360868e5";
 /// Adresse de SearXNG, sur la machine seulement (8080 est déjà pris).
@@ -33,6 +36,7 @@ pub struct Paths {
     pub cargo_bin: PathBuf,
     pub unit_path: PathBuf,
     pub ear_unit_path: PathBuf,
+    pub lmstudio_unit_path: PathBuf,
     pub config_dir: PathBuf,
     pub config_file: PathBuf,
     pub env_file: PathBuf,
@@ -54,6 +58,7 @@ impl Paths {
             cargo_bin: home.join(".cargo/bin"),
             unit_path: units.join(SERVICE),
             ear_unit_path: units.join(EAR_SERVICE),
+            lmstudio_unit_path: units.join(LMSTUDIO_SERVICE),
             config_file: config_dir.join("config.toml"),
             searx_dir: config_dir.join("searxng"),
             env_file: config_dir.join("env"),

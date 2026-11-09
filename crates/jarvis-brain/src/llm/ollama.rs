@@ -1,6 +1,8 @@
 use super::router::{Route, classify};
 use super::{LlmBackend, LlmError, Understanding, chat_prompt, system_prompt};
 use crate::config::LocalLlmConfig;
+#[cfg(test)]
+use crate::config::LocalProvider;
 use crate::intent::Intent;
 use jarvis_skills::ToolSpec;
 use serde_json::{Value, json};
@@ -32,7 +34,7 @@ impl OllamaBackend {
 
     /// Charge le modèle et lui fait lire les consignes et les outils, sans rien générer :
     /// Ollama garde ce préfixe en cache, et la première vraie phrase est rapide.
-    pub async fn warm_up(&self, tools: &[ToolSpec]) -> Result<(), LlmError> {
+    async fn warm(&self, tools: &[ToolSpec]) -> Result<(), LlmError> {
         let mut body = self.chat_body("bonjour", tools);
         body["options"] = json!({"num_predict": 1});
         let resp = self
@@ -93,6 +95,10 @@ fn check_status(status: reqwest::StatusCode) -> Result<(), LlmError> {
 
 #[async_trait::async_trait]
 impl LlmBackend for OllamaBackend {
+    async fn warm_up(&self, tools: &[ToolSpec]) -> Result<(), LlmError> {
+        self.warm(tools).await
+    }
+
     async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
         let route = classify(text);
         debug!(?route, "aiguillage local");
@@ -204,7 +210,7 @@ fn malformed_tool_call(text: &str) -> Option<(String, Value)> {
     Some((name.to_string(), json!({})))
 }
 
-fn parse(v: &Value, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
+pub(super) fn parse(v: &Value, tools: &[ToolSpec]) -> Result<Understanding, LlmError> {
     let message = v
         .get("message")
         .ok_or_else(|| LlmError::BadResponse("champ message absent".into()))?;
@@ -243,6 +249,7 @@ mod tests {
 
     fn backend(url: &str) -> OllamaBackend {
         let cfg = LocalLlmConfig {
+            provider: LocalProvider::Ollama,
             url: url.to_string(),
             model: "qwen2.5:3b".to_string(),
             keep_alive: "30m".to_string(),

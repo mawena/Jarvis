@@ -1,6 +1,6 @@
 //! Résumé des recherches par l'IA du mode actif.
 //!
-//! Le mode est lu à chaque appel. En mode local, seul Ollama est appelé : s'il
+//! Le mode est lu à chaque appel. En mode local, seul le serveur local est appelé : s'il
 //! échoue, c'est une erreur (la compétence dit l'extrait), jamais Claude.
 
 use crate::llm::{LlmBackend, summary_message, summary_prompt};
@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
-/// Action lancée après un résumé local (re-préchauffage d'Ollama).
+/// Action lancée après un résumé local (re-préchauffage du modèle local).
 pub type AfterLocal = Arc<dyn Fn() + Send + Sync>;
 
 /// Résumeur qui suit le mode actif.
@@ -50,14 +50,14 @@ impl ModeSummarizer {
     }
 
     /// `after` est appelé après chaque résumé local, même en échec ou abandonné :
-    /// la consigne du résumé a pris la place des outils dans le cache d'Ollama.
+    /// la consigne du résumé a pris la place des outils dans le cache du serveur local.
     pub fn with_after_local(mut self, after: AfterLocal) -> Self {
         self.after_local = Some(after);
         self
     }
 }
 
-/// Préchauffage du modèle local (en pratique `OllamaBackend::warm_up` avec les outils).
+/// Préchauffage du modèle local (en pratique `LlmBackend::warm_up` avec les outils).
 pub type WarmUp = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Vrai si le résumé local passe par un autre modèle que la compréhension

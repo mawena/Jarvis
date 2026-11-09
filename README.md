@@ -24,7 +24,7 @@ texte des phrases à Claude.
 | Écoute | « coupe l'écoute », « réactive l'écoute », « passe en mode local / en ligne » |
 
 Les commandes courantes sont reconnues **sans IA**, en une à deux secondes. Les autres phrases
-passent par l'IA du mode choisi : **Ollama** sur le PC (mode local, par défaut) ou **Claude**
+passent par l'IA du mode choisi : **Qwen3.5 4B servi par LM Studio** sur le PC (mode local, par défaut ; Ollama reste possible) ou **Claude**
 (mode en ligne).
 
 Garde-fous :
@@ -38,7 +38,7 @@ Garde-fous :
  micro ──► oreille (jarvis-ear)                      cerveau (jarvis-brain, service systemd)
            mot d'éveil « Jarvis »  ── phrase ──►     Whisper : parole → texte
            fin de phrase, bips                        empreinte vocale : est-ce bien toi ?
-           voix de Jarvis          ◄── réponse ──    raccourcis sans IA, sinon Ollama / Claude
+           voix de Jarvis          ◄── réponse ──    raccourcis sans IA, sinon LM Studio / Claude
            icône GNOME                                compétences : médias, applis, recherche…
 ```
 
@@ -59,7 +59,8 @@ Prévu pour **Ubuntu 24.04 avec GNOME sur X11** et une session systemd utilisate
 ```bash
 # Prérequis
 sudo apt install wmctrl xdotool wireplumber libglib2.0-bin libasound2-dev libclang-dev
-ollama pull llama3.2:3b                      # IA locale (https://ollama.com/download)
+# IA locale : LM Studio (https://lmstudio.ai/download), puis télécharger Qwen3.5 4B (docs/ia-locale.md)
+lms get lmstudio-community/Qwen3.5-4B-GGUF
 
 # Modèles (Whisper, empreinte vocale, voix) dans ~/.local/share/jarvis/models/
 scripts/download-models.sh all
@@ -90,7 +91,7 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 | `jarvis mode local` / `jarvis mode en-ligne` | choisir l'IA |
 | `jarvis pair` / `jarvis ears` / `jarvis unpair <nom ou id>` | appairer, lister, retirer une oreille |
 | `jarvis person …` / `jarvis role …` | personnes et rôles (qui a le droit de demander quoi) |
-| `jarvisctl status` | état du cerveau, de l'oreille, du mode, d'Ollama |
+| `jarvisctl status` | état du cerveau, de l'oreille, du mode, de LM Studio |
 | `jarvisctl logs [-f] [--oreille]` | journaux |
 | `jarvisctl start` / `stop` / `restart` `[cerveau\|oreille]` | piloter les services |
 | `jarvisctl doctor` | diagnostic avec conseils |

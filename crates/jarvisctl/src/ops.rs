@@ -1,10 +1,10 @@
 //! Logique des sous-commandes de `jarvisctl`.
 
 use crate::paths::{
-    BINARIES, DEFAULT_MODEL, EAR_SERVICE, Paths, SERVICE, SHARED_LIBS, SPEAKER_MODEL, Service,
-    VOICE_DIR, WHISPER_MODEL,
+    BINARIES, DEFAULT_MODEL, EAR_SERVICE, LMSTUDIO_SERVICE, Paths, SERVICE, SHARED_LIBS,
+    SPEAKER_MODEL, Service, VOICE_DIR, WHISPER_MODEL,
 };
-use crate::system::{OLLAMA_ADDR, System};
+use crate::system::{LMSTUDIO_ADDR, OLLAMA_ADDR, System};
 use anyhow::{Context, Result, bail};
 use jarvis_protocol::{ControlRequest, ControlResponse};
 use jarvis_skills::agent::AgentSettings;
@@ -21,7 +21,9 @@ const KEY_VAR: &str = "ANTHROPIC_API_KEY";
 pub fn brain_unit() -> String {
     "[Unit]
 Description=Jarvis — cerveau de l'assistant vocal
-After=graphical-session.target
+After=graphical-session.target jarvis-lmstudio.service
+# Serveur du modèle local, dans son propre cgroup : il survit au redémarrage du cerveau.
+Wants=jarvis-lmstudio.service
 PartOf=graphical-session.target
 
 [Service]
@@ -68,6 +70,28 @@ WantedBy=graphical-session.target
     .to_string()
 }
 
+/// Contenu exact de l'unité du serveur LM Studio : démarre le démon et le serveur (port 1234)
+/// sans l'interface graphique. Aucun modèle n'est chargé : LM Studio le charge à la première
+/// requête et le décharge après le `ttl` envoyé par le cerveau. Sautée si `lms` est absent.
+pub fn lmstudio_unit() -> String {
+    "[Unit]
+Description=Jarvis — serveur LM Studio sans interface (modèles chargés à la demande)
+After=network.target
+ConditionPathExists=%h/.lmstudio/bin/lms
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=%h/.lmstudio/bin/lms daemon up
+ExecStart=%h/.lmstudio/bin/lms server start
+ExecStop=-%h/.lmstudio/bin/lms server stop
+
+[Install]
+WantedBy=default.target
+"
+    .to_string()
+}
+
 const DEFAULT_ENV: &str =
     "# Variables d'environnement du cerveau Jarvis (chargées par systemd).\n# ANTHROPIC_API_KEY=\n";
 
@@ -76,10 +100,11 @@ const DEFAULT_CONFIG: &str = r#"# Configuration de Jarvis (valeurs par défaut c
 # address = "Monsieur"     # nom par lequel Jarvis s'adresse à vous ("" : jamais nommé)
 # sound_only_for_success = false   # vrai : une commande rapide réussie n'est confirmée que par un bip
 
-# [local]
-# url = "http://127.0.0.1:11434"
-# model = "llama3.2:3b"
-# keep_alive = "30m"
+# [local]                       # modèle local, servi par LM Studio (docs/ia-locale.md)
+# provider = "lmstudio"        # "lmstudio" ou "ollama"
+# url = "http://127.0.0.1:1234"   # Ollama : "http://127.0.0.1:11434"
+# model = "qwen3.5-4b"         # Ollama : "llama3.2:3b"
+# keep_alive = "30m"           # le modèle est déchargé après cette durée d'inactivité
 
 # [online]
 # url = "https://api.anthropic.com"
@@ -216,6 +241,7 @@ pub fn install(
     copy_binaries(&opts.source, paths, out)?;
     copy_libraries(&opts.source, paths, out)?;
     write_units(paths, out)?;
+    write_lmstudio_unit(paths, out)?;
 
     fs::create_dir_all(&paths.config_dir)?;
     if !paths.env_file.exists() {
@@ -230,6 +256,7 @@ pub fn install(
     fs::write(&paths.install_file, format!("source = {source}\n"))?;
 
     systemctl(sys, &["daemon-reload"])?;
+    enable_lmstudio(sys, out)?;
     for svc in Service::ALL {
         let unit = svc.unit();
         let r = systemctl(sys, &["enable", "--now", unit])?;
@@ -309,6 +336,33 @@ fn write_units(paths: &Paths, out: &mut dyn Write) -> Result<(Vec<Service>, bool
     Ok((created, written))
 }
 
+/// Écrit l'unité du serveur LM Studio si son contenu a changé ; renvoie (créée, écrite).
+fn write_lmstudio_unit(paths: &Paths, out: &mut dyn Write) -> Result<(bool, bool)> {
+    let content = lmstudio_unit();
+    let path = &paths.lmstudio_unit_path;
+    let existing = fs::read_to_string(path).ok();
+    if existing.as_deref() == Some(content.as_str()) {
+        return Ok((false, false));
+    }
+    fs::create_dir_all(path.parent().unwrap())?;
+    fs::write(path, content)?;
+    writeln!(out, "Unité écrite : {}", path.display())?;
+    Ok((existing.is_none(), true))
+}
+
+/// Active et démarre l'unité du serveur LM Studio (sans effet sur les modèles).
+fn enable_lmstudio(sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let r = systemctl(sys, &["enable", "--now", LMSTUDIO_SERVICE])?;
+    if r.code != 0 {
+        bail!(
+            "`systemctl --user enable --now {LMSTUDIO_SERVICE}` a échoué (code {})",
+            r.code
+        );
+    }
+    writeln!(out, "Service {LMSTUDIO_SERVICE} activé et démarré.")?;
+    Ok(())
+}
+
 /// Registre des tâches du cerveau (`XDG_STATE_HOME` compris).
 fn tasks_dir(paths: &Paths, sys: &dyn System) -> PathBuf {
     paths.tasks_dir(sys.env_var("XDG_STATE_HOME").as_deref())
@@ -350,8 +404,12 @@ pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()
     copy_libraries(&source, paths, out)?;
     // Une installation antérieure à l'oreille en service n'a que l'unité du cerveau.
     let (created, written) = write_units(paths, out)?;
-    if written {
+    let (lm_created, lm_written) = write_lmstudio_unit(paths, out)?;
+    if written || lm_written {
         systemctl(sys, &["daemon-reload"])?;
+    }
+    if lm_created {
+        enable_lmstudio(sys, out)?;
     }
     // Une unité déjà là garde son choix d'activation (`jarvisctl disable oreille`).
     for svc in created {
@@ -400,10 +458,15 @@ pub fn uninstall(
             fs::remove_file(path)?;
         }
     }
+    let _ = systemctl(sys, &["stop", LMSTUDIO_SERVICE]);
+    let _ = systemctl(sys, &["disable", LMSTUDIO_SERVICE]);
+    if paths.lmstudio_unit_path.exists() {
+        fs::remove_file(&paths.lmstudio_unit_path)?;
+    }
     let _ = systemctl(sys, &["daemon-reload"]);
     writeln!(
         out,
-        "Services du cerveau et de l'oreille arrêtés, désactivés et unités supprimées."
+        "Services du cerveau, de l'oreille et du serveur LM Studio arrêtés, désactivés et unités supprimées."
     )?;
 
     // jarvisctl en dernier.
@@ -449,7 +512,10 @@ pub fn uninstall(
     } else {
         writeln!(out, "Configuration conservée (--purge pour l'effacer).")?;
     }
-    writeln!(out, "Ollama et ses modèles n'ont pas été touchés.")?;
+    writeln!(
+        out,
+        "LM Studio, Ollama et leurs modèles n'ont pas été touchés."
+    )?;
     Ok(())
 }
 
@@ -565,12 +631,65 @@ fn configured_path(paths: &Paths, section: &str, key: &str, default_file: &str) 
     }
 }
 
-fn local_model(paths: &Paths) -> String {
-    fs::read_to_string(&paths.config_file)
+/// Serveur du modèle local et son modèle, lus dans `[local]` (valeurs par défaut sinon).
+struct LocalSettings {
+    ollama: bool,
+    addr: String,
+    model: String,
+}
+
+fn local_settings(paths: &Paths) -> LocalSettings {
+    let local = fs::read_to_string(&paths.config_file)
         .ok()
         .and_then(|t| toml::from_str::<toml::Value>(&t).ok())
-        .and_then(|v| v.get("local")?.get("model")?.as_str().map(String::from))
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+        .and_then(|v| v.get("local").cloned());
+    let get = |k: &str| {
+        local
+            .as_ref()
+            .and_then(|l| l.get(k)?.as_str().map(String::from))
+    };
+    let ollama = get("provider").as_deref() == Some("ollama");
+    let default_addr = if ollama { OLLAMA_ADDR } else { LMSTUDIO_ADDR };
+    let addr = get("url")
+        .map(|u| {
+            u.trim_start_matches("http://")
+                .trim_end_matches('/')
+                .to_string()
+        })
+        .unwrap_or_else(|| default_addr.to_string());
+    let model = get("model").unwrap_or_else(|| {
+        if ollama {
+            "llama3.2:3b".to_string()
+        } else {
+            DEFAULT_MODEL.to_string()
+        }
+    });
+    LocalSettings {
+        ollama,
+        addr,
+        model,
+    }
+}
+
+fn local_model(paths: &Paths) -> String {
+    local_settings(paths).model
+}
+
+/// Modèles de LM Studio (`/api/v0/models`) : (identifiant, chargé en mémoire).
+fn lmstudio_models(json: &str) -> Vec<(String, bool)> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.get("data")?.as_array().map(|a| {
+                a.iter()
+                    .filter_map(|m| {
+                        let id = m.get("id")?.as_str()?.to_string();
+                        Some((id, m.get("state")?.as_str()? == "loaded"))
+                    })
+                    .collect()
+            })
+        })
+        .unwrap_or_default()
 }
 
 fn model_names(json: &str, key: &str) -> Vec<String> {
@@ -653,20 +772,41 @@ pub fn status(
         return Ok(code);
     }
 
-    match sys.http_get(OLLAMA_ADDR, "/api/version") {
-        Some(_) => {
-            let loaded = sys
-                .http_get(OLLAMA_ADDR, "/api/ps")
-                .map(|b| model_names(&b, "models").contains(&model))
-                .unwrap_or(false);
-            let state = if loaded {
-                "modèle chargé"
-            } else {
-                "modèle non chargé"
-            };
-            writeln!(out, "Ollama    : joignable, {state}")?;
+    let local = local_settings(paths);
+    if local.ollama {
+        match sys.http_get(&local.addr, "/api/version") {
+            Some(_) => {
+                let loaded = sys
+                    .http_get(&local.addr, "/api/ps")
+                    .map(|b| model_names(&b, "models").contains(&model))
+                    .unwrap_or(false);
+                let state = if loaded {
+                    "modèle chargé"
+                } else {
+                    "modèle non chargé"
+                };
+                writeln!(out, "Ollama    : joignable, {state}")?;
+            }
+            None => writeln!(out, "Ollama    : injoignable")?,
         }
-        None => writeln!(out, "Ollama    : injoignable")?,
+    } else {
+        if paths.lmstudio_unit_path.exists() {
+            let (active, detail) = unit_state(sys, LMSTUDIO_SERVICE)?;
+            let state = if active { "actif" } else { "inactif" };
+            writeln!(out, "Serveur   : {LMSTUDIO_SERVICE} {state} ({detail})")?;
+        }
+        match sys.http_get(&local.addr, "/api/v0/models") {
+            Some(body) => {
+                let models = lmstudio_models(&body);
+                let state = match models.iter().find(|(id, _)| *id == model) {
+                    Some((_, true)) => "modèle chargé",
+                    Some((_, false)) => "modèle non chargé (chargé à la demande)",
+                    None => "modèle introuvable (voir `lms ls`)",
+                };
+                writeln!(out, "LM Studio : joignable, {state}")?;
+            }
+            None => writeln!(out, "LM Studio : injoignable")?,
+        }
     }
     let key = if api_key_set(paths) {
         "présente"
@@ -748,32 +888,63 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         "lancez `jarvisctl start cerveau` puis `jarvisctl logs`",
     )?;
 
-    let ollama = sys
-        .run("ollama", &["--version"])
-        .map(|o| o.code == 0)
-        .unwrap_or(false);
-    check(
-        out,
-        ollama,
-        "Ollama installé",
-        "installez-le : https://ollama.com/download",
-    )?;
-    let tags = sys.http_get(OLLAMA_ADDR, "/api/tags");
-    check(
-        out,
-        tags.is_some(),
-        "Ollama joignable",
-        "lancez `systemctl start ollama` ou `ollama serve`",
-    )?;
-    let pulled = tags
-        .map(|b| model_names(&b, "models").iter().any(|n| n == DEFAULT_MODEL))
-        .unwrap_or(false);
-    check(
-        out,
-        pulled,
-        &format!("Modèle {DEFAULT_MODEL} téléchargé"),
-        &format!("lancez `ollama pull {DEFAULT_MODEL}`"),
-    )?;
+    let local = local_settings(paths);
+    if local.ollama {
+        let ollama = sys
+            .run("ollama", &["--version"])
+            .map(|o| o.code == 0)
+            .unwrap_or(false);
+        check(
+            out,
+            ollama,
+            "Ollama installé",
+            "installez-le : https://ollama.com/download",
+        )?;
+        let tags = sys.http_get(&local.addr, "/api/tags");
+        check(
+            out,
+            tags.is_some(),
+            "Ollama joignable",
+            "lancez `systemctl start ollama` ou `ollama serve`",
+        )?;
+        let pulled = tags
+            .map(|b| model_names(&b, "models").contains(&local.model))
+            .unwrap_or(false);
+        check(
+            out,
+            pulled,
+            &format!("Modèle {} téléchargé", local.model),
+            &format!("lancez `ollama pull {}`", local.model),
+        )?;
+    } else {
+        let lms = paths.home.join(".lmstudio/bin/lms").is_file()
+            || sys
+                .run("sh", &["-c", "command -v lms"])
+                .map(|o| o.code == 0)
+                .unwrap_or(false);
+        check(
+            out,
+            lms,
+            "LM Studio installé (commande lms)",
+            "installez-le : https://lmstudio.ai/download puis lancez-le une fois",
+        )?;
+        let models = sys.http_get(&local.addr, "/api/v0/models");
+        check(
+            out,
+            models.is_some(),
+            "LM Studio joignable",
+            "lancez `lms server start` (ou redémarrez le cerveau : `jarvisctl restart cerveau`)",
+        )?;
+        let downloaded = models
+            .map(|b| lmstudio_models(&b).iter().any(|(id, _)| *id == local.model))
+            .unwrap_or(false);
+        check(
+            out,
+            downloaded,
+            &format!("Modèle {} téléchargé", local.model),
+            "téléchargez-le dans LM Studio ou avec `lms get` (liste : `lms ls`)",
+        )?;
+    }
 
     for (tool, pkg) in [
         ("wmctrl", "wmctrl"),
@@ -1563,6 +1734,38 @@ mod tests {
     }
 
     #[test]
+    fn unite_lmstudio_separee_du_cerveau() {
+        let u = lmstudio_unit();
+        assert!(u.contains("ExecStart=%h/.lmstudio/bin/lms daemon up\n"));
+        assert!(u.contains("ExecStart=%h/.lmstudio/bin/lms server start\n"));
+        assert!(u.contains("ConditionPathExists=%h/.lmstudio/bin/lms\n"));
+        assert!(u.contains("RemainAfterExit=yes"));
+        assert!(!u.contains("load"), "aucun modèle n'est chargé par l'unité");
+        let b = brain_unit();
+        assert!(b.contains("Wants=jarvis-lmstudio.service\n"));
+        assert!(b.contains("After=graphical-session.target jarvis-lmstudio.service\n"));
+        assert!(!b.contains("ExecStartPre"));
+    }
+
+    #[test]
+    fn install_ecrit_et_active_l_unite_lmstudio() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        do_install(home.path(), &paths, &sys);
+        assert_eq!(
+            fs::read_to_string(&paths.lmstudio_unit_path).unwrap(),
+            lmstudio_unit()
+        );
+        let cmds = sys.cmds.borrow();
+        let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
+        // Le serveur est activé avant le cerveau qui le réclame.
+        assert!(
+            pos("systemctl --user enable --now jarvis-lmstudio.service")
+                < pos("systemctl --user enable --now jarvis-brain.service")
+        );
+    }
+
+    #[test]
     fn unite_systemd_exacte() {
         let u = brain_unit();
         assert!(u.starts_with("[Unit]\nDescription=Jarvis — cerveau de l'assistant vocal\n"));
@@ -1736,9 +1939,11 @@ WantedBy=graphical-session.target
         }
         assert!(!paths.unit_path.exists());
         assert!(!paths.ear_unit_path.exists());
+        assert!(!paths.lmstudio_unit_path.exists());
         assert!(paths.env_file.exists());
         assert!(paths.config_file.exists());
         let cmds = sys.cmds.borrow();
+        assert!(cmds.contains(&"systemctl --user disable jarvis-lmstudio.service".to_string()));
         let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
         // L'oreille s'arrête avant le cerveau.
         assert!(
@@ -1816,7 +2021,7 @@ WantedBy=graphical-session.target
         assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 3);
         let o = text(out);
         assert!(o.contains("Cerveau   : inactif (inactive, dead)"), "{o}");
-        assert!(o.contains("Ollama    : injoignable"));
+        assert!(o.contains("LM Studio : injoignable"));
         assert!(o.contains("Clé Claude: absente"));
     }
 
@@ -1829,17 +2034,68 @@ WantedBy=graphical-session.target
             (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=Wed 2026-10-28 16:28:03 CET\n".into()),
         );
         sys.brain = Some((Mode::Local, "0.1.0".into(), String::new()));
+        sys.http.insert(
+            "/api/v0/models".into(),
+            r#"{"data":[{"id":"qwen3.5-4b","state":"loaded"}]}"#.into(),
+        );
+        let mut out = Vec::new();
+        assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 0);
+        let o = text(out);
+        assert!(o.contains("Cerveau   : actif (pid 1234, depuis 16:28)"));
+        assert!(o.contains("Mode      : local (qwen3.5-4b)"));
+        assert!(o.contains("LM Studio : joignable, modèle chargé"), "{o}");
+    }
+
+    #[test]
+    fn status_lmstudio_modele_non_charge_ou_absent() {
+        let (_home, paths) = setup();
+        let mut sys = Fake::default();
+        sys.replies.insert(
+            "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp".into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=\n".into()),
+        );
+        sys.http.insert(
+            "/api/v0/models".into(),
+            r#"{"data":[{"id":"qwen3.5-4b","state":"not-loaded"}]}"#.into(),
+        );
+        let mut out = Vec::new();
+        status(&paths, &sys, &[Service::Brain], &mut out).unwrap();
+        let o = text(out);
+        assert!(
+            o.contains("LM Studio : joignable, modèle non chargé"),
+            "{o}"
+        );
+
+        sys.http
+            .insert("/api/v0/models".into(), r#"{"data":[]}"#.into());
+        let mut out = Vec::new();
+        status(&paths, &sys, &[Service::Brain], &mut out).unwrap();
+        assert!(text(out).contains("modèle introuvable"));
+    }
+
+    #[test]
+    fn status_ollama_si_le_reglage_le_demande() {
+        let (_home, paths) = setup();
+        fs::create_dir_all(&paths.config_dir).unwrap();
+        fs::write(
+            &paths.config_file,
+            "[local]\nprovider = \"ollama\"\nmodel = \"llama3.2:3b\"\n",
+        )
+        .unwrap();
+        let mut sys = Fake::default();
+        sys.replies.insert(
+            "systemctl --user show jarvis-brain.service --property=ActiveState,SubState,MainPID,ActiveEnterTimestamp".into(),
+            (0, "ActiveState=active\nSubState=running\nMainPID=1234\nActiveEnterTimestamp=\n".into()),
+        );
         sys.http.insert("/api/version".into(), "{}".into());
         sys.http.insert(
             "/api/ps".into(),
             r#"{"models":[{"name":"llama3.2:3b"}]}"#.into(),
         );
         let mut out = Vec::new();
-        assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 0);
+        status(&paths, &sys, &[Service::Brain], &mut out).unwrap();
         let o = text(out);
-        assert!(o.contains("Cerveau   : actif (pid 1234, depuis 16:28)"));
-        assert!(o.contains("Mode      : local (llama3.2:3b)"));
-        assert!(o.contains("Ollama    : joignable, modèle chargé"));
+        assert!(o.contains("Ollama    : joignable, modèle chargé"), "{o}");
     }
 
     #[test]
@@ -1852,7 +2108,7 @@ WantedBy=graphical-session.target
         let o = text(out);
         assert!(o.contains("! Clé API Claude absente"), "{o}");
         assert!(o.contains("✓ Binaires dans"), "{o}");
-        assert!(o.contains("✗ Ollama joignable"), "{o}");
+        assert!(o.contains("✗ LM Studio joignable"), "{o}");
     }
 
     #[test]
@@ -1965,7 +2221,7 @@ WantedBy=graphical-session.target
         assert_eq!(sans_oreille, 1);
         assert_eq!(
             complet, 1,
-            "échec Ollama inchangé, aucune dépendance à l'oreille"
+            "échec LM Studio inchangé, aucune dépendance à l'oreille"
         );
     }
 
@@ -2244,9 +2500,9 @@ WantedBy=graphical-session.target
             o.contains("Oreille   : active (pid 4321, depuis 16:28)"),
             "{o}"
         );
-        assert!(o.contains("Ollama    :"), "{o}");
+        assert!(o.contains("LM Studio :"), "{o}");
 
-        // L'oreille seule : ni cerveau, ni Ollama, ni clé.
+        // L'oreille seule : ni cerveau, ni LM Studio, ni clé.
         let (code, o) = status_out(&paths, &sys, &[Service::Ear]);
         assert_eq!(code, 0);
         assert_eq!(o, "Oreille   : active (pid 4321, depuis 16:28)\n");
@@ -2352,7 +2608,7 @@ WantedBy=graphical-session.target
         assert!(o.contains("! Service de l'oreille non installé"), "{o}");
         assert!(!o.contains("Oreille active"), "{o}");
 
-        // L'oreille ne change jamais le code de sortie (ici 1 : Ollama injoignable).
+        // L'oreille ne change jamais le code de sortie (ici 1 : LM Studio injoignable).
         assert_eq!((code_saute, code_actif, code_absent), (1, 1, 1));
     }
 
@@ -2407,7 +2663,7 @@ WantedBy=graphical-session.target
             sys.cmds.borrow()
         );
         assert!(!o.contains("✗ Claude"), "{o}");
-        assert_eq!(code, 1, "seul Ollama (injoignable) fait échouer");
+        assert_eq!(code, 1, "seul LM Studio (injoignable) fait échouer");
 
         // Agent désactivé : un seul avertissement, aucune autre vérification.
         write_config(&paths, "[agent]\nenabled = false\n");
@@ -2551,7 +2807,7 @@ WantedBy=graphical-session.target
         let (code, o) = doctor_out(&paths, &sys);
         assert!(o.contains("! bwrap ne peut pas isoler l'agent"), "{o}");
         assert!(o.contains("AppArmor"), "{o}");
-        assert_eq!(code, 1, "seul Ollama (injoignable) fait échouer");
+        assert_eq!(code, 1, "seul LM Studio (injoignable) fait échouer");
 
         // Outils absents : bwrap n'est pas lancé.
         sys.replies
@@ -2754,7 +3010,7 @@ WantedBy=graphical-session.target
         let (code, o) = doctor_out(&paths, &sys);
         assert!(o.contains("! Clé privée du cerveau absente"), "{o}");
         assert!(o.contains("docs/reseau.md"), "{o}");
-        // Le réseau ne change jamais le code de sortie (ici 1 : Ollama injoignable).
+        // Le réseau ne change jamais le code de sortie (ici 1 : LM Studio injoignable).
         assert_eq!(code, 1);
     }
 

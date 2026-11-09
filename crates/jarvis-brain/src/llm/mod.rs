@@ -1,6 +1,7 @@
 //! Compréhension d'une phrase par un modèle de langage (local ou en ligne).
 
 pub mod claude;
+pub mod lmstudio;
 pub mod ollama;
 pub mod router;
 
@@ -9,6 +10,7 @@ use jarvis_skills::ToolSpec;
 use jarvis_skills::search::Source;
 
 pub use claude::ClaudeBackend;
+pub use lmstudio::LmStudioBackend;
 pub use ollama::OllamaBackend;
 
 /// Ce que le modèle a compris : un outil à appeler ou une réponse directe.
@@ -32,6 +34,12 @@ pub enum LlmError {
 
 #[async_trait::async_trait]
 pub trait LlmBackend: Send + Sync {
+    /// Charge le modèle et lui fait lire les consignes et les outils, sans rien générer :
+    /// la première vraie phrase est alors rapide. Sans effet pour un modèle en ligne.
+    async fn warm_up(&self, _tools: &[ToolSpec]) -> Result<(), LlmError> {
+        Ok(())
+    }
+
     async fn understand(&self, text: &str, tools: &[ToolSpec]) -> Result<Understanding, LlmError>;
 
     /// Complétion simple, **sans outils** (résumé d'une recherche).
@@ -47,8 +55,8 @@ pub trait LlmBackend: Send + Sync {
     }
 }
 
-/// Ton commun aux deux consignes. Court : les petits modèles locaux (llama3.2:3b,
-/// qwen2.5:3b) doivent le suivre.
+/// Ton commun aux deux consignes. Court : les petits modèles locaux (Qwen3.5 4B,
+/// llama3.2:3b) doivent le suivre.
 fn persona(address: &str) -> String {
     format!(
         "Tu es Jarvis, le majordome de {address}, discret et poli. Réponds en français, \
@@ -104,6 +112,18 @@ pub fn summary_message(query: &str, sources: &[Source]) -> String {
 /// Une seule ligne : un extrait ne peut pas imiter une autre source.
 fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Construit le backend du modèle local choisi par `[local] provider`.
+pub fn local_backend(
+    cfg: &crate::config::LocalLlmConfig,
+    address: &str,
+) -> std::sync::Arc<dyn LlmBackend> {
+    use crate::config::LocalProvider;
+    match cfg.provider {
+        LocalProvider::LmStudio => std::sync::Arc::new(LmStudioBackend::new(cfg, address)),
+        LocalProvider::Ollama => std::sync::Arc::new(OllamaBackend::new(cfg, address)),
+    }
 }
 
 #[cfg(test)]

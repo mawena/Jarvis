@@ -22,7 +22,8 @@ impl Skill for SystemSkill {
             ToolSpec {
                 name: "set_mode".into(),
                 description:
-                    "Change le mode de compréhension : local (Ollama) ou en ligne (Claude).".into(),
+                    "Change le mode de compréhension : local (LM Studio) ou en ligne (Claude)."
+                        .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {"mode": {"type": "string", "enum": ["local", "online"]}},

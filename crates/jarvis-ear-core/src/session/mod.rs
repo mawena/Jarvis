@@ -39,7 +39,7 @@ use crate::{MicState, Vad, WakeDetector};
 ///
 /// ```text
 ///   reconnaissance vocale (marge)           2 s
-/// + choix de l'outil par Ollama            20 s  (llm/ollama.rs, TIMEOUT)
+/// + choix de l'outil par le modèle local 20 s  (llm/lmstudio.rs, TIMEOUT)
 /// + compétence la plus lente : recherche   15 s  (SearXNG 4 s + résumé local 10 s + 1 s)
 /// + synthèse vocale                         8 s  (tts/mod.rs, SYNTH_DEADLINE)
 /// = 45 s, arrondi à 50 s
