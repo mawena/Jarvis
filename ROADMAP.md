@@ -175,3 +175,16 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 13.7 `scripts/check.sh` au vert (via la file d'attente), feature terminée dans `develop`
 - [x] 13.8 Banc de `docs/ia-locale.md` refait avec Qwen3.5 4B (précision, latence, comparaison à llama3.2:3b)
 - [x] 13.9 Installation des binaires, redémarrage du cerveau, essai de bout en bout, modèle déchargé ensuite
+
+## Phase 14 : démarrage manuel par défaut
+*Branche `feature/demarrage-manuel`. Jarvis ne se lance plus au démarrage du PC sauf choix explicite.*
+
+- [x] 14.1 `jarvisctl install` : `start` sans `enable` (LM Studio, cerveau, oreille), message vers `jarvisctl enable`
+- [x] 14.2 Option `--autostart` : `enable --now` du cerveau et de l'oreille
+- [x] 14.3 `jarvis-lmstudio.service` jamais activé ; `disable` du cerveau le désactive aussi
+- [x] 14.4 `jarvisctl update` : pas d'activation d'office, oreille nouvelle selon le cerveau
+- [x] 14.5 `jarvisctl doctor` : information neutre, hors code de sortie
+- [x] 14.6 Tests unitaires (install, `--autostart`, update, disable, doctor)
+- [x] 14.7 README, `docs/installation.md`, CHANGELOG
+- [x] 14.8 `scripts/check.sh` / clippy au vert (via la file), feature terminée dans `develop`
+- [ ] 14.9 Release 0.3.0 et release GitHub

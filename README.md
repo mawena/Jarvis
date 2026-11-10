@@ -65,7 +65,8 @@ lms get lmstudio-community/Qwen3.5-4B-GGUF
 # Modèles (Whisper, empreinte vocale, voix) dans ~/.local/share/jarvis/models/
 scripts/download-models.sh all
 
-# Compile, installe dans ~/.local/bin et démarre les services
+# Compile, installe dans ~/.local/bin et démarre les services (sans les lancer au
+# démarrage du PC ; ajoute --autostart pour qu'ils démarrent à chaque session)
 cargo run --release -p jarvisctl -- install
 
 # Apprendre « Jarvis » et ta voix (quelques prises au micro)
@@ -79,6 +80,8 @@ Ensuite :
 - **Recherche sur internet**, facultative : `jarvisctl searx up`. Elle lance SearXNG dans
   Docker, joignable seulement depuis le PC.
 - **Mises à jour** : `jarvisctl update`.
+- **Lancement au démarrage du PC** : désactivé par défaut. `jarvisctl enable` l'active
+  (`jarvisctl disable` le retire) ; `jarvisctl install --autostart` l'active dès l'installation.
 
 Le détail est dans [docs/installation.md](docs/installation.md).
 
