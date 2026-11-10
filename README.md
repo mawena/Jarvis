@@ -6,7 +6,7 @@ pause », « Jarvis, cherche la météo de demain à Lomé »), il comprend, agi
 Jarvis tournent **entièrement sur le PC**. Seul le mode « en ligne », choisi exprès, envoie le
 texte des phrases à Claude.
 
-> **État :** préversion `0.2.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
+> **État :** préversion `0.3.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
 > développement continue sur `develop`. La `1.0.0` viendra après la mise en service et les essais
 > réels. Nouveautés : [CHANGELOG.md](CHANGELOG.md) ; avancement détaillé :
 > [ROADMAP.md](ROADMAP.md).
@@ -65,7 +65,8 @@ lms get lmstudio-community/Qwen3.5-4B-GGUF
 # Modèles (Whisper, empreinte vocale, voix) dans ~/.local/share/jarvis/models/
 scripts/download-models.sh all
 
-# Compile, installe dans ~/.local/bin et démarre les services
+# Compile, installe dans ~/.local/bin et démarre les services (sans les lancer au
+# démarrage du PC ; ajoute --autostart pour qu'ils démarrent à chaque session)
 cargo run --release -p jarvisctl -- install
 
 # Apprendre « Jarvis » et ta voix (quelques prises au micro)
@@ -79,6 +80,8 @@ Ensuite :
 - **Recherche sur internet**, facultative : `jarvisctl searx up`. Elle lance SearXNG dans
   Docker, joignable seulement depuis le PC.
 - **Mises à jour** : `jarvisctl update`.
+- **Lancement au démarrage du PC** : désactivé par défaut. `jarvisctl enable` l'active
+  (`jarvisctl disable` le retire) ; `jarvisctl install --autostart` l'active dès l'installation.
 
 Le détail est dans [docs/installation.md](docs/installation.md).
 

@@ -6,6 +6,27 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.3.0] - 2026-11-10
+
+Jarvis ne se lance plus tout seul au démarrage du PC par défaut. Les installations existantes
+gardent leur état d'activation.
+
+### Modifié
+
+- `jarvisctl install` démarre LM Studio, le cerveau et l'oreille **sans les activer** au
+  démarrage du PC ; le message indique `jarvisctl enable` pour le faire.
+- `jarvis-lmstudio.service` n'est plus jamais activé : le cerveau le réclame (`Wants=`) et le
+  démarre avec lui. `jarvisctl disable` du cerveau le désactive aussi (anciennes installations).
+- `jarvisctl update` n'active plus une unité nouvelle d'office ; l'oreille nouvelle n'est
+  activée que si le cerveau l'est.
+- `jarvisctl doctor` : « non lancé au démarrage » devient une information neutre (ℹ) pour le
+  cerveau et l'oreille, sans effet sur le code de sortie.
+
+### Ajouté
+
+- `jarvisctl install --autostart` : rétablit l'ancien comportement (cerveau et oreille activés
+  et démarrés avec `enable --now`).
+
 ## [0.2.0] - 2026-11-09
 
 L'IA locale passe à Qwen3.5 4B servi par LM Studio : 56 phrases sur 56 comprises au banc

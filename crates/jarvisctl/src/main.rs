@@ -23,7 +23,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Compile, installe les binaires et active le service systemd utilisateur
+    /// Compile, installe les binaires et démarre les services (sans les lancer au démarrage du PC, sauf `--autostart`)
     Install {
         /// Dépôt source (par défaut : celui de la compilation)
         #[arg(long)]
@@ -31,6 +31,9 @@ enum Cmd {
         /// N'exécute pas `cargo build`
         #[arg(long)]
         no_build: bool,
+        /// Lance aussi Jarvis au démarrage du PC (`enable --now` du cerveau et de l'oreille)
+        #[arg(long)]
+        autostart: bool,
     },
     /// Arrête le service et supprime l'installation
     Uninstall {
@@ -162,7 +165,11 @@ fn run(cmd: Cmd) -> anyhow::Result<i32> {
     let sys = RealSystem;
     let mut out = io::stdout();
     match cmd {
-        Cmd::Install { source, no_build } => {
+        Cmd::Install {
+            source,
+            no_build,
+            autostart,
+        } => {
             let source = match source {
                 Some(s) => s,
                 None => PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.."),
@@ -173,7 +180,11 @@ fn run(cmd: Cmd) -> anyhow::Result<i32> {
             ops::install(
                 &paths,
                 &sys,
-                &ops::InstallOpts { source, no_build },
+                &ops::InstallOpts {
+                    source,
+                    no_build,
+                    autostart,
+                },
                 &mut out,
             )?;
             Ok(0)

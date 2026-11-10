@@ -149,6 +149,8 @@ fn copy_atomic(from: &Path, to: &Path) -> Result<()> {
 pub struct InstallOpts {
     pub source: PathBuf,
     pub no_build: bool,
+    /// Rétablit le lancement au démarrage du PC (`enable --now`) du cerveau et de l'oreille.
+    pub autostart: bool,
 }
 
 fn build(sys: &dyn System, source: &Path) -> Result<()> {
@@ -256,23 +258,37 @@ pub fn install(
     fs::write(&paths.install_file, format!("source = {source}\n"))?;
 
     systemctl(sys, &["daemon-reload"])?;
-    enable_lmstudio(sys, out)?;
+    start_lmstudio(sys, out)?;
     for svc in Service::ALL {
         let unit = svc.unit();
-        let r = systemctl(sys, &["enable", "--now", unit])?;
+        let verb: &[&str] = if opts.autostart {
+            &["enable", "--now", unit]
+        } else {
+            &["start", unit]
+        };
+        let r = systemctl(sys, verb)?;
         if r.code != 0 {
             bail!(
-                "`systemctl --user enable --now {unit}` a échoué (code {})",
+                "`systemctl --user {}` a échoué (code {})",
+                verb.join(" "),
                 r.code
             );
         }
-        if svc == Service::Ear && !paths.wakeword_enrolled() {
-            writeln!(
+        let attente = svc == Service::Ear && !paths.wakeword_enrolled();
+        match (opts.autostart, attente) {
+            (true, true) => writeln!(
                 out,
                 "Service {unit} activé ; il démarrera après `jarvis-ear enroll`."
-            )?;
-        } else {
-            writeln!(out, "Service {unit} activé et démarré.")?;
+            )?,
+            (true, false) => writeln!(out, "Service {unit} activé et démarré.")?,
+            (false, true) => writeln!(
+                out,
+                "Service {unit} installé (non lancé au démarrage du PC) ; il démarrera après `jarvis-ear enroll`. Pour l'activer : `jarvisctl enable`."
+            )?,
+            (false, false) => writeln!(
+                out,
+                "Service {unit} démarré (non lancé au démarrage du PC ; pour l'activer : `jarvisctl enable`)."
+            )?,
         }
     }
 
@@ -350,16 +366,20 @@ fn write_lmstudio_unit(paths: &Paths, out: &mut dyn Write) -> Result<(bool, bool
     Ok((existing.is_none(), true))
 }
 
-/// Active et démarre l'unité du serveur LM Studio (sans effet sur les modèles).
-fn enable_lmstudio(sys: &dyn System, out: &mut dyn Write) -> Result<()> {
-    let r = systemctl(sys, &["enable", "--now", LMSTUDIO_SERVICE])?;
+/// Démarre l'unité du serveur LM Studio (sans effet sur les modèles). Jamais activée :
+/// le cerveau la réclame (`Wants=`) et la démarre avec lui.
+fn start_lmstudio(sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let r = systemctl(sys, &["start", LMSTUDIO_SERVICE])?;
     if r.code != 0 {
         bail!(
-            "`systemctl --user enable --now {LMSTUDIO_SERVICE}` a échoué (code {})",
+            "`systemctl --user start {LMSTUDIO_SERVICE}` a échoué (code {})",
             r.code
         );
     }
-    writeln!(out, "Service {LMSTUDIO_SERVICE} activé et démarré.")?;
+    writeln!(
+        out,
+        "Service {LMSTUDIO_SERVICE} démarré (le cerveau le réclame)."
+    )?;
     Ok(())
 }
 
@@ -409,10 +429,16 @@ pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()
         systemctl(sys, &["daemon-reload"])?;
     }
     if lm_created {
-        enable_lmstudio(sys, out)?;
+        start_lmstudio(sys, out)?;
     }
     // Une unité déjà là garde son choix d'activation (`jarvisctl disable oreille`).
+    // Une unité nouvelle n'est jamais activée d'office : l'oreille suit le cerveau.
+    let brain_enabled = created.contains(&Service::Ear)
+        && systemctl(sys, &["is-enabled", SERVICE])?.stdout.trim() == "enabled";
     for svc in created {
+        if !(svc == Service::Ear && brain_enabled) {
+            continue;
+        }
         let r = systemctl(sys, &["enable", svc.unit()])?;
         if r.code != 0 {
             bail!(
@@ -536,6 +562,10 @@ pub fn service_verb(
     services: &[Service],
     out: &mut dyn Write,
 ) -> Result<i32> {
+    // Le cerveau réclamait LM Studio, activé par les anciennes installations : on le
+    // désactive avec lui (sans échouer si l'unité est absente).
+    let mut order = services.to_vec();
+    let lmstudio_aussi = verb == "disable" && services.contains(&Service::Brain);
     let (done, label) = match verb {
         "start" => ("démarré", "démarrer"),
         "stop" => ("arrêté", "arrêter"),
@@ -546,7 +576,6 @@ pub fn service_verb(
     if matches!(verb, "stop" | "restart") && services.contains(&Service::Brain) {
         warn_running_tasks(paths, sys, out)?;
     }
-    let mut order = services.to_vec();
     if matches!(verb, "stop" | "disable") {
         order.reverse();
     }
@@ -578,6 +607,10 @@ pub fn service_verb(
             )?;
         } else {
             writeln!(out, "Service {unit} {done}.")?;
+        }
+        if lmstudio_aussi && svc == Service::Brain {
+            // Échec ignoré : unité absente ou déjà non activée.
+            let _ = systemctl(sys, &["disable", LMSTUDIO_SERVICE]);
         }
     }
     Ok(code)
@@ -874,12 +907,14 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
         "lancez `jarvisctl install`",
     )?;
     let enabled = systemctl(sys, &["is-enabled", SERVICE])?;
-    check(
-        out,
-        enabled.stdout.trim() == "enabled",
-        "Cerveau activé au démarrage",
-        "lancez `jarvisctl enable cerveau`",
-    )?;
+    if enabled.stdout.trim() == "enabled" {
+        writeln!(out, "✓ Cerveau activé au démarrage")?;
+    } else {
+        writeln!(
+            out,
+            "ℹ Cerveau non lancé au démarrage du PC (choix par défaut) — pour l'activer : `jarvisctl enable`"
+        )?;
+    }
     let active = systemctl(sys, &["is-active", SERVICE])?;
     check(
         out,
@@ -1309,9 +1344,9 @@ fn ear_service_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write)
     if enabled.stdout.trim() == "enabled" {
         writeln!(out, "✓ Oreille activée au démarrage")?;
     } else {
-        warn(
+        writeln!(
             out,
-            "Oreille non activée au démarrage — optionnel (oreille du PC) : lancez `jarvisctl enable oreille`",
+            "ℹ Oreille non lancée au démarrage du PC (choix par défaut) — pour l'activer : `jarvisctl enable oreille`"
         )?;
     }
     let active = systemctl(sys, &["is-active", EAR_SERVICE])?;
@@ -1727,6 +1762,7 @@ mod tests {
         let opts = InstallOpts {
             source: fake_source(home),
             no_build: true,
+            autostart: false,
         };
         let mut out = Vec::new();
         install(paths, sys, &opts, &mut out).unwrap();
@@ -1748,7 +1784,7 @@ mod tests {
     }
 
     #[test]
-    fn install_ecrit_et_active_l_unite_lmstudio() {
+    fn install_ecrit_et_demarre_l_unite_lmstudio_sans_l_activer() {
         let (home, paths) = setup();
         let sys = Fake::default();
         do_install(home.path(), &paths, &sys);
@@ -1758,10 +1794,40 @@ mod tests {
         );
         let cmds = sys.cmds.borrow();
         let pos = |cmd: &str| cmds.iter().position(|c| c == cmd).expect(cmd);
-        // Le serveur est activé avant le cerveau qui le réclame.
+        // Le serveur est démarré avant le cerveau qui le réclame, jamais activé.
         assert!(
-            pos("systemctl --user enable --now jarvis-lmstudio.service")
-                < pos("systemctl --user enable --now jarvis-brain.service")
+            pos("systemctl --user start jarvis-lmstudio.service")
+                < pos("systemctl --user start jarvis-brain.service")
+        );
+        assert!(
+            cmds.iter()
+                .all(|c| !c.contains("jarvis-lmstudio") || !c.contains("enable"))
+        );
+    }
+
+    #[test]
+    fn install_avec_autostart_active_cerveau_et_oreille_mais_pas_lmstudio() {
+        let (home, paths) = setup();
+        let sys = Fake::default();
+        let opts = InstallOpts {
+            source: fake_source(home.path()),
+            no_build: true,
+            autostart: true,
+        };
+        let mut out = Vec::new();
+        install(&paths, &sys, &opts, &mut out).unwrap();
+        let o = text(out);
+        let cmds = sys.cmds.borrow();
+        assert!(cmds.contains(&"systemctl --user start jarvis-lmstudio.service".to_string()));
+        assert!(cmds.contains(&"systemctl --user enable --now jarvis-brain.service".to_string()));
+        assert!(cmds.contains(&"systemctl --user enable --now jarvis-ear.service".to_string()));
+        assert!(
+            cmds.iter()
+                .all(|c| !c.contains("enable --now jarvis-lmstudio"))
+        );
+        assert!(
+            o.contains("Service jarvis-brain.service activé et démarré."),
+            "{o}"
         );
     }
 
@@ -1857,15 +1923,16 @@ WantedBy=graphical-session.target
             .iter()
             .position(|c| c == "systemctl --user daemon-reload")
             .unwrap();
-        let enable = cmds
+        let start = cmds
             .iter()
-            .position(|c| c == "systemctl --user enable --now jarvis-brain.service")
+            .position(|c| c == "systemctl --user start jarvis-brain.service")
             .unwrap();
-        let enable_ear = cmds
+        let start_ear = cmds
             .iter()
-            .position(|c| c == "systemctl --user enable --now jarvis-ear.service")
+            .position(|c| c == "systemctl --user start jarvis-ear.service")
             .unwrap();
-        assert!(reload < enable && enable < enable_ear);
+        assert!(reload < start && start < start_ear);
+        assert!(cmds.iter().all(|c| !c.contains("enable")), "{cmds:?}");
     }
 
     #[test]
@@ -1874,28 +1941,27 @@ WantedBy=graphical-session.target
         let sys = Fake::default();
         let o = do_install(home.path(), &paths, &sys);
         assert!(
-            o.contains(
-                "Service jarvis-ear.service activé ; il démarrera après `jarvis-ear enroll`."
-            ),
+            o.contains("Service jarvis-ear.service installé (non lancé au démarrage du PC) ; il démarrera après `jarvis-ear enroll`."),
             "{o}"
         );
         assert!(
-            o.contains("Service jarvis-brain.service activé et démarré."),
+            o.contains("Service jarvis-brain.service démarré (non lancé au démarrage du PC ; pour l'activer : `jarvisctl enable`)."),
             "{o}"
         );
     }
 
     #[test]
-    fn install_echec_d_activation_de_l_oreille() {
+    fn install_echec_de_demarrage_de_l_oreille() {
         let (home, paths) = setup();
         let mut sys = Fake::default();
         sys.replies.insert(
-            "systemctl --user enable --now jarvis-ear.service".into(),
+            "systemctl --user start jarvis-ear.service".into(),
             (1, String::new()),
         );
         let opts = InstallOpts {
             source: fake_source(home.path()),
             no_build: true,
+            autostart: false,
         };
         let err = install(&paths, &sys, &opts, &mut Vec::new()).unwrap_err();
         assert!(err.to_string().contains("jarvis-ear.service"), "{err}");
@@ -2296,13 +2362,16 @@ WantedBy=graphical-session.target
         for verb in ["stop", "disable"] {
             let (_home, paths, sys) = installed();
             verb_out(&paths, &sys, verb, &Service::ALL);
-            assert_eq!(
-                *sys.cmds.borrow(),
-                vec![
+            assert_eq!(*sys.cmds.borrow(), {
+                let mut v = vec![
                     format!("systemctl --user {verb} jarvis-ear.service"),
-                    format!("systemctl --user {verb} jarvis-brain.service")
-                ]
-            );
+                    format!("systemctl --user {verb} jarvis-brain.service"),
+                ];
+                if verb == "disable" {
+                    v.push("systemctl --user disable jarvis-lmstudio.service".into());
+                }
+                v
+            });
         }
     }
 
@@ -2385,7 +2454,7 @@ WantedBy=graphical-session.target
     }
 
     #[test]
-    fn update_ajoute_et_active_l_oreille_d_une_ancienne_installation() {
+    fn update_ajoute_l_oreille_sans_l_activer_si_le_cerveau_ne_l_est_pas() {
         let (_home, paths, sys) = installed();
         // Installation antérieure : seule l'unité du cerveau existe.
         fs::remove_file(&paths.ear_unit_path).unwrap();
@@ -2407,7 +2476,7 @@ WantedBy=graphical-session.target
             cmds,
             vec![
                 "systemctl --user daemon-reload",
-                "systemctl --user enable jarvis-ear.service",
+                "systemctl --user is-enabled jarvis-brain.service",
                 "systemctl --user restart jarvis-brain.service",
                 "systemctl --user restart jarvis-ear.service"
             ]
@@ -2417,6 +2486,85 @@ WantedBy=graphical-session.target
             "{o}"
         );
         assert!(o.contains("`jarvis-ear enroll`"), "{o}");
+    }
+
+    #[test]
+    fn update_active_l_oreille_nouvelle_si_le_cerveau_est_active() {
+        let (_home, paths, mut sys) = installed();
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-brain.service".into(),
+            (0, "enabled\n".into()),
+        );
+        fs::remove_file(&paths.ear_unit_path).unwrap();
+        let mut out = Vec::new();
+        update(&paths, &sys, &mut out).unwrap();
+        let cmds = sys.cmds.borrow();
+        assert!(cmds.contains(&"systemctl --user enable jarvis-ear.service".to_string()));
+        assert!(cmds.iter().all(|c| !c.contains("enable jarvis-lmstudio")));
+    }
+
+    #[test]
+    fn update_demarre_sans_l_activer_une_unite_lmstudio_nouvelle() {
+        let (_home, paths, sys) = installed();
+        fs::remove_file(&paths.lmstudio_unit_path).unwrap();
+        update(&paths, &sys, &mut Vec::new()).unwrap();
+        let cmds = sys.cmds.borrow();
+        assert!(cmds.contains(&"systemctl --user start jarvis-lmstudio.service".to_string()));
+        assert!(
+            cmds.iter()
+                .all(|c| !c.starts_with("systemctl --user enable")),
+            "{cmds:?}"
+        );
+    }
+
+    #[test]
+    fn disable_du_cerveau_desactive_aussi_lmstudio() {
+        let (_home, paths, mut sys) = installed();
+        let (code, _) = verb_out(&paths, &sys, "disable", &[Service::Brain]);
+        assert_eq!(code, 0);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec![
+                "systemctl --user disable jarvis-brain.service",
+                "systemctl --user disable jarvis-lmstudio.service"
+            ]
+        );
+        // L'oreille seule ne touche pas à LM Studio.
+        sys.cmds.borrow_mut().clear();
+        verb_out(&paths, &sys, "disable", &[Service::Ear]);
+        assert_eq!(
+            *sys.cmds.borrow(),
+            vec!["systemctl --user disable jarvis-ear.service"]
+        );
+        // Unité LM Studio absente : aucun échec.
+        sys.replies.insert(
+            "systemctl --user disable jarvis-lmstudio.service".into(),
+            (1, String::new()),
+        );
+        let (code, _) = verb_out(&paths, &sys, "disable", &[Service::Brain]);
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn doctor_cerveau_non_active_est_une_information_neutre() {
+        let (_home, paths, mut sys) = installed();
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-brain.service".into(),
+            (1, "disabled\n".into()),
+        );
+        let (code_off, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("ℹ Cerveau non lancé au démarrage du PC (choix par défaut) — pour l'activer : `jarvisctl enable`"),
+            "{o}"
+        );
+        assert!(!o.contains("✗ Cerveau activé"), "{o}");
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-brain.service".into(),
+            (0, "enabled\n".into()),
+        );
+        let (code_on, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Cerveau activé au démarrage"), "{o}");
+        assert_eq!(code_off, code_on);
     }
 
     #[test]
@@ -2601,7 +2749,10 @@ WantedBy=graphical-session.target
             (1, "disabled\n".into()),
         );
         let (_, o) = doctor_out(&paths, &sys);
-        assert!(o.contains("! Oreille non activée au démarrage"), "{o}");
+        assert!(
+            o.contains("ℹ Oreille non lancée au démarrage du PC (choix par défaut)"),
+            "{o}"
+        );
         assert!(o.contains("`jarvisctl enable oreille`"), "{o}");
         fs::remove_file(&paths.ear_unit_path).unwrap();
         let (code_absent, o) = doctor_out(&paths, &sys);

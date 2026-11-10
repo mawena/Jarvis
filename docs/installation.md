@@ -19,8 +19,11 @@ Cela compile, copie `jarvis-brain`, `jarvis`, `jarvisctl` et `jarvis-ear` dans `
 copie les bibliothèques de l'empreinte vocale (sherpa-onnx) dans `~/.local/lib/jarvis/`, installe
 les deux unités systemd utilisateur `~/.config/systemd/user/jarvis-brain.service` (le cerveau) et
 `~/.config/systemd/user/jarvis-ear.service` (l'oreille du PC), crée
-`~/.config/jarvis/{env,config.toml,install.toml}` puis active et démarre les deux services.
-Options : `--source <dépôt>`, `--no-build`.
+`~/.config/jarvis/{env,config.toml,install.toml}` puis démarre les services (LM Studio, cerveau, oreille) **sans les activer** : Jarvis ne se lance
+pas tout seul au démarrage du PC. Pour qu'il le fasse : `jarvisctl enable` (ou
+`jarvisctl install --autostart`, qui active le cerveau et l'oreille dès l'installation).
+`jarvis-lmstudio.service` n'est jamais activé : le cerveau le réclame et le démarre avec lui.
+Options : `--source <dépôt>`, `--no-build`, `--autostart`.
 
 Vérifiez que `~/.local/bin` est dans le `PATH`, puis lancez `jarvisctl doctor`.
 Si un ancien `jarvis-brain` existe dans `~/.cargo/bin` : `cargo uninstall jarvis-brain jarvis-cli`.
@@ -55,7 +58,7 @@ services. Avec une cible, sur un seul : `cerveau` (ou `brain`), `oreille` (ou `e
 | --- | --- |
 | `jarvisctl status [cible]` | état du cerveau et de l'oreille, mode, LM Studio (ou Ollama), clé (code 3 si le cerveau est inactif ; avec `oreille` seule, si l'oreille l'est) |
 | `jarvisctl start` / `stop` / `restart` `[cible]` | pilote les services |
-| `jarvisctl enable` / `disable` `[cible]` | démarrage automatique à la session |
+| `jarvisctl enable` / `disable` `[cible]` | démarrage automatique à la session (désactivé par défaut ; `disable` du cerveau désactive aussi `jarvis-lmstudio.service`) |
 | `jarvisctl logs [-f] [-n N]` | journaux du cerveau |
 | `jarvisctl logs --oreille [-f] [-n N]` | journaux de l'oreille (aussi `jarvisctl logs oreille`) |
 | `jarvisctl doctor` | diagnostic avec conseils de correction |
@@ -67,7 +70,7 @@ Les journaux sont aussi lisibles directement : `journalctl --user -u jarvis-brai
 `journalctl --user -u jarvis-ear -f`.
 
 Une installation antérieure à l'oreille en service n'a que l'unité du cerveau :
-`jarvisctl update` ajoute et active celle de l'oreille. Quitte d'abord une oreille lancée à la
+`jarvisctl update` ajoute celle de l'oreille (activée seulement si le cerveau l'est). Quitte d'abord une oreille lancée à la
 main dans un terminal, sinon deux oreilles tourneraient.
 
 Le cerveau et l'oreille se mettent toujours à jour **ensemble** (`jarvisctl update` le fait) :
