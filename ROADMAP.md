@@ -187,4 +187,4 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 14.6 Tests unitaires (install, `--autostart`, update, disable, doctor)
 - [x] 14.7 README, `docs/installation.md`, CHANGELOG
 - [x] 14.8 `scripts/check.sh` / clippy au vert (via la file), feature terminée dans `develop`
-- [ ] 14.9 Release 0.3.0 et release GitHub
+- [x] 14.9 Release 0.3.0 et release GitHub
