@@ -153,7 +153,7 @@ mod tests {
     #[test]
     fn nom_d_hote_reduit_au_premier_label() {
         assert_eq!(
-            host_label("charles-gamligo.cofinacorp.com\n"),
+            host_label("charles-gamligo.acmecorp.com\n"),
             "charles-gamligo"
         );
         assert_eq!(host_label("Mon PC_2"), "mon-pc-2");
