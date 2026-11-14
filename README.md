@@ -178,5 +178,5 @@ cargo test -p jarvis-brain    # une seule crate
 
 ## Licence
 
-Aucune licence n'est encore choisie : le code est publié pour être lu, tous droits réservés à son
-auteur.
+Code publié sous licence MIT : voir [LICENSE](LICENSE). Les modèles téléchargés à l'installation (reconnaissance
+de la parole, empreinte vocale, voix, IA locale) gardent leurs propres licences.
