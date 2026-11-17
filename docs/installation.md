@@ -62,6 +62,7 @@ services. Avec une cible, sur un seul : `cerveau` (ou `brain`), `oreille` (ou `e
 | `jarvisctl logs [-f] [-n N]` | journaux du cerveau |
 | `jarvisctl logs --oreille [-f] [-n N]` | journaux de l'oreille (aussi `jarvisctl logs oreille`) |
 | `jarvisctl doctor` | diagnostic avec conseils de correction |
+| `jarvisctl mesures [--jours N] [--phrase texte]` | résumé des mesures face aux critères de réussite (voir plus bas) |
 | `jarvisctl update` | recompile depuis le dépôt source, réinstalle, redémarre les deux services |
 | `jarvisctl set-api-key [CLÉ]` | enregistre la clé Claude |
 | `jarvisctl searx up` / `down` / `status` | moteur de recherche SearXNG (voir plus bas) |
@@ -80,6 +81,35 @@ depuis les oreilles en réseau, une oreille trop ancienne est refusée par le ce
 Les personnes autorisées à parler à Jarvis et leurs droits sont dans
 `~/.local/share/jarvis/people.toml`, créé au premier lancement avec Charles seul (`admin`) ;
 on le gère avec `jarvis person` et `jarvis role` (voir [personnes.md](personnes.md)).
+
+## Veille du PC
+
+Par défaut, Jarvis n'empêche pas la mise en veille : un PC endormi n'entend plus (les oreilles
+en réseau le disent alors avec la voix de Jarvis). Pour qu'il reste éveillé **tant que le
+portable est branché**, dans `~/.config/jarvis/config.toml` :
+
+```toml
+inhibit_sleep_on_ac = true
+```
+
+puis `jarvisctl restart cerveau`. Le cerveau relit l'alimentation toutes les 30 s
+(`/sys/class/power_supply`) et tient un blocage `systemd-inhibit` seulement sur secteur ; un PC
+fixe sans batterie compte comme branché. Le blocage tombe dès que le portable est débranché ou
+que le cerveau s'arrête. `systemd-inhibit --list` le montre (« Jarvis »), `jarvisctl doctor`
+indique si l'option est active.
+
+## Mesures des critères de réussite
+
+Le cerveau écrit une ligne par phrase traitée dans `~/.local/state/jarvis/mesures.jsonl`
+(droits 0600, renommé en `.1` au-delà de 5 Mo) : heure, oreille, durée entre la fin de la
+phrase et la réponse prête, route (raccourci, compétence, IA locale ou en ligne), issue
+(comprise, réveil sans phrase, phrase écartée, erreur) et texte. **Aucun son.**
+
+`jarvisctl mesures` les résume face aux objectifs de la conception : 90 % des réponses sous
+2 s pour les raccourcis, 6 s pour l'IA locale, 4 s pour l'IA en ligne ; moins d'un réveil sans
+phrase par jour ; aucune double exécution (même phrase comprise sur deux oreilles à moins de
+3 s). `--jours 1` limite à la dernière journée, `--phrase suivant` aux phrases qui contiennent
+ce mot (objectif : moins d'1 s). Mode d'emploi : [essai 9.7](essais/essai-9.7-mesures.md).
 
 ## Oreilles en réseau
 
