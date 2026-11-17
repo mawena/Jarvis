@@ -11,6 +11,7 @@ pub mod intent;
 pub mod listen;
 pub mod llm;
 pub mod logging;
+pub mod metrics;
 pub mod mode_store;
 pub mod net;
 pub mod pairing;

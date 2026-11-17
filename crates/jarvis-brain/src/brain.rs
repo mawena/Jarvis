@@ -6,10 +6,12 @@
 use crate::fastpath::{BrainCommand, match_brain_command, match_confirmation, match_fast};
 use crate::intent::Intent;
 use crate::llm::{LlmBackend, LlmError, Understanding};
+use crate::metrics;
 use crate::mode_store::ModeStore;
 use crate::people::{Access, People, Speaker, Trust};
 use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
+use jarvis_protocol::metrics::Route;
 use jarvis_protocol::{EarId, Mode};
 use jarvis_skills::{Outcome, Reply, Risk, Skill, SkillError, ToolSpec};
 use std::io;
@@ -293,6 +295,7 @@ impl Brain {
     async fn understand(&self, text: &str, source: Source<'_>) -> Answer {
         if let Some(intent) = match_fast(text) {
             debug!(route = "fast", tool = %intent.tool);
+            metrics::note_route(Route::Raccourci);
             match self.run_or_ask(intent, source).await {
                 Step::Answer(a) => {
                     return Answer {
@@ -309,6 +312,7 @@ impl Brain {
         // remplacés par un bip seul (`fast_path` reste faux).
         if let Some(shortcut) = self.skills.iter().find_map(|s| s.shortcut(text)) {
             debug!(route = "skill_shortcut", tool = %shortcut.tool);
+            metrics::note_route(Route::Competence);
             // Le droit d'abord : un invité entend le refus, pas « enregistrez votre voix ».
             // Testé comme si la voix était reconnue ; la confiance vient juste après.
             if let Some((_, spec)) = self.find(&shortcut.tool) {
@@ -336,6 +340,10 @@ impl Brain {
             Mode::Online => (&self.online, "online"),
         };
         debug!(route, "compréhension par IA");
+        metrics::note_route(match mode {
+            Mode::Local => Route::IaLocale,
+            Mode::Online => Route::IaEnLigne,
+        });
         let tools = self.tools();
         match backend.understand(text, &tools).await {
             Ok(Understanding::Tool(intent)) => {

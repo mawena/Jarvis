@@ -7,6 +7,7 @@ use jarvis_brain::ears::EarRegistry;
 use jarvis_brain::listen::{ListenService, NoTranscriber};
 use jarvis_brain::llm::{ClaudeBackend, LlmBackend, local_backend};
 use jarvis_brain::logging::init_logging;
+use jarvis_brain::metrics::MetricsLog;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, NetworkPaths, Services};
 use jarvis_brain::people::People;
@@ -268,6 +269,7 @@ async fn main() -> anyhow::Result<()> {
             board: board.clone(),
             modes: Some(mode_changes),
             tasks: agent_tasks,
+            metrics: Some(Arc::new(MetricsLog::new(state_file("mesures.jsonl")))),
             voice_tag,
         },
         true,
@@ -310,6 +312,11 @@ fn prune_people(people: &People) {
             "registre des oreilles illisible : annuaire non nettoyé"
         ),
     }
+}
+
+/// Fichier de l'état du cerveau : `~/.local/state/jarvis/<nom>`.
+fn state_file(name: &str) -> PathBuf {
+    tasks_dir().with_file_name(name)
 }
 
 /// Registre des tâches de l'agent : `~/.local/state/jarvis/tasks`.
