@@ -6,6 +6,29 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.4.0] - 2026-11-17
+
+Phase 9, mise en service : l'icône en dit plus, le PC peut rester éveillé sur secteur, et les
+critères de réussite se mesurent. Rien ne change sans le demander : l'anti-veille est coupée
+par défaut. Le cerveau et les oreilles se mettent à jour ensemble (`jarvisctl update`) ; une
+oreille Android plus ancienne continue de marcher (les champs nouveaux sont facultatifs).
+
+### Ajouté
+
+- **Statut détaillé dans l'icône du PC** : l'infobulle donne le nombre d'oreilles connectées
+  et la tâche d'agent en cours ; un sous-menu « Statut détaillé » liste les oreilles (personne,
+  connectée ou non), les tâches de l'agent de code avec leur heure de départ et la dernière
+  phrase entendue. Le cerveau pousse ces changements à chaque connexion d'oreille et à chaque
+  départ ou fin de tâche (`StatusInfo.tasks`).
+- **Option `inhibit_sleep_on_ac`** : tant que le portable est branché (ou sur un PC fixe), le
+  cerveau bloque la mise en veille par `systemd-inhibit` ; le blocage tombe au débranchement et
+  à l'arrêt du cerveau. `jarvisctl doctor` indique si l'option est active.
+- **Mesures des critères de réussite** : une ligne par phrase traitée dans
+  `~/.local/state/jarvis/mesures.jsonl` (durée, route, issue, oreille, texte ; jamais de son ;
+  fichier 0600, rotation à 5 Mo). `jarvisctl mesures [--jours N] [--phrase texte]` les résume
+  face aux objectifs : vitesse par route, réveils sans phrase par jour, doubles exécutions.
+- Fiche d'essai [9.7](docs/essais/essai-9.7-mesures.md) : une journée de mesures.
+
 ## [0.3.0] - 2026-11-10
 
 Jarvis ne se lance plus tout seul au démarrage du PC par défaut. Les installations existantes
