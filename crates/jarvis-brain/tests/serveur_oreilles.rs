@@ -8,6 +8,7 @@ use jarvis_brain::config::NetworkConfig;
 use jarvis_brain::ears::EarRegistry;
 use jarvis_brain::listen::ListenService;
 use jarvis_brain::llm::Understanding;
+use jarvis_brain::metrics::MetricsLog;
 use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, Hub, HubSettings, Limits, NetworkPaths, Services};
 use jarvis_brain::people::{Access, EarPerson, People, Trust};
@@ -22,10 +23,12 @@ use jarvis_ear_core::net::{
 };
 use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason};
 use jarvis_protocol::frame::encode_mic_frame;
+use jarvis_protocol::metrics::{self, Route, parse_lines, summarize};
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{
     ControlRequest, ControlResponse, EarId, Fingerprint, Mode, SpeechAudio, encode_pcm,
 };
+use jarvis_skills::agent::RunningTask;
 use jarvis_skills::{Announcer, FakeRunner, Notice, Outcome, Risk};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -55,6 +58,10 @@ struct Rig {
     ears_file: PathBuf,
     /// Oreille appairée d'avance : (id, jeton).
     salon: (EarId, String),
+    /// Tâches d'agent publiées (comme `AgentSkill::tasks`).
+    tasks: tokio::sync::watch::Sender<Vec<RunningTask>>,
+    /// Fichier des mesures du cerveau.
+    metrics_file: PathBuf,
 }
 
 fn limits() -> Limits {
@@ -122,12 +129,16 @@ async fn rig_people(
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (tasks, tasks_rx) = tokio::sync::watch::channel(Vec::new());
+    let metrics_file = dir.path().join("mesures.jsonl");
     let services = Services {
         brain: brain.clone(),
         listen: listen.clone(),
         voice,
         board: board.clone(),
         modes: Some(changes),
+        tasks: Some(tasks_rx),
+        metrics: Some(Arc::new(MetricsLog::new(&metrics_file))),
         voice_tag: "test".into(),
     };
     let settings = HubSettings {
@@ -173,6 +184,8 @@ async fn rig_people(
         people_file,
         ears_file,
         salon: (salon.id, token),
+        tasks,
+        metrics_file,
     }
 }
 
@@ -808,6 +821,44 @@ async fn phrase_trop_longue_abandonnee_et_son_retabli() {
 }
 
 #[tokio::test]
+async fn mesure_ecrite_une_seule_fois_pour_deux_oreilles() {
+    let rig = rig().await;
+    let (cuisine, token) = pair_ear(&rig, "Cuisine").await;
+    let mut a = salon(&rig).await;
+    let mut b = session(&rig, &cuisine, &token).await;
+    assert!(matches!(next(&mut a).await, BrainMessage::Status(_)));
+    send(&mut a, &wake(7, 0.9)).await;
+    send(&mut b, &wake(3, 0.5)).await;
+    audio(&mut a, 7, 1_600).await;
+    audio(&mut b, 3, 1_600).await;
+    assert_eq!(next(&mut a).await, BrainMessage::Elected { utterance: 7 });
+    assert_eq!(next(&mut b).await, BrainMessage::Stop { utterance: 3 });
+    send(&mut b, &end(3)).await;
+    audio(&mut a, 7, 16_000).await;
+    send(&mut a, &end(7)).await;
+    assert!(matches!(next(&mut a).await, BrainMessage::Response { .. }));
+    let mut records = Vec::new();
+    for _ in 0..100 {
+        let text = std::fs::read_to_string(&rig.metrics_file).unwrap_or_default();
+        records = parse_lines(&text);
+        if !records.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(records.len(), 1, "{records:?}");
+    let r = &records[0];
+    assert_eq!(r.ear, "Salon");
+    assert_eq!(r.text, "suivant");
+    assert_eq!(
+        (r.route, r.outcome),
+        (Route::Raccourci, metrics::Outcome::Comprise)
+    );
+    assert!(r.ms < 5_000, "{r:?}");
+    assert_eq!(summarize(&records).doubles, 0);
+}
+
+#[tokio::test]
 async fn reponse_envoyee_a_l_oreille_gagnante() {
     let rig = rig().await;
     let (cuisine, token) = pair_ear(&rig, "Cuisine").await;
@@ -988,6 +1039,27 @@ async fn annonce_gardee_si_l_oreille_part_pendant_sa_synthese() {
     assert_eq!(items.len(), 1);
     assert_eq!(items[0].speech, "Tâche finie.");
     assert!(items[0].audio.is_some());
+}
+
+#[tokio::test]
+async fn statut_diffuse_au_depart_et_a_la_fin_d_une_tache() {
+    let rig = rig().await;
+    let mut a = salon(&rig).await;
+    let tasks_of = |m: BrainMessage| match m {
+        BrainMessage::Status(s) => s.tasks,
+        other => panic!("état attendu, reçu {other:?}"),
+    };
+    rig.tasks.send_replace(vec![RunningTask {
+        id: "t1".into(),
+        project: "Jarvis".into(),
+        started_at: 1_800_000_000,
+    }]);
+    let tasks = tasks_of(next(&mut a).await);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].project, "Jarvis");
+    assert_eq!(tasks[0].started_at, 1_800_000_000);
+    rig.tasks.send_replace(Vec::new());
+    assert!(tasks_of(next(&mut a).await).is_empty());
 }
 
 #[tokio::test]
@@ -1214,6 +1286,8 @@ fn services(dir: &Path) -> Services {
             Arc::new(SystemClock),
         )),
         modes: None,
+        tasks: None,
+        metrics: None,
         voice_tag: String::new(),
     }
 }

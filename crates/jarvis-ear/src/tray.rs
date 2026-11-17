@@ -3,7 +3,8 @@
 use jarvis_ear_core::MicState;
 use jarvis_ear_core::session::{BrainLink, EarCommand as TrayCommand, EarStatus as TrayState};
 use jarvis_protocol::Mode;
-use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem};
+use ksni::menu::{MenuItem, RadioGroup, RadioItem, StandardItem, SubMenu};
+use std::sync::OnceLock;
 use tokio::sync::mpsc::UnboundedSender;
 
 pub struct JarvisTray {
@@ -71,6 +72,108 @@ pub fn summary(state: &TrayState) -> String {
     }
 }
 
+/// Décalage de l'heure locale (secondes), lu une fois par `date +%z` (`+0100`).
+/// Inconnu : heure UTC.
+fn local_offset() -> i64 {
+    static OFFSET: OnceLock<i64> = OnceLock::new();
+    *OFFSET.get_or_init(|| {
+        std::process::Command::new("date")
+            .arg("+%z")
+            .output()
+            .ok()
+            .and_then(|o| parse_offset(String::from_utf8_lossy(&o.stdout).trim()))
+            .unwrap_or(0)
+    })
+}
+
+/// `+0130` → 5400 s, `-0500` → -18000 s.
+fn parse_offset(text: &str) -> Option<i64> {
+    let (sign, digits) = match text.split_at_checked(1)? {
+        ("+", d) => (1, d),
+        ("-", d) => (-1, d),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits[..2].parse().ok()?;
+    let minutes: i64 = digits[2..].parse().ok()?;
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Heure `HH:MM` d'un instant Unix, avec le décalage donné.
+fn clock(unix: u64, offset: i64) -> String {
+    let secs = (unix as i64 + offset).rem_euclid(86_400);
+    format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60)
+}
+
+/// Texte affiché tel quel dans un menu (`_` y marque sinon un raccourci clavier).
+fn literal(text: &str) -> String {
+    text.replace('_', "__")
+}
+
+fn plural(n: usize, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{n} {many}")
+    }
+}
+
+/// Résumé court des oreilles et des tâches (infobulle) ; vide hors connexion.
+pub fn activity(state: &TrayState) -> Option<String> {
+    if brain_unreachable(state) {
+        return None;
+    }
+    let connected = state.ears.iter().filter(|e| e.connected).count();
+    let mut text = plural(connected, "oreille connectée", "oreilles connectées");
+    match state.tasks.as_slice() {
+        [] => {}
+        [task] => text.push_str(&format!(" · agent sur {}", task.project)),
+        tasks => text.push_str(&format!(" · {} tâches d'agent", tasks.len())),
+    }
+    Some(text)
+}
+
+/// Lignes du sous-menu « Statut détaillé » (`offset` : décalage de l'heure locale).
+pub fn detail_lines(state: &TrayState, offset: i64) -> Vec<String> {
+    let mut lines = Vec::new();
+    if brain_unreachable(state) {
+        lines.push("Cerveau injoignable".into());
+    } else {
+        if state.ears.is_empty() {
+            lines.push("Aucune oreille appairée".into());
+        }
+        for ear in &state.ears {
+            let who = ear
+                .person
+                .as_deref()
+                .map(|p| format!(", {p}"))
+                .unwrap_or_default();
+            let link = if ear.connected {
+                "connectée"
+            } else {
+                "déconnectée"
+            };
+            lines.push(format!("Oreille {}{who} : {link}", ear.name));
+        }
+        if state.tasks.is_empty() {
+            lines.push("Aucune tâche d'agent en cours".into());
+        }
+        for task in &state.tasks {
+            lines.push(format!(
+                "Agent : {}, depuis {}",
+                task.project,
+                clock(task.started_at, offset)
+            ));
+        }
+    }
+    if let Some(text) = &state.last_heard {
+        lines.push(format!("Dernière phrase : {text}"));
+    }
+    lines
+}
+
 fn listen_label(state: &TrayState) -> &'static str {
     if state.mic == MicState::Muted {
         "Réactiver l'écoute"
@@ -95,10 +198,9 @@ pub fn menu_labels(state: &TrayState) -> Vec<String> {
         hard_mute_label(state).into(),
         "Mode local".into(),
         "Mode en ligne".into(),
+        "Statut détaillé".into(),
     ];
-    if let Some(text) = &state.last_heard {
-        labels.push(format!("Dernière phrase : {text}"));
-    }
+    labels.extend(detail_lines(state, 0).into_iter().map(|l| format!("  {l}")));
     labels.push("Quitter l'oreille".into());
     labels
 }
@@ -152,7 +254,10 @@ impl ksni::Tray for JarvisTray {
             icon_name: icon_for(&self.state).into(),
             icon_pixmap: Vec::new(),
             title: "Jarvis".into(),
-            description: summary(&self.state),
+            description: match activity(&self.state) {
+                Some(more) => format!("{}\n{more}", summary(&self.state)),
+                None => summary(&self.state),
+            },
         }
     }
 
@@ -209,9 +314,18 @@ impl ksni::Tray for JarvisTray {
             }
             .into(),
         );
-        if let Some(text) = &state.last_heard {
-            items.push(entry(&format!("Dernière phrase : {text}"), false, |_| {}));
-        }
+        let details = detail_lines(state, local_offset())
+            .iter()
+            .map(|line| entry(&literal(line), false, |_| {}))
+            .collect();
+        items.push(
+            SubMenu {
+                label: "Statut détaillé".into(),
+                submenu: details,
+                ..Default::default()
+            }
+            .into(),
+        );
         items.push(MenuItem::Separator);
         items.push(entry("Quitter l'oreille", true, |t| {
             t.send(TrayCommand::Quit)
@@ -223,6 +337,8 @@ impl ksni::Tray for JarvisTray {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jarvis_protocol::EarId;
+    use jarvis_protocol::ear::{EarSummary, TaskSummary};
 
     fn connected(mic: MicState, capturing: bool) -> TrayState {
         TrayState {
@@ -233,7 +349,91 @@ mod tests {
                 local_model: "llama3.2:3b".into(),
             },
             last_heard: None,
+            ears: vec![ear("PC", true, true), ear("Pixel", false, false)],
+            tasks: Vec::new(),
         }
+    }
+
+    fn ear(name: &str, connected: bool, local: bool) -> EarSummary {
+        EarSummary {
+            id: EarId::new(name),
+            name: name.into(),
+            platform: "linux".into(),
+            connected,
+            local,
+            person: Some("Charles".into()),
+        }
+    }
+
+    fn task(project: &str, started_at: u64) -> TaskSummary {
+        TaskSummary {
+            id: format!("t-{project}"),
+            project: project.into(),
+            started_at,
+        }
+    }
+
+    #[test]
+    fn decalage_horaire_lu() {
+        assert_eq!(parse_offset("+0100"), Some(3600));
+        assert_eq!(parse_offset("+0530"), Some(19_800));
+        assert_eq!(parse_offset("-0500"), Some(-18_000));
+        assert_eq!(parse_offset("0100"), None);
+        assert_eq!(parse_offset("+01"), None);
+        assert_eq!(parse_offset(""), None);
+    }
+
+    #[test]
+    fn heure_locale_de_depart() {
+        // 2026-11-17 13:32:10 UTC.
+        let t = 1_794_922_330;
+        assert_eq!(clock(t, 0), "13:32");
+        assert_eq!(clock(t, 3600), "14:32");
+        assert_eq!(clock(t, -14 * 3600), "23:32");
+    }
+
+    #[test]
+    fn statut_detaille_oreilles_et_taches() {
+        let mut state = connected(MicState::Open, false);
+        state.tasks = vec![task("Jarvis", 1_794_922_330)];
+        state.last_heard = Some("suivant".into());
+        assert_eq!(
+            detail_lines(&state, 3600),
+            [
+                "Oreille PC, Charles : connectée",
+                "Oreille Pixel, Charles : déconnectée",
+                "Agent : Jarvis, depuis 14:32",
+                "Dernière phrase : suivant",
+            ]
+        );
+        assert_eq!(
+            activity(&state).unwrap(),
+            "1 oreille connectée · agent sur Jarvis"
+        );
+        state.tasks.push(task("Mawena", 1_794_922_330));
+        assert_eq!(
+            activity(&state).unwrap(),
+            "1 oreille connectée · 2 tâches d'agent"
+        );
+    }
+
+    #[test]
+    fn statut_detaille_sans_tache_ni_cerveau() {
+        let mut state = connected(MicState::Open, false);
+        state.ears.clear();
+        assert_eq!(
+            detail_lines(&state, 0),
+            ["Aucune oreille appairée", "Aucune tâche d'agent en cours"]
+        );
+        assert_eq!(activity(&state).unwrap(), "0 oreilles connectées");
+        state.brain = BrainLink::Unreachable;
+        assert_eq!(detail_lines(&state, 0), ["Cerveau injoignable"]);
+        assert_eq!(activity(&state), None);
+    }
+
+    #[test]
+    fn soulignes_affiches_tels_quels() {
+        assert_eq!(literal("Agent : mon_projet"), "Agent : mon__projet");
     }
 
     fn tray_of(

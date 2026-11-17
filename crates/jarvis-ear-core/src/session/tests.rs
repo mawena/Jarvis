@@ -252,6 +252,7 @@ fn status(mode: Mode) -> StatusInfo {
         version: "test".into(),
         local_model: "llama3.2:3b".into(),
         ears: vec![],
+        tasks: vec![],
     }
 }
 
@@ -329,6 +330,8 @@ impl Setup {
             capturing: false,
             brain: BrainLink::Connecting,
             last_heard: None,
+            ears: Vec::new(),
+            tasks: Vec::new(),
         });
         let listener = Listener::new(
             FakeWake {
@@ -601,6 +604,28 @@ async fn etat_pousse_par_le_cerveau_affiche_le_mode() {
         )
     })
     .await;
+}
+
+#[tokio::test]
+async fn taches_et_oreilles_poussees_par_le_cerveau_affichees() {
+    let h = Setup::default().start();
+    let mut pushed = status(Mode::Local);
+    pushed.tasks = vec![jarvis_protocol::ear::TaskSummary {
+        id: "t1".into(),
+        project: "Jarvis".into(),
+        started_at: 1_800_000_000,
+    }];
+    h.link
+        .state
+        .send_replace(LinkState::Connected(pushed.clone()));
+    h.wait_for("tâche affichée", |h| {
+        h.tray.borrow().tasks == pushed.tasks
+    })
+    .await;
+    // Lien coupé : plus de tâches affichées (elles ne sont plus suivies).
+    h.link.state.send_replace(LinkState::Unreachable);
+    h.wait_for("tâches effacées", |h| h.tray.borrow().tasks.is_empty())
+        .await;
 }
 
 #[tokio::test]

@@ -7,14 +7,19 @@ use crate::arbiter::{Arbiter, ArbiterAction, EndVerdict, WakeReport};
 use crate::brain::Brain;
 use crate::ears::{EarRecord, EarRegistry, hex};
 use crate::listen::ListenService;
+use crate::metrics::{self, MetricsLog, Notes};
 use crate::pairing::{PairAttempt, PairingWindow};
 use crate::people::{Access, EarPerson, PeopleError, Trust};
 use crate::tts::Voice;
-use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
+use jarvis_protocol::ear::{
+    BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo, TaskSummary,
+};
+use jarvis_protocol::metrics::PhraseRecord;
 use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
 use jarvis_skills::Risk;
+use jarvis_skills::agent::RunningTask;
 use jarvis_skills::text::fold;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -86,6 +91,11 @@ pub struct Services {
     /// Changements de mode (`ModeStore::subscribe`) : `Status` diffusé. Absent :
     /// diffusé seulement après un `SetMode` venu d'une oreille.
     pub modes: Option<watch::Receiver<Mode>>,
+    /// Tâches de l'agent en cours (`AgentSkill::tasks`) : `Status` diffusé à chaque
+    /// changement. Absent : agent désactivé, statut sans tâches.
+    pub tasks: Option<watch::Receiver<Vec<RunningTask>>>,
+    /// Mesures des critères de réussite (une ligne par phrase traitée). Absent : rien.
+    pub metrics: Option<Arc<MetricsLog>>,
     /// Décrit la voix (modèle, locuteur…) : entre dans l'id de la phrase hors ligne.
     pub voice_tag: String,
 }
@@ -237,7 +247,7 @@ impl Hub {
             sound: sound_tx,
             me: tx.downgrade(),
         };
-        tokio::spawn(state.run(rx, services.modes));
+        tokio::spawn(state.run(rx, services.modes, services.tasks));
         let hub = Hub { tx };
         tokio::spawn(watch_announcements(services.board, hub.tx.downgrade()));
         hub
@@ -502,6 +512,20 @@ struct State {
 }
 
 /// Attend `deadline` ; sans échéance, jamais.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
+
+/// Texte entendu (mesures).
+fn heard_text(response: &ControlResponse) -> String {
+    match response {
+        ControlResponse::Heard { text, .. } => text.clone(),
+        _ => String::new(),
+    }
+}
+
 async fn until(deadline: Option<Instant>) {
     match deadline {
         Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
@@ -514,6 +538,7 @@ impl State {
         mut self,
         mut rx: mpsc::Receiver<Command>,
         mut modes: Option<watch::Receiver<Mode>>,
+        mut tasks: Option<watch::Receiver<Vec<RunningTask>>>,
     ) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -535,6 +560,12 @@ impl State {
                     match changed {
                         Ok(()) => self.broadcast_status(),
                         Err(_) => modes = None,
+                    }
+                }
+                changed = async { tasks.as_mut().expect("garde").changed().await }, if tasks.is_some() => {
+                    match changed {
+                        Ok(()) => self.broadcast_status(),
+                        Err(_) => tasks = None,
                     }
                 }
             }
@@ -758,7 +789,23 @@ impl State {
             version: env!("CARGO_PKG_VERSION").into(),
             local_model: brain.local_model().into(),
             ears: self.summaries(),
+            tasks: self.tasks(),
         }
+    }
+
+    fn tasks(&self) -> Vec<TaskSummary> {
+        let Some(tasks) = &self.services.tasks else {
+            return Vec::new();
+        };
+        tasks
+            .borrow()
+            .iter()
+            .map(|t| TaskSummary {
+                id: t.id.clone(),
+                project: t.project.clone(),
+                started_at: t.started_at,
+            })
+            .collect()
     }
 
     fn summaries(&self) -> Vec<EarSummary> {
@@ -1126,6 +1173,9 @@ impl State {
         let (ear, follow_up, muted) = (ear.clone(), capture.follow_up, end.muted);
         let me = self.me.clone();
         let limit = self.settings.process_timeout;
+        let metrics = self.services.metrics.clone();
+        let ear_name = self.registry.get(&ear).map(|r| r.name).unwrap_or_default();
+        let ended_at = Instant::now();
         // La baisse du son de cette phrase peut être encore en file : `listen` ne
         // rétablit le son qu'après elle.
         let (flushed_tx, flushed) = oneshot::channel();
@@ -1134,17 +1184,17 @@ impl State {
             let (job_ear, job_listen) = (ear.clone(), listen.clone());
             let mut job = tokio::spawn(async move {
                 let _ = flushed.await;
-                let response = job_listen.listen(&job_ear, &audio, muted, follow_up).await;
-                voice.speak(response).await
+                let (response, notes) =
+                    metrics::track(job_listen.listen(&job_ear, &audio, muted, follow_up)).await;
+                (voice.speak(response).await, notes)
             });
-            let response = match tokio::time::timeout(limit, &mut job).await {
-                Ok(Ok(response)) => response,
+            let (response, notes) = match tokio::time::timeout(limit, &mut job).await {
+                Ok(Ok(done)) => done,
                 Ok(Err(e)) => {
                     warn!(erreur = %e, "traitement d'une phrase interrompu");
                     listen.abandoned().await;
-                    ControlResponse::Error {
-                        message: "Traitement interrompu.".into(),
-                    }
+                    let message = "Traitement interrompu.".into();
+                    (ControlResponse::Error { message }, Notes::default())
                 }
                 Err(_) => {
                     warn!("traitement d'une phrase trop long : abandonné");
@@ -1154,11 +1204,22 @@ impl State {
                     job.abort();
                     let _ = job.await;
                     listen.abandoned().await;
-                    ControlResponse::Error {
-                        message: "Traitement trop long.".into(),
-                    }
+                    let message = "Traitement trop long.".into();
+                    (ControlResponse::Error { message }, Notes::default())
                 }
             };
+            if let Some(log) = metrics {
+                let record = PhraseRecord {
+                    at_ms: unix_ms(),
+                    ear: ear_name,
+                    ms: ended_at.elapsed().as_millis() as u64,
+                    route: notes.route,
+                    outcome: metrics::outcome(&response, notes),
+                    text: heard_text(&response),
+                };
+                // Écriture disque hors du runtime ; la réponse n'attend pas.
+                tokio::task::spawn_blocking(move || log.append(&record));
+            }
             if let Some(tx) = me.upgrade() {
                 let _ = tx
                     .send(Command::Processed {

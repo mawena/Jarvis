@@ -2,6 +2,7 @@
 //! qu'elle reçoit (menu de l'icône, boutons de la notification).
 
 use jarvis_protocol::Mode;
+use jarvis_protocol::ear::{EarSummary, TaskSummary};
 
 use crate::MicState;
 
@@ -26,6 +27,10 @@ pub struct EarStatus {
     pub capturing: bool,
     pub brain: BrainLink,
     pub last_heard: Option<String>,
+    /// Oreilles appairées au cerveau (vide hors connexion).
+    pub ears: Vec<EarSummary>,
+    /// Tâches de l'agent de code en cours (vide hors connexion).
+    pub tasks: Vec<TaskSummary>,
 }
 
 /// Commandes reçues par la session.

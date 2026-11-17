@@ -6,6 +6,7 @@ use crate::fastpath::{
     BrainCommand, is_shortcut, match_brain_command, match_confirmation, match_ear_command,
 };
 use crate::identity::{Identity, identify};
+use crate::metrics;
 use crate::people::Trust;
 use crate::speaker::{SpeakerGate, SpeakerState, Verdict};
 use crate::stt::Transcriber;
@@ -218,7 +219,10 @@ impl ListenService {
             );
         }
         let (mut who, short_only) = match identify(self.brain.people(), ear, verdict) {
-            Identity::Ignore => return heard("", "", None),
+            Identity::Ignore => {
+                metrics::note_ignored();
+                return heard("", "", None);
+            }
             Identity::Speak {
                 speaker,
                 short_only,
@@ -287,6 +291,7 @@ impl ListenService {
         if short_only && action.is_none() && !is_shortcut(&text) {
             // Jamais l'IA pour une voix non vérifiée : ignorée comme une voix inconnue.
             info!("phrase courte non vérifiée, ignorée");
+            metrics::note_ignored();
             return heard("", "", None);
         }
         info!(phrase = %text, "texte entendu");
@@ -300,11 +305,15 @@ impl ListenService {
                     // silence, comme une voix inconnue. Rien n'a été lancé pour autant.
                     Some(a) if a.reply.speech == REFUSED => {
                         info!("phrase courte non vérifiée refusée par les droits, sans réponse");
+                        metrics::note_ignored();
                         heard("", "", None)
                     }
                     Some(a) => self.answered(&text, a),
                     // Action risquée : jamais pour une voix non vérifiée.
-                    None => heard("", "", None),
+                    None => {
+                        metrics::note_ignored();
+                        heard("", "", None)
+                    }
                 }
             }
             Some(EarAction::AwaitReply) | None => {

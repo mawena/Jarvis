@@ -98,6 +98,17 @@ struct Inner {
     limits: Limits,
     end: EndLimits,
     active: Mutex<Vec<Active>>,
+    /// Liste publiée des tâches actives (icône de l'oreille du PC).
+    published: watch::Sender<Vec<RunningTask>>,
+}
+
+/// Tâche active vue de l'extérieur (statut du cerveau).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunningTask {
+    pub id: String,
+    pub project: String,
+    /// Heure de départ (secondes Unix).
+    pub started_at: u64,
 }
 
 /// Tâche en cours (ou en préparation).
@@ -135,8 +146,14 @@ impl AgentSkill {
                 limits,
                 end: EndLimits::default(),
                 active: Mutex::new(Vec::new()),
+                published: watch::Sender::new(Vec::new()),
             }),
         }
+    }
+
+    /// Tâches actives, republiées à chaque départ et à chaque fin.
+    pub fn tasks(&self) -> watch::Receiver<Vec<RunningTask>> {
+        self.inner.published.subscribe()
     }
 
     fn inner_mut(&mut self) -> &mut Inner {
@@ -395,11 +412,34 @@ impl Inner {
             stop_requested: false,
             finishing: false,
         });
+        self.publish(&active);
         Ok(())
     }
 
     fn release(&self, id: &TaskId) {
-        self.active.lock().unwrap().retain(|a| &a.id != id);
+        let mut active = self.active.lock().unwrap();
+        active.retain(|a| &a.id != id);
+        self.publish(&active);
+    }
+
+    /// Publie la liste (appelé sous le verrou : l'ordre des publications suit celui des
+    /// changements).
+    fn publish(&self, active: &[Active]) {
+        let tasks: Vec<RunningTask> = active
+            .iter()
+            .map(|a| RunningTask {
+                id: a.id.as_str().to_string(),
+                project: a.project.clone(),
+                started_at: a.started_at,
+            })
+            .collect();
+        self.published.send_if_modified(|current| {
+            let changed = *current != tasks;
+            if changed {
+                *current = tasks;
+            }
+            changed
+        });
     }
 
     /// Arrêt demandé pour cette tâche ?
@@ -1295,6 +1335,24 @@ mod tests {
 
     const STARTED: &str = "Bien. Je confie cela à Claude, sur une branche à part de l'assistant. \
                            Je vous préviens à la fin.";
+
+    #[tokio::test]
+    async fn tache_publiee_puis_retiree() {
+        let b = bench(&long_agent());
+        let mut tasks = b.skill.tasks();
+        assert!(tasks.borrow_and_update().is_empty());
+        b.start("Jarvis").await;
+        let running = tasks.borrow_and_update().clone();
+        assert_eq!(running.len(), 1, "{running:?}");
+        assert_eq!(running[0].project, "Jarvis");
+        assert_eq!(running[0].started_at, T0);
+        b.stop(None).await;
+        b.notice(1).await;
+        tokio::time::timeout(Duration::from_secs(10), tasks.wait_for(|t| t.is_empty()))
+            .await
+            .expect("tâche retirée de la liste")
+            .unwrap();
+    }
 
     #[tokio::test]
     async fn demarrage_repond_tout_de_suite() {

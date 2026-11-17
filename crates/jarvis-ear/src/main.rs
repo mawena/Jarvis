@@ -213,6 +213,8 @@ async fn run(paths: Paths, profile: Option<String>) -> anyhow::Result<()> {
         capturing: false,
         brain: BrainLink::Connecting,
         last_heard: None,
+        ears: Vec::new(),
+        tasks: Vec::new(),
     });
 
     // L'icône est facultative : sans zone de notification, l'oreille fonctionne quand même.

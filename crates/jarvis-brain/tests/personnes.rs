@@ -264,6 +264,8 @@ async fn rig() -> Rig {
         voice: Voice::none(),
         board: board.clone(),
         modes: Some(changes),
+        tasks: None,
+        metrics: None,
         voice_tag: "test".into(),
     };
     let settings = HubSettings {

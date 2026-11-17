@@ -1,3 +1,4 @@
+mod mesures;
 mod ops;
 mod paths;
 mod searx;
@@ -91,6 +92,15 @@ enum Cmd {
     },
     /// Vérifie l'installation et les dépendances
     Doctor,
+    /// Résume les mesures des critères de réussite (vitesse, fausses détections, doublons)
+    Mesures {
+        /// Seulement les N derniers jours
+        #[arg(long)]
+        jours: Option<u32>,
+        /// Seulement les phrases contenant ce texte (par exemple « suivant »)
+        #[arg(long)]
+        phrase: Option<String>,
+    },
     /// Enregistre la clé API Claude (saisie masquée si omise)
     SetApiKey { key: Option<String> },
     /// Recompile depuis le dépôt source, réinstalle et redémarre
@@ -200,6 +210,12 @@ fn run(cmd: Cmd) -> anyhow::Result<i32> {
         Cmd::Disable { service } => verb(&paths, &sys, "disable", service, &mut out),
         Cmd::Status { service } => ops::status(&paths, &sys, &ops::targets(service), &mut out),
         Cmd::Doctor => ops::doctor(&paths, &sys, &mut out),
+        Cmd::Mesures { jours, phrase } => {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64);
+            mesures::report(&paths, jours, phrase.as_deref(), now_ms, &mut out)
+        }
         Cmd::Searx { action } => match action {
             SearxCmd::Up => searx::up(&paths, &sys, &mut out),
             SearxCmd::Down => searx::down(&paths, &sys, &mut out),

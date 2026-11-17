@@ -267,6 +267,8 @@ async fn start_brain(dir: &Path, fakes: &Fakes, bind: SocketAddr) -> BrainProc {
             voice: Voice::none(),
             board: board.clone(),
             modes: Some(changes),
+            tasks: None,
+            metrics: None,
             voice_tag: "test".into(),
         };
         let settings = HubSettings {

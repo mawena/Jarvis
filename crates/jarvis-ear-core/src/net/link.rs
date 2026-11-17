@@ -811,6 +811,7 @@ mod tests {
             version: "0.1.0".into(),
             local_model: "llama3.2:3b".into(),
             ears: vec![],
+            tasks: vec![],
         }
     }
 

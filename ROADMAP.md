@@ -140,12 +140,15 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 8.8 Essai réel avec Charles : un invité sur une deuxième oreille, refus des actions risquées et de l'agent (Charles) — [fiche d'essai](docs/essais/essai-8.8-personnes.md)
 
 ## Phase 9 : mise en service
-- [ ] 9.1 Rédiger le plan de la phase 9
+*Plan : [phase 9](docs/superpowers/plans/2026-11-17-phase-9-mise-en-service.md), branche `feature/mise-en-service`*
+
+- [x] 9.1 Rédiger le plan de la phase 9
 - [x] 9.2 Service systemd utilisateur pour l'oreille du PC (celui du cerveau est fait en phase 1, `jarvisctl` à étendre) — fait en avance, le 2026-10-29 : `jarvis-ear.service` installé par `jarvisctl` (cibles `cerveau` / `oreille`, `logs --oreille`), pause du service pendant l'enrôlement, refus d'une deuxième oreille lancée à la main ; voir `docs/installation.md` et `docs/oreille.md`
-- [ ] 9.3 Statut détaillé dans l'icône : oreilles connectées, tâches d'agent en cours
-- [ ] 9.4 Option `inhibit_sleep_on_ac`
-- [ ] 9.5 Mesure des critères de réussite (vitesse, fausses détections, doubles exécutions)
-- [ ] 9.6 Première version `release/1.0.0` via git flow
+- [x] 9.3 Statut détaillé dans l'icône : oreilles connectées, tâches d'agent en cours (infobulle et sous-menu « Statut détaillé », poussés par le cerveau à chaque changement)
+- [x] 9.4 Option `inhibit_sleep_on_ac` (`systemd-inhibit` tenu sur secteur, ligne dans `jarvisctl doctor`)
+- [x] 9.5 Mesure des critères de réussite (vitesse, fausses détections, doubles exécutions) : `mesures.jsonl` écrit par le cerveau, `jarvisctl mesures`
+- [ ] 9.6 Première version `release/1.0.0` via git flow, une fois les essais réels faits et les critères mesurés (9.7) ; la phase 9 est sortie en 0.4.0 le 2026-11-17
+- [ ] 9.7 Essai réel : une journée de mesures avec `jarvisctl mesures` (Charles) — [fiche d'essai](docs/essais/essai-9.7-mesures.md)
 
 ## Phase 10 : oreille iOS (iPhone 14 Pro)
 - [ ] 10.1 Rédiger le plan de la phase 10 (nécessite un Mac avec Xcode)
