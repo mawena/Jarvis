@@ -5,6 +5,7 @@
 pub mod ear;
 pub mod fingerprint;
 pub mod frame;
+pub mod metrics;
 pub mod pairing_uri;
 pub mod people;
 
