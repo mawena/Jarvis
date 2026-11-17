@@ -10,11 +10,14 @@ use crate::listen::ListenService;
 use crate::pairing::{PairAttempt, PairingWindow};
 use crate::people::{Access, EarPerson, PeopleError, Trust};
 use crate::tts::Voice;
-use jarvis_protocol::ear::{BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo};
+use jarvis_protocol::ear::{
+    BrainMessage, EarMessage, PROTOCOL_VERSION, RejectReason, StatusInfo, TaskSummary,
+};
 use jarvis_protocol::pairing_ended;
 use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{ControlResponse, EarId, EarSummary, Fingerprint, Mode, SpeechAudio};
 use jarvis_skills::Risk;
+use jarvis_skills::agent::RunningTask;
 use jarvis_skills::text::fold;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -86,6 +89,9 @@ pub struct Services {
     /// Changements de mode (`ModeStore::subscribe`) : `Status` diffusé. Absent :
     /// diffusé seulement après un `SetMode` venu d'une oreille.
     pub modes: Option<watch::Receiver<Mode>>,
+    /// Tâches de l'agent en cours (`AgentSkill::tasks`) : `Status` diffusé à chaque
+    /// changement. Absent : agent désactivé, statut sans tâches.
+    pub tasks: Option<watch::Receiver<Vec<RunningTask>>>,
     /// Décrit la voix (modèle, locuteur…) : entre dans l'id de la phrase hors ligne.
     pub voice_tag: String,
 }
@@ -237,7 +243,7 @@ impl Hub {
             sound: sound_tx,
             me: tx.downgrade(),
         };
-        tokio::spawn(state.run(rx, services.modes));
+        tokio::spawn(state.run(rx, services.modes, services.tasks));
         let hub = Hub { tx };
         tokio::spawn(watch_announcements(services.board, hub.tx.downgrade()));
         hub
@@ -514,6 +520,7 @@ impl State {
         mut self,
         mut rx: mpsc::Receiver<Command>,
         mut modes: Option<watch::Receiver<Mode>>,
+        mut tasks: Option<watch::Receiver<Vec<RunningTask>>>,
     ) {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -535,6 +542,12 @@ impl State {
                     match changed {
                         Ok(()) => self.broadcast_status(),
                         Err(_) => modes = None,
+                    }
+                }
+                changed = async { tasks.as_mut().expect("garde").changed().await }, if tasks.is_some() => {
+                    match changed {
+                        Ok(()) => self.broadcast_status(),
+                        Err(_) => tasks = None,
                     }
                 }
             }
@@ -758,7 +771,23 @@ impl State {
             version: env!("CARGO_PKG_VERSION").into(),
             local_model: brain.local_model().into(),
             ears: self.summaries(),
+            tasks: self.tasks(),
         }
+    }
+
+    fn tasks(&self) -> Vec<TaskSummary> {
+        let Some(tasks) = &self.services.tasks else {
+            return Vec::new();
+        };
+        tasks
+            .borrow()
+            .iter()
+            .map(|t| TaskSummary {
+                id: t.id.clone(),
+                project: t.project.clone(),
+                started_at: t.started_at,
+            })
+            .collect()
     }
 
     fn summaries(&self) -> Vec<EarSummary> {

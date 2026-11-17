@@ -61,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         runner.clone(),
         Arc::new(SystemClock),
     ));
+    let mut agent_tasks = None;
     match Registry::open(tasks_dir()) {
         Ok(registry) => {
             let now = SystemTime::now()
@@ -75,12 +76,14 @@ async fn main() -> anyhow::Result<()> {
             }
             registry.prune(50);
             if config.agent.enabled {
-                skills.push(Arc::new(AgentSkill::new(
+                let agent = AgentSkill::new(
                     config.agent.clone(),
                     runner.clone(),
                     board.clone(),
                     registry,
-                )));
+                );
+                agent_tasks = Some(agent.tasks());
+                skills.push(Arc::new(agent));
                 info!(projets = config.agent.projects.len(), "agent de code prêt");
             }
         }
@@ -257,6 +260,7 @@ async fn main() -> anyhow::Result<()> {
             voice: voice.clone(),
             board: board.clone(),
             modes: Some(mode_changes),
+            tasks: agent_tasks,
             voice_tag,
         },
         true,

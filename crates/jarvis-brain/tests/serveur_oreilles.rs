@@ -26,6 +26,7 @@ use jarvis_protocol::pairing_uri::PairingUri;
 use jarvis_protocol::{
     ControlRequest, ControlResponse, EarId, Fingerprint, Mode, SpeechAudio, encode_pcm,
 };
+use jarvis_skills::agent::RunningTask;
 use jarvis_skills::{Announcer, FakeRunner, Notice, Outcome, Risk};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -55,6 +56,8 @@ struct Rig {
     ears_file: PathBuf,
     /// Oreille appairée d'avance : (id, jeton).
     salon: (EarId, String),
+    /// Tâches d'agent publiées (comme `AgentSkill::tasks`).
+    tasks: tokio::sync::watch::Sender<Vec<RunningTask>>,
 }
 
 fn limits() -> Limits {
@@ -122,12 +125,14 @@ async fn rig_people(
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let (tasks, tasks_rx) = tokio::sync::watch::channel(Vec::new());
     let services = Services {
         brain: brain.clone(),
         listen: listen.clone(),
         voice,
         board: board.clone(),
         modes: Some(changes),
+        tasks: Some(tasks_rx),
         voice_tag: "test".into(),
     };
     let settings = HubSettings {
@@ -173,6 +178,7 @@ async fn rig_people(
         people_file,
         ears_file,
         salon: (salon.id, token),
+        tasks,
     }
 }
 
@@ -991,6 +997,27 @@ async fn annonce_gardee_si_l_oreille_part_pendant_sa_synthese() {
 }
 
 #[tokio::test]
+async fn statut_diffuse_au_depart_et_a_la_fin_d_une_tache() {
+    let rig = rig().await;
+    let mut a = salon(&rig).await;
+    let tasks_of = |m: BrainMessage| match m {
+        BrainMessage::Status(s) => s.tasks,
+        other => panic!("état attendu, reçu {other:?}"),
+    };
+    rig.tasks.send_replace(vec![RunningTask {
+        id: "t1".into(),
+        project: "Jarvis".into(),
+        started_at: 1_800_000_000,
+    }]);
+    let tasks = tasks_of(next(&mut a).await);
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0].project, "Jarvis");
+    assert_eq!(tasks[0].started_at, 1_800_000_000);
+    rig.tasks.send_replace(Vec::new());
+    assert!(tasks_of(next(&mut a).await).is_empty());
+}
+
+#[tokio::test]
 async fn changement_de_mode_diffuse() {
     let rig = rig().await;
     let (cuisine, token) = pair_ear(&rig, "Cuisine").await;
@@ -1214,6 +1241,7 @@ fn services(dir: &Path) -> Services {
             Arc::new(SystemClock),
         )),
         modes: None,
+        tasks: None,
         voice_tag: String::new(),
     }
 }
