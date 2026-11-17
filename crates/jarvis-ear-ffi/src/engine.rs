@@ -259,6 +259,8 @@ impl EarEngine {
             capturing: false,
             brain: BrainLink::Connecting,
             last_heard: None,
+            ears: Vec::new(),
+            tasks: Vec::new(),
         });
         let (commands, commands_rx) = mpsc::unbounded_channel();
         let shared = Arc::new(Shared {

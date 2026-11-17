@@ -99,6 +99,7 @@ const DEFAULT_CONFIG: &str = r#"# Configuration de Jarvis (valeurs par défaut c
 # mode = "local"          # "local" ou "online"
 # address = "Monsieur"     # nom par lequel Jarvis s'adresse à vous ("" : jamais nommé)
 # sound_only_for_success = false   # vrai : une commande rapide réussie n'est confirmée que par un bip
+# inhibit_sleep_on_ac = false      # vrai : pas de mise en veille tant que le portable est branché
 
 # [local]                       # modèle local, servi par LM Studio (docs/ia-locale.md)
 # provider = "lmstudio"        # "lmstudio" ou "ollama"
@@ -671,6 +672,15 @@ struct LocalSettings {
     model: String,
 }
 
+/// Option `inhibit_sleep_on_ac` (fausse si absente ou illisible).
+fn inhibit_sleep_on_ac(paths: &Paths) -> bool {
+    fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+        .and_then(|t| t.get("inhibit_sleep_on_ac")?.as_bool())
+        .unwrap_or(false)
+}
+
 fn local_settings(paths: &Paths) -> LocalSettings {
     let local = fs::read_to_string(&paths.config_file)
         .ok()
@@ -996,6 +1006,24 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
             found,
             &format!("{tool} présent"),
             &format!("sudo apt install {pkg}"),
+        )?;
+    }
+
+    if inhibit_sleep_on_ac(paths) {
+        let found = sys
+            .run("sh", &["-c", "command -v systemd-inhibit"])
+            .map(|o| o.code == 0)
+            .unwrap_or(false);
+        check(
+            out,
+            found,
+            "Veille bloquée sur secteur (systemd-inhibit présent)",
+            "systemd-inhibit introuvable : la veille ne sera pas bloquée",
+        )?;
+    } else {
+        writeln!(
+            out,
+            "ℹ Veille permise même branché (choix par défaut) — pour la bloquer : `inhibit_sleep_on_ac = true`"
         )?;
     }
 
@@ -2790,6 +2818,23 @@ WantedBy=graphical-session.target
         sys.replies
             .insert(format!("{} --help", claude.display()), (0, help.into()));
         claude
+    }
+
+    #[test]
+    fn doctor_signale_l_anti_veille() {
+        let (_home, paths, mut sys) = installed();
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("ℹ Veille permise même branché"), "{o}");
+        write_config(&paths, "inhibit_sleep_on_ac = true\n");
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✓ Veille bloquée sur secteur"), "{o}");
+        sys.replies.insert(
+            "sh -c command -v systemd-inhibit".into(),
+            (1, String::new()),
+        );
+        let (code, o) = doctor_out(&paths, &sys);
+        assert!(o.contains("✗ Veille bloquée sur secteur"), "{o}");
+        assert_ne!(code, 0);
     }
 
     fn write_config(paths: &Paths, text: &str) {

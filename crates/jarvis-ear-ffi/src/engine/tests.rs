@@ -158,6 +158,7 @@ fn status_info(mode: Mode) -> StatusInfo {
         version: "test".into(),
         local_model: "llama3.2:3b".into(),
         ears: vec![],
+        tasks: vec![],
     }
 }
 

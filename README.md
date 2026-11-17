@@ -32,6 +32,9 @@ Garde-fous :
 - Jarvis reconnaît la voix de son propriétaire et **ignore les autres voix**.
 - Les actions risquées (veille, redémarrage, extinction) attendent un « oui » de cette voix.
 - La musique baisse pendant qu'on lui parle.
+- L'icône du PC montre l'état, les oreilles connectées et les tâches d'agent en cours.
+- En option, le PC ne se met pas en veille tant que le portable est branché
+  (`inhibit_sleep_on_ac`, voir [docs/installation.md](docs/installation.md#veille-du-pc)).
 
 ## Comment ça marche
 
@@ -99,6 +102,7 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 | `jarvisctl logs [-f] [--oreille]` | journaux |
 | `jarvisctl start` / `stop` / `restart` `[cerveau\|oreille]` | piloter les services |
 | `jarvisctl doctor` | diagnostic avec conseils |
+| `jarvisctl mesures [--jours N]` | vitesse des réponses, fausses détections et doublons face aux objectifs |
 
 Les réglages sont dans `~/.config/jarvis/config.toml` (cerveau) et `~/.config/jarvis/ear.toml`
 (oreille). Toutes les clés sont facultatives.

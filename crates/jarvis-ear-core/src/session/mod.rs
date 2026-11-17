@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use jarvis_protocol::ear::{BrainMessage, EarMessage};
+use jarvis_protocol::ear::{BrainMessage, EarMessage, EarSummary, TaskSummary};
 use jarvis_protocol::{Announcement, ControlResponse, EarAction, Sound, SpeechAudio, decode_pcm};
 use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
@@ -115,6 +115,8 @@ pub struct EarSession<W: WakeDetector, V: Vad, C: Capture> {
     playing: watch::Receiver<bool>,
     brain: BrainLink,
     last_heard: Option<String>,
+    ears: Vec<EarSummary>,
+    tasks: Vec<TaskSummary>,
     /// Annonces poussées par le cerveau, jouées au repos.
     announcements: Vec<Announcement>,
     /// Score de réveil minimal pendant la lecture.
@@ -160,6 +162,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> EarSession<W, V, C> {
             playing,
             brain: BrainLink::Connecting,
             last_heard: None,
+            ears: Vec::new(),
+            tasks: Vec::new(),
             announcements: Vec::new(),
             playback_wake_score: RustpotterDetector::DEFAULT_THRESHOLD + PLAYBACK_WAKE_MARGIN,
             offline: None,
@@ -234,6 +238,8 @@ impl<W: WakeDetector, V: Vad, C: Capture> EarSession<W, V, C> {
             capturing: self.current.is_some(),
             brain: self.brain.clone(),
             last_heard: self.last_heard.clone(),
+            ears: self.ears.clone(),
+            tasks: self.tasks.clone(),
         };
         self.status.send_if_modified(|current| {
             let changed = *current != state;
@@ -290,7 +296,12 @@ impl<W: WakeDetector, V: Vad, C: Capture> EarSession<W, V, C> {
     }
 
     fn on_link_state(&mut self) {
-        self.brain = match &*self.link_state.borrow_and_update() {
+        let link = self.link_state.borrow_and_update();
+        (self.ears, self.tasks) = match &*link {
+            LinkState::Connected(status) => (status.ears.clone(), status.tasks.clone()),
+            _ => (Vec::new(), Vec::new()),
+        };
+        self.brain = match &*link {
             LinkState::Connected(status) => BrainLink::Connected {
                 mode: status.mode,
                 local_model: status.local_model.clone(),

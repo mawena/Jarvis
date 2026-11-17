@@ -106,13 +106,18 @@ Si le service tourne, `jarvis-ear` refuse de démarrer (code 1) et l'explique ; 
 - **Coupure totale du micro / Rouvrir le micro** : le flux du micro est fermé. Seul ce menu le
   rouvre.
 - **Mode local / Mode en ligne** : change le mode du cerveau.
-- **Dernière phrase** : le dernier texte entendu (affichage seulement, non cliquable).
+- **Statut détaillé** (sous-menu, affichage seulement) : chaque oreille appairée avec sa
+  personne et son état (connectée ou non), les tâches de l'agent de code en cours avec leur
+  heure de départ, et la dernière phrase entendue.
 - **Quitter l'oreille**. Si une phrase était en cours, la musique est d'abord remise à son
   volume. Le service reste arrêté jusqu'à la prochaine session ou `jarvisctl start oreille`.
 
 La première ligne du menu résume l'état : écoute (avec le mode et le modèle), écoute coupée,
 micro coupé, « PC injoignable », « connexion au PC… » ou « appairage refusé : relancez
-jarvis-ear pair ». Elle suit la connexion au cerveau en direct.
+jarvis-ear pair ». Elle suit la connexion au cerveau en direct. L'infobulle de l'icône ajoute
+le nombre d'oreilles connectées et, s'il y en a, la tâche d'agent en cours (« agent sur
+Jarvis »). Le cerveau pousse ces changements à toutes les oreilles dès qu'une oreille se
+connecte ou part et dès qu'une tâche d'agent commence ou finit.
 
 L'écoute coupée est retenue au redémarrage de l'oreille, du service comme de la session
 (fichier `~/.local/state/jarvis/ear-muted`).

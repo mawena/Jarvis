@@ -260,6 +260,19 @@ pub struct StatusInfo {
     pub local_model: String,
     #[serde(default)]
     pub ears: Vec<EarSummary>,
+    /// Tâches de l'agent de code en cours (absent d'un cerveau d'avant la phase 9).
+    #[serde(default)]
+    pub tasks: Vec<TaskSummary>,
+}
+
+/// Tâche de l'agent de code en cours, pour l'icône.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSummary {
+    pub id: String,
+    /// Nom du projet.
+    pub project: String,
+    /// Heure de départ (secondes Unix).
+    pub started_at: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -337,6 +350,11 @@ mod tests {
                 connected: true,
                 local: true,
                 person: None,
+            }],
+            tasks: vec![TaskSummary {
+                id: "t1".into(),
+                project: "jarvis".into(),
+                started_at: 1_800_000_000,
             }],
         }
     }
@@ -527,6 +545,7 @@ mod tests {
                 version: "0.2.0".into(),
                 local_model: "x".into(),
                 ears: vec![],
+                tasks: vec![],
             })
         );
     }
