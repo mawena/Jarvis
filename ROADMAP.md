@@ -147,7 +147,7 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 9.3 Statut détaillé dans l'icône : oreilles connectées, tâches d'agent en cours (infobulle et sous-menu « Statut détaillé », poussés par le cerveau à chaque changement)
 - [x] 9.4 Option `inhibit_sleep_on_ac` (`systemd-inhibit` tenu sur secteur, ligne dans `jarvisctl doctor`)
 - [x] 9.5 Mesure des critères de réussite (vitesse, fausses détections, doubles exécutions) : `mesures.jsonl` écrit par le cerveau, `jarvisctl mesures`
-- [ ] 9.6 Première version `release/1.0.0` via git flow, une fois les essais réels faits et les critères mesurés (9.7) ; la phase 9 sort d'abord en 0.4.0
+- [ ] 9.6 Première version `release/1.0.0` via git flow, une fois les essais réels faits et les critères mesurés (9.7) ; la phase 9 est sortie en 0.4.0 le 2026-11-17
 - [ ] 9.7 Essai réel : une journée de mesures avec `jarvisctl mesures` (Charles) — [fiche d'essai](docs/essais/essai-9.7-mesures.md)
 
 ## Phase 10 : oreille iOS (iPhone 14 Pro)
