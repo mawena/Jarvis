@@ -11,6 +11,7 @@ use jarvis_brain::mode_store::ModeStore;
 use jarvis_brain::net::{self, NetworkPaths, Services};
 use jarvis_brain::people::People;
 use jarvis_brain::persona::Persona;
+use jarvis_brain::power::{CHECK_PERIOD, POWER_SUPPLY_DIR, SleepGuard, SystemdInhibitor};
 use jarvis_brain::server::{SpeakerState, serve_with_hub};
 use jarvis_brain::speaker::{SpeakerGate, sherpa::SherpaVerifier};
 use jarvis_brain::stt::{Transcriber, whisper::WhisperTranscriber};
@@ -34,6 +35,12 @@ use tracing::{info, warn};
 async fn main() -> anyhow::Result<()> {
     init_logging();
     let config = Config::load(&Config::default_path())?;
+    if config.inhibit_sleep_on_ac {
+        // Tâche lâchée à l'arrêt du cerveau : le processus d'inhibition s'arrête avec.
+        tokio::spawn(
+            SleepGuard::new(SystemdInhibitor::default(), POWER_SUPPLY_DIR).run(CHECK_PERIOD),
+        );
+    }
     let modes = Arc::new(ModeStore::new(ModeStore::default_path(), config.mode));
     // Mode changé (CLI, icône ou voix) : état diffusé aux oreilles en réseau.
     let mode_changes = modes.subscribe();

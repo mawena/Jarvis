@@ -14,6 +14,8 @@ pub struct Config {
     pub address: String,
     /// Une action réussie par un raccourci est confirmée par un bip, sans phrase.
     pub sound_only_for_success: bool,
+    /// Empêche la mise en veille tant que le portable est branché (`systemd-inhibit`).
+    pub inhibit_sleep_on_ac: bool,
     pub local: LocalLlmConfig,
     pub online: OnlineLlmConfig,
     pub apps: AppsConfig,
@@ -77,6 +79,7 @@ impl Default for Config {
             mode: Mode::Local,
             address: "Monsieur".to_string(),
             sound_only_for_success: false,
+            inhibit_sleep_on_ac: false,
             local: LocalLlmConfig::default(),
             online: OnlineLlmConfig::default(),
             apps: AppsConfig::default(),
@@ -392,6 +395,13 @@ mod tests {
         assert_eq!(c.local.keep_alive, "30m");
         assert_eq!(c.online.model, "claude-haiku-5-5");
         assert_eq!(c.address, "Monsieur");
+        assert!(!c.inhibit_sleep_on_ac);
+    }
+
+    #[test]
+    fn anti_veille_lue() {
+        let (_d, p) = write("inhibit_sleep_on_ac = true\n");
+        assert!(Config::load(&p).unwrap().inhibit_sleep_on_ac);
     }
 
     #[test]

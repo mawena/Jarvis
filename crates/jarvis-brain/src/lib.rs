@@ -16,6 +16,7 @@ pub mod net;
 pub mod pairing;
 pub mod people;
 pub mod persona;
+pub mod power;
 pub mod server;
 pub mod speaker;
 pub mod stt;
