@@ -85,6 +85,8 @@ mod tests {
             capturing: false,
             brain,
             last_heard: None,
+            ears: Vec::new(),
+            tasks: Vec::new(),
         }
     }
 
