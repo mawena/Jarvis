@@ -206,3 +206,19 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 15.9 `jarvisctl doctor` : ligne « chantiers » (pont joint, projets connus)
 - [ ] 15.10 Sur laptop-maison : `xdotool` et `libclang-dev` (via `sudo apt`, Charles) et chemin du projet de l'agent de code
 
+
+## Phase 16 : toutes les machines et les téléphones comme micro, par CCS
+*Choix de Charles (22/11/2026) : le cerveau reste sur laptop-maison ; les oreilles passent par
+CCS et Ricochet, donc marchent aussi hors de la maison. Pixel : mot d'éveil ; iPhone, web et
+bureau : bouton pour parler. Plan : [docs/oreilles-ccs.md](docs/oreilles-ccs.md). Le côté CCS
+est suivi dans la ROADMAP de CCS (phase 36).*
+
+- [x] 16.1 Plan (`docs/oreilles-ccs.md`)
+- [ ] 16.2 Oreille « bouton » dans le protocole : `Wake` marqué manuel (pas d'arbitrage par le score, pas de mot d'éveil exigé), tests du cerveau
+- [ ] 16.3 Tunnel Ricochet vers le port 7341 de laptop-maison (`[tunnel] ports` de l'agent : `ccs root`, Charles)
+- [ ] 16.4 `jarvis-ear --via-ricochet <machine>` : une machine Linux hors du Wi-Fi rejoint le cerveau par le tunnel
+- [ ] 16.5 Relais d'oreilles dans `ccs-serveur` (côté CCS) : WebSocket authentifié par CCS ↔ cerveau (TLS épinglé, par le tunnel)
+- [ ] 16.6 Bouton Jarvis dans la version web et le bureau de CCS (micro du navigateur, voix de Jarvis jouée)
+- [ ] 16.7 Bouton Jarvis dans l'appli iPhone de CCS (Codemagic, SideStore), widget et raccourci Siri
+- [ ] 16.8 Oreille Android : l'oreille existante (mot d'éveil) passe par CCS hors du Wi-Fi ; APK sur Codemagic
+- [ ] 16.9 Essais réels : Pixel en 4G, iPhone, une autre machine (Charles)
