@@ -6,6 +6,12 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+### Ajouté
+
+- **Oreilles hors de la maison** : `scripts/jarvis-tunnel` relie une oreille Linux au cerveau
+  par le tunnel Ricochet (TLS de bout en bout) ; oreille « bouton » (`wake` avec `score = 2.0`)
+  pour les applis de CCS. Plan : [docs/oreilles-ccs.md](docs/oreilles-ccs.md).
+
 ## [0.5.0] - 2026-11-22
 
 ### Ajouté
