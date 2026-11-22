@@ -219,6 +219,6 @@ est suivi dans la ROADMAP de CCS (phase 36).*
 - [x] 16.4 `scripts/jarvis-tunnel` : une machine Linux hors du Wi-Fi rejoint le cerveau par le tunnel Ricochet (service socat, TLS de bout en bout)
 - [x] 16.5 Relais d'oreilles dans `ccs-serveur` (côté CCS) : WebSocket authentifié par CCS ↔ cerveau (TLS épinglé, par le tunnel)
 - [x] 16.6 Bouton Jarvis dans la version web de CCS (branche CCS `feature/oreilles-jarvis`) ; bureau GTK à faire côté CCS
-- [ ] 16.7 Bouton Jarvis dans l'appli iPhone de CCS (Codemagic, SideStore), widget et raccourci Siri
+- [x] 16.7 Bouton Jarvis dans les applis CCS iPhone et Android (Codemagic), raccourci Siri ; installées le 22/11, serveur CCS en préversion 1.1.90
 - [ ] 16.8 Oreille Android : l'oreille existante (mot d'éveil) passe par CCS hors du Wi-Fi ; APK sur Codemagic
 - [ ] 16.9 Essais réels : Pixel en 4G, iPhone, une autre machine (Charles)
