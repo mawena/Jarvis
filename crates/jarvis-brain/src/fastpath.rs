@@ -510,6 +510,10 @@ fn launch(phrase: &str) -> Option<Intent> {
     if !matches!(verb, "lance" | "ouvre" | "demarre") || rest.is_empty() {
         return None;
     }
+    // « Lance un grand chantier sur… » : compétence des chantiers, jamais une appli.
+    if rest.split(' ').any(|w| w == "chantier" || w == "chantiers") {
+        return None;
+    }
     if rest == "la video"
         || rest == "une video"
         || rest.starts_with("la video ")
@@ -1364,6 +1368,11 @@ mod tests {
     fn phrase_libre_non_reconnue() {
         assert_eq!(match_fast("quel temps fait-il demain"), None);
         assert_eq!(match_fast("lance"), None);
+        assert_eq!(
+            match_fast("lance un grand chantier sur CCS : ajoute X"),
+            None
+        );
+        assert_eq!(match_fast("ouvre un chantier pour Jarvis"), None);
         assert_eq!(match_fast(""), None);
         assert_eq!(match_fast("jarvis"), None);
     }

@@ -1,0 +1,215 @@
+#!/usr/bin/env python3
+"""Pont entre Jarvis et la file de tâches de CCS, sur le serveur.
+
+Appelé par SSH avec une clé réservée à Jarvis (`command="…/jarvis-pont-ccs",restrict` dans
+`~/.ssh/authorized_keys`) : l'ordre arrive dans SSH_ORIGINAL_COMMAND, jamais dans un shell.
+Hors SSH (essais), l'ordre est pris dans les arguments.
+
+Ordres (une ligne JSON en réponse, {"erreur": "…"} en cas de refus) :
+  projets                          projets trouvés sous les racines
+  ajouter <projet> <consigne hex>  ajoute un grand chantier à la file de CCS
+  voir <id>                        état d'un chantier (et résumé de Claude à la fin)
+  annuler <id>                     annule un chantier en attente ou en cours
+
+Seuls les chantiers ajoutés par ce pont peuvent être vus ou annulés.
+
+Réglages (variables d'environnement, ou fichier ~/.config/jarvis-pont/pont.env en KEY=valeur) :
+  JARVIS_PONT_RACINES  dossiers des projets, séparés par « : »
+                       (défaut : ~/Work/perso:~/Work/pro:~/Work/Mawena)
+  JARVIS_PONT_DROITS   droits de Claude : lecture, modifications ou tout (défaut : tout)
+  JARVIS_PONT_MODELE   modèle (défaut : celui de CCS)
+  JARVIS_PONT_QUAND    quota, nuit ou HH:MM (défaut : quota)
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+from pathlib import Path
+
+HOME = Path.home()
+CONFIG = HOME / ".config/jarvis-pont/pont.env"
+STATE = HOME / ".local/state/jarvis-pont/chantiers.json"
+CCS_DIR = HOME / ".claude-accounts"
+NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
+ID_RE = re.compile(r"^[0-9]{1,9}$")
+HEX_RE = re.compile(r"^(?:[0-9a-f]{2}){1,8000}$")
+MAX_INSTRUCTION = 4000
+SUMMARY_MAX = 1500
+
+BRIEF = """Grand chantier demandé à voix haute par Charles, par Jarvis :
+
+« {consigne} »
+
+Tu travailles seul, sans pouvoir lui poser de question : fais les choix raisonnables et
+note-les. Marche à suivre :
+1. Lis README.md, ROADMAP.md, CLAUDE.md s'il existe, et le code concerné.
+2. Pars de `develop` à jour et crée une branche git flow `feature/<nom-court>`.
+3. Ajoute la phase ou les tâches du chantier dans ROADMAP.md (`- [ ]`), coche-les au fil du travail.
+4. Implémente, avec des tests ; lance seulement les tests des modules touchés, avec
+   `nice -n 10` (machine partagée, un seul travail lourd à la fois).
+5. Mets à jour README.md et la section « Non publié » de CHANGELOG.md.
+6. Commits en français, au nom de Charles seulement (aucun Co-Authored-By).
+7. Pousse la branche feature (`git push -u origin <branche>`), et rien d'autre : ne fusionne
+   pas dans develop ni main, pas de tag, pas de release ; Charles relira.
+Interdits : sudo, `ccs root`, toucher à nginx, aux sites, à docker ou aux bases de données,
+afficher ou copier un secret.
+Termine par un résumé en 3 phrases au plus : ce qui est fait, ce qui reste, le nom de la branche.
+"""
+
+
+def settings():
+    conf = {}
+    if CONFIG.is_file():
+        for line in CONFIG.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, v = line.split("=", 1)
+                conf[k.strip()] = v.strip().strip('"')
+    conf.update({k: v for k, v in os.environ.items() if k.startswith("JARVIS_PONT_")})
+    return conf
+
+
+def roots(conf):
+    raw = conf.get("JARVIS_PONT_RACINES") or "~/Work/perso:~/Work/pro:~/Work/Mawena"
+    return [Path(os.path.expanduser(r)) for r in raw.split(":") if r]
+
+
+def projects(conf):
+    found = {}
+    for root in roots(conf):
+        if not root.is_dir():
+            continue
+        for d in sorted(root.iterdir()):
+            if d.is_dir() and (d / ".git").exists() and d.name.lower() not in found:
+                found[d.name.lower()] = d
+    return found
+
+
+def load_state():
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def save_state(state):
+    STATE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = STATE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, indent=2, ensure_ascii=False))
+    os.chmod(tmp, 0o600)
+    tmp.replace(STATE)
+
+
+def ccs_task(task_id):
+    try:
+        data = json.loads((CCS_DIR / "tasks.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return next((t for t in data.get("tasks", []) if str(t.get("id")) == task_id), None)
+
+
+def final_result(task_id):
+    """Dernier texte « result » du journal stream-json de la tâche."""
+    path = CCS_DIR / "tasks" / f"{task_id}.jsonl"
+    result = ""
+    try:
+        with path.open(encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if '"result"' not in line:
+                    continue
+                try:
+                    ev = json.loads(line)
+                except ValueError:
+                    continue
+                if ev.get("type") == "result" and isinstance(ev.get("result"), str):
+                    result = ev["result"]
+    except OSError:
+        pass
+    return result[:SUMMARY_MAX]
+
+
+def run_ccs(args):
+    return subprocess.run(["ccs", "tache", *args], capture_output=True, text=True, timeout=20)
+
+
+def add(conf, name, hexa):
+    if not NAME_RE.match(name):
+        return {"erreur": "nom de projet invalide"}
+    if not HEX_RE.match(hexa):
+        return {"erreur": "consigne invalide"}
+    try:
+        consigne = bytes.fromhex(hexa).decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return {"erreur": "consigne invalide"}
+    if not consigne or len(consigne) > MAX_INSTRUCTION:
+        return {"erreur": "consigne vide ou trop longue"}
+    folder = projects(conf).get(name.lower())
+    if folder is None:
+        return {"erreur": f"projet inconnu : {name}"}
+    args = ["ajouter", BRIEF.format(consigne=consigne), "-C", str(folder),
+            "--droits", conf.get("JARVIS_PONT_DROITS") or "tout",
+            "--quand", conf.get("JARVIS_PONT_QUAND") or "quota"]
+    if conf.get("JARVIS_PONT_MODELE"):
+        args += ["--modele", conf["JARVIS_PONT_MODELE"]]
+    r = run_ccs(args)
+    m = re.search(r"T[âa]che (\d+) ajout", r.stdout)
+    if r.returncode != 0 or not m:
+        return {"erreur": f"CCS a refusé la tâche : {(r.stderr or r.stdout).strip()[:200]}"}
+    task_id = m.group(1)
+    state = load_state()
+    state[task_id] = {"projet": folder.name, "consigne": consigne}
+    save_state(state)
+    return {"id": task_id, "projet": folder.name, "dossier": str(folder)}
+
+
+def show(task_id):
+    if not ID_RE.match(task_id) or task_id not in load_state():
+        return {"erreur": "chantier inconnu"}
+    t = ccs_task(task_id)
+    if t is None:
+        return {"erreur": "tâche absente de CCS"}
+    out = {"id": task_id, "etat": t.get("state"), "note": t.get("note") or "",
+           "duree": t.get("duration"), "cout": t.get("cost")}
+    if t.get("state") in ("done", "failed"):
+        out["resume"] = final_result(task_id) or t.get("error") or ""
+    return out
+
+
+def cancel(task_id):
+    if not ID_RE.match(task_id) or task_id not in load_state():
+        return {"erreur": "chantier inconnu"}
+    r = run_ccs(["annuler", task_id])
+    if r.returncode != 0:
+        return {"erreur": (r.stderr or r.stdout).strip()[:200]}
+    t = ccs_task(task_id) or {}
+    return {"id": task_id, "etat": t.get("state", "cancelled")}
+
+
+def main():
+    raw = os.environ.get("SSH_ORIGINAL_COMMAND")
+    words = shlex.split(raw) if raw is not None else sys.argv[1:]
+    conf = settings()
+    match words:
+        case ["projets"]:
+            out = {"projets": sorted(p.name for p in projects(conf).values())}
+        case ["ajouter", name, hexa]:
+            out = add(conf, name, hexa)
+        case ["voir", task_id]:
+            out = show(task_id)
+        case ["annuler", task_id]:
+            out = cancel(task_id)
+        case _:
+            out = {"erreur": "ordre inconnu (projets, ajouter, voir, annuler)"}
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as e:  # une ligne JSON, toujours
+        print(json.dumps({"erreur": f"pont : {type(e).__name__}"}))
+        sys.exit(0)

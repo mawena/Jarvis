@@ -6,6 +6,23 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.5.0] - 2026-11-22
+
+### Ajouté
+
+- **Grands chantiers confiés à CCS** : « Jarvis, grand chantier sur CCS : ajoute X » confie
+  une fonction entière à Claude Code sur le serveur, par la file de tâches de CCS (compte choisi
+  selon le quota, reprise après limite, suivi sur ccs.mawena.cloud). Jarvis demande un « oui »,
+  suit l'état (« où en est le chantier ? »), annule (« annule le chantier ») et annonce la fin
+  avec le résumé de Claude. Section `[chantier]` de la configuration, jamais proposé à l'IA,
+  voix reconnue et droit `agent` obligatoires.
+- **Pont `scripts/jarvis-pont-ccs`** côté serveur, joint par une clé SSH limitée à lui seul
+  (`command=…,restrict`) : quatre ordres vérifiés, seuls ses propres chantiers visibles, marche
+  à suivre git flow imposée (branche feature poussée, jamais fusionnée). Voir
+  [docs/chantiers.md](docs/chantiers.md).
+- `jarvisctl doctor` : ligne « Grands chantiers » (pont joint, projets déclarés absents du serveur).
+- Installation de Jarvis sur laptop-maison, couplé au CCS du serveur.
+
 ## [0.4.0] - 2026-11-17
 
 Phase 9, mise en service : l'icône en dit plus, le PC peut rester éveillé sur secteur, et les

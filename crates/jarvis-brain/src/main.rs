@@ -69,6 +69,21 @@ async fn main() -> anyhow::Result<()> {
         runner.clone(),
         Arc::new(SystemClock),
     ));
+    // Grands chantiers : avant l'agent, pour que « …chantier… » lui revienne.
+    if config.chantier.enabled && !config.chantier.command.is_empty() {
+        let chantier = jarvis_skills::chantier::ChantierSkill::new(
+            &config.chantier,
+            runner.clone(),
+            board.clone(),
+            Some(state_file("chantiers.json")),
+        );
+        chantier.spawn_watcher();
+        info!(
+            projets = config.chantier.projects.len(),
+            "grands chantiers prêts (CCS sur le serveur)"
+        );
+        skills.push(Arc::new(chantier));
+    }
     let mut agent_tasks = None;
     match Registry::open(tasks_dir()) {
         Ok(registry) => {
