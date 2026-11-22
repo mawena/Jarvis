@@ -4,6 +4,7 @@ pub mod agent;
 pub mod announce;
 pub mod apps;
 pub mod browser;
+pub mod chantier;
 pub mod power;
 pub mod runner;
 pub mod search;

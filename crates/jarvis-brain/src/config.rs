@@ -1,6 +1,7 @@
 use anyhow::Context;
 use jarvis_protocol::Mode;
 use jarvis_skills::agent::AgentSettings;
+use jarvis_skills::chantier::ChantierSettings;
 use jarvis_skills::search::SearchSettings;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
@@ -26,6 +27,8 @@ pub struct Config {
     pub search: SearchSettings,
     /// Agent de code (section `[agent]`).
     pub agent: AgentSettings,
+    /// Grands chantiers confiés à CCS sur le serveur (section `[chantier]`).
+    pub chantier: ChantierSettings,
     /// Oreilles en réseau (section `[network]`).
     pub network: NetworkConfig,
     /// Personnes et rôles (section `[people]`).
@@ -88,6 +91,7 @@ impl Default for Config {
             tts: TtsConfig::default(),
             search: SearchSettings::default(),
             agent: AgentSettings::default(),
+            chantier: ChantierSettings::default(),
             network: NetworkConfig::default(),
             people: PeopleConfig::default(),
         }
