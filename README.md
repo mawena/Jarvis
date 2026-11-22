@@ -21,6 +21,7 @@ texte des phrases à Claude.
 | Vidéos | « lance la vidéo de Squeezie », « mets Daft Punk sur YouTube » |
 | PC | « mets le PC en veille », « éteins le PC » (toujours confirmé par un « oui ») |
 | Agent de code | « finis les tests du projet Jarvis » : lance Claude Code en arrière-plan sur une branche à part ([docs/agent.md](docs/agent.md)) |
+| Grands chantiers | « grand chantier sur CCS : ajoute X » : une fonction entière confiée à Claude sur le serveur, par la file de tâches de CCS ([docs/chantiers.md](docs/chantiers.md)) |
 | Conversation | « annule », « répète », questions libres répondues par l'IA |
 | Écoute | « coupe l'écoute », « réactive l'écoute », « passe en mode local / en ligne » |
 
@@ -138,6 +139,7 @@ Le détail est dans [docs/recherche.md](docs/recherche.md) et
 - [docs/android.md](docs/android.md) : l'oreille Android (construire, installer, appairer, batterie).
 - [docs/personnes.md](docs/personnes.md) : personnes, rôles et droits, qui parle, `people.toml`.
 - [docs/agent.md](docs/agent.md) : l'agent de code (Claude Code lancé par la voix, dans un worktree à part).
+- [docs/chantiers.md](docs/chantiers.md) : les grands chantiers, confiés par la voix à CCS sur le serveur (pont SSH restreint).
 - [docs/recherche.md](docs/recherche.md) : recherche sur internet et vidéos.
 - [docs/ia-locale.md](docs/ia-locale.md) : choix du modèle local et de Whisper, mesures.
 - [docs/essais/](docs/essais/README.md) : fiches d'essai en conditions réelles.

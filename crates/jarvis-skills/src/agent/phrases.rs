@@ -307,7 +307,7 @@ impl<'a> Phrase<'a> {
 
 /// Mots d'origine : suites de caractères alphanumériques (même découpage que
 /// `fold`).
-fn original_words(text: &str) -> Vec<Range<usize>> {
+pub(crate) fn original_words(text: &str) -> Vec<Range<usize>> {
     let mut words = Vec::new();
     let mut start = None;
     for (i, c) in text.char_indices() {
