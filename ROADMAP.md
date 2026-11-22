@@ -215,7 +215,7 @@ est suivi dans la ROADMAP de CCS (phase 36).*
 
 - [x] 16.1 Plan (`docs/oreilles-ccs.md`)
 - [x] 16.2 Oreille « bouton » : aucun changement du cerveau, `wake` avec `score = 2.0` gagne l'arbitrage (documenté dans `docs/reseau.md`)
-- [ ] 16.3 Tunnel Ricochet vers le port 7341 de laptop-maison (`[tunnel] ports` de l'agent : `ccs root`, Charles)
+- [x] 16.3 Tunnel Ricochet vers le port 7341 de laptop-maison (`[tunnel] ports` de l'agent : `ccs root`, Charles)
 - [x] 16.4 `scripts/jarvis-tunnel` : une machine Linux hors du Wi-Fi rejoint le cerveau par le tunnel Ricochet (service socat, TLS de bout en bout)
 - [x] 16.5 Relais d'oreilles dans `ccs-serveur` (côté CCS) : WebSocket authentifié par CCS ↔ cerveau (TLS épinglé, par le tunnel)
 - [x] 16.6 Bouton Jarvis dans la version web de CCS (branche CCS `feature/oreilles-jarvis`) ; bureau GTK à faire côté CCS
