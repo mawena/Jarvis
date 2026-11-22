@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use jarvis_protocol::{ControlRequest, ControlResponse};
 use jarvis_skills::agent::AgentSettings;
 use jarvis_skills::agent::registry::Registry;
+use jarvis_skills::chantier::ChantierSettings;
 use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, Write};
@@ -1062,7 +1063,86 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
     network_diagnostics(paths, sys, out)?;
     crate::searx::diagnostics(paths, sys, out)?;
     agent_diagnostics(paths, sys, out)?;
+    chantier_diagnostics(paths, sys, out)?;
     Ok(if failures > 0 { 1 } else { 0 })
+}
+
+/// Grands chantiers : le pont du serveur répond-il, connaît-il les projets déclarés ?
+/// Avertissements seulement ; rien si la section est absente ou coupée.
+fn chantier_diagnostics(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()> {
+    let section = fs::read_to_string(&paths.config_file)
+        .ok()
+        .and_then(|t| toml::from_str::<toml::Table>(&t).ok())
+        .and_then(|mut t| t.remove("chantier"));
+    let Some(section) = section else {
+        return Ok(());
+    };
+    let settings: ChantierSettings = match section.try_into() {
+        Ok(s) => s,
+        Err(e) => {
+            let e: toml::de::Error = e;
+            writeln!(out, "! Section [chantier] illisible : {}", e.message())?;
+            return Ok(());
+        }
+    };
+    if !settings.enabled {
+        return Ok(());
+    }
+    let args: Vec<String> = settings
+        .command
+        .iter()
+        .map(|a| match a.strip_prefix("~/") {
+            Some(rest) => paths.home.join(rest).to_string_lossy().into_owned(),
+            None => a.clone(),
+        })
+        .collect();
+    let Some((prog, rest)) = args.split_first() else {
+        writeln!(
+            out,
+            "! Grands chantiers activés sans `command` dans [chantier] — voir docs/chantiers.md"
+        )?;
+        return Ok(());
+    };
+    let mut rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+    rest.push("projets");
+    let reply = sys
+        .run(prog, &rest)
+        .ok()
+        .filter(|o| o.code == 0)
+        .and_then(|o| {
+            let line = o
+                .stdout
+                .lines()
+                .rev()
+                .find(|l| !l.trim().is_empty())?
+                .to_string();
+            serde_json::from_str::<serde_json::Value>(&line).ok()
+        });
+    let Some(remote) = reply
+        .as_ref()
+        .and_then(|v| v.get("projets")?.as_array().cloned())
+    else {
+        writeln!(
+            out,
+            "! Grands chantiers : pont du serveur injoignable — vérifiez la clé SSH et `command` dans [chantier] (docs/chantiers.md)"
+        )?;
+        return Ok(());
+    };
+    let remote: Vec<String> = remote
+        .iter()
+        .filter_map(|p| p.as_str().map(str::to_lowercase))
+        .collect();
+    writeln!(
+        out,
+        "✓ Grands chantiers : pont joint ({} projets sur le serveur)",
+        remote.len()
+    )?;
+    for p in &settings.projects {
+        if !remote.contains(&p.name.to_lowercase()) {
+            writeln!(out, "! Chantier : projet « {} » absent du serveur", p.name)?;
+        }
+    }
+    Ok(())
 }
 
 /// Options de `claude` dont dépend la ligne de commande de l'agent.
@@ -2868,6 +2948,33 @@ WantedBy=graphical-session.target
         assert!(!o.contains("Claude Code introuvable"), "{o}");
         assert!(!o.contains("Projet"), "{o}");
         assert_eq!(code, 1);
+    }
+
+    #[test]
+    fn doctor_joint_le_pont_des_chantiers() {
+        let (home, paths, mut sys) = installed();
+        // Sans section : aucune ligne.
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(!o.contains("chantier"), "{o}");
+        write_config(
+            &paths,
+            "[chantier]\nenabled = true\ncommand = [\"ssh\", \"-i\", \"~/.ssh/cle\", \"vps\"]\n\n[[chantier.projects]]\nname = \"CCS\"\n\n[[chantier.projects]]\nname = \"Absent\"\n",
+        );
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("! Grands chantiers : pont du serveur injoignable"),
+            "{o}"
+        );
+        let cmd = format!("ssh -i {}/.ssh/cle vps projets", home.path().display());
+        sys.replies
+            .insert(cmd, (0, "{\"projets\": [\"ccs\", \"Jarvis\"]}\n".into()));
+        let (_, o) = doctor_out(&paths, &sys);
+        assert!(
+            o.contains("✓ Grands chantiers : pont joint (2 projets"),
+            "{o}"
+        );
+        assert!(o.contains("« Absent » absent du serveur"), "{o}");
+        assert!(!o.contains("« CCS »"), "{o}");
     }
 
     #[test]

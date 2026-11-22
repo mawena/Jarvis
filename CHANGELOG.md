@@ -18,6 +18,7 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
   (`command=…,restrict`) : quatre ordres vérifiés, seuls ses propres chantiers visibles, marche
   à suivre git flow imposée (branche feature poussée, jamais fusionnée). Voir
   [docs/chantiers.md](docs/chantiers.md).
+- `jarvisctl doctor` : ligne « Grands chantiers » (pont joint, projets déclarés absents du serveur).
 - Installation de Jarvis sur laptop-maison, couplé au CCS du serveur.
 
 ## [0.4.0] - 2026-11-17

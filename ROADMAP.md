@@ -203,5 +203,5 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [ ] 15.6 Clé SSH restreinte de laptop-maison vers le pont du serveur, essai `projets`
 - [ ] 15.7 Enrôlement de la voix et du mot d'éveil sur laptop-maison (Charles, au micro)
 - [ ] 15.8 Essai réel : un petit chantier lancé à la voix, suivi, fin annoncée (Charles)
-- [ ] 15.9 `jarvisctl doctor` : ligne « chantiers » (pont joint, projets connus)
+- [x] 15.9 `jarvisctl doctor` : ligne « chantiers » (pont joint, projets connus)
 
