@@ -199,9 +199,10 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 15.2 Pont `scripts/jarvis-pont-ccs` (projets, ajouter, voir, annuler) et marche à suivre git flow imposée
 - [x] 15.3 Veille des chantiers actifs, annonce de fin avec le résumé de Claude, état gardé au redémarrage
 - [x] 15.4 « lance un … chantier » n'ouvre jamais une application (raccourci rapide exclu)
-- [ ] 15.5 Installer Jarvis sur laptop-maison (paquets, Rust, modèles, LM Studio, services)
-- [ ] 15.6 Clé SSH restreinte de laptop-maison vers le pont du serveur, essai `projets`
+- [x] 15.5 Installer Jarvis sur laptop-maison (paquets, Rust, modèles, LM Studio, services)
+- [x] 15.6 Clé SSH restreinte de laptop-maison vers le pont du serveur, essai `projets`
 - [ ] 15.7 Enrôlement de la voix et du mot d'éveil sur laptop-maison (Charles, au micro)
 - [ ] 15.8 Essai réel : un petit chantier lancé à la voix, suivi, fin annoncée (Charles)
 - [x] 15.9 `jarvisctl doctor` : ligne « chantiers » (pont joint, projets connus)
+- [ ] 15.10 Sur laptop-maison : `xdotool` et `libclang-dev` (via `sudo apt`, Charles) et chemin du projet de l'agent de code
 
