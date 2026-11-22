@@ -6,6 +6,8 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.5.0] - 2026-11-22
+
 ### Ajouté
 
 - **Grands chantiers confiés à CCS** : « Jarvis, grand chantier sur CCS : ajoute X » confie
