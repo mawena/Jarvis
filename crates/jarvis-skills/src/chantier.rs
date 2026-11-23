@@ -692,7 +692,7 @@ fn arg(args: &Value, key: &str) -> Result<String, SkillError> {
         .ok_or_else(|| SkillError::BadArgs(format!("« {key} » manquant")))
 }
 
-fn expand(arg: &str, home: Option<&Path>) -> String {
+pub(crate) fn expand(arg: &str, home: Option<&Path>) -> String {
     match (arg.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest).to_string_lossy().into_owned(),
         _ => arg.to_string(),

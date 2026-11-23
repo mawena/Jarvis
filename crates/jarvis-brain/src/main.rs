@@ -84,6 +84,25 @@ async fn main() -> anyhow::Result<()> {
         );
         skills.push(Arc::new(chantier));
     }
+    // Pilotage du réseau CCS : avant l'agent, pour que « …sous-agent… » lui revienne.
+    if config.ccs.enabled {
+        let command = if config.ccs.command.is_empty() {
+            &config.chantier.command
+        } else {
+            &config.ccs.command
+        };
+        if command.is_empty() {
+            warn!(
+                "[ccs] activé sans commande (ni celle de [chantier]) : pilotage de CCS désactivé"
+            );
+        } else {
+            info!("pilotage du réseau CCS prêt");
+            skills.push(Arc::new(jarvis_skills::ccs::CcsSkill::new(
+                command,
+                runner.clone(),
+            )));
+        }
+    }
     let mut agent_tasks = None;
     match Registry::open(tasks_dir()) {
         Ok(registry) => {

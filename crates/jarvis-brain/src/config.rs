@@ -1,6 +1,7 @@
 use anyhow::Context;
 use jarvis_protocol::Mode;
 use jarvis_skills::agent::AgentSettings;
+use jarvis_skills::ccs::CcsSettings;
 use jarvis_skills::chantier::ChantierSettings;
 use jarvis_skills::search::SearchSettings;
 use serde::{Deserialize, Deserializer};
@@ -29,6 +30,8 @@ pub struct Config {
     pub agent: AgentSettings,
     /// Grands chantiers confiés à CCS sur le serveur (section `[chantier]`).
     pub chantier: ChantierSettings,
+    /// Pilotage du réseau CCS à la voix (section `[ccs]`).
+    pub ccs: CcsSettings,
     /// Oreilles en réseau (section `[network]`).
     pub network: NetworkConfig,
     /// Personnes et rôles (section `[people]`).
@@ -95,6 +98,7 @@ impl Default for Config {
             search: SearchSettings::default(),
             agent: AgentSettings::default(),
             chantier: ChantierSettings::default(),
+            ccs: CcsSettings::default(),
             network: NetworkConfig::default(),
             people: PeopleConfig::default(),
             cerveau: CerveauConfig::default(),
@@ -634,6 +638,15 @@ mod tests {
         assert_eq!(c.online.model, "claude-haiku-5-5");
         assert_eq!(c.address, "Monsieur");
         assert!(!c.inhibit_sleep_on_ac);
+    }
+
+    #[test]
+    fn section_ccs_lue_et_desactivee_par_defaut() {
+        assert!(!Config::default().ccs.enabled);
+        let (_d, p) = write("[ccs]\nenabled = true\ncommand = [\"ssh\", \"vps\"]\n");
+        let c = Config::load(&p).unwrap().ccs;
+        assert!(c.enabled);
+        assert_eq!(c.command, ["ssh", "vps"]);
     }
 
     #[test]

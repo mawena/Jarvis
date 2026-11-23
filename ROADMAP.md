@@ -238,3 +238,18 @@ sensible ; l'IA locale sinon, ou quand plus aucun compte Claude n'a de quota.*
 - [ ] 17.9 Résumés de recherche par Claude d'appoint (aujourd'hui : IA locale en mode local)
 - [ ] 17.10 `jarvisctl doctor` : ligne « cerveau d'appoint » (CLI trouvée, compte CCS)
 - [ ] 17.11 `scripts/check.sh` au vert, feature terminée dans `develop`
+
+## Phase 18 : piloter le réseau CCS à la voix
+*Branche `feature/outils-ccs` (sur `feature/cerveau-routage`). Demande de Charles : « tue le
+premier sous-agent de la session GliGli », « quelles sessions tournent ? », « lance une session
+sur le projet X ». Côté CCS : méthodes `jarvis.*` ([docs/protocole-ccs-jarvis.md](docs/protocole-ccs-jarvis.md)).*
+
+- [x] 18.1 Transport : ordre `jarvis <méthode> <hex>` du pont SSH `scripts/jarvis-pont-ccs` (socket Unix du pont CCS, ticket HMAC), même clé que les chantiers ; essayé sur le VPS (connexion acceptée)
+- [x] 18.2 Compétence `ccs` : outils `ccs_etat`, `ccs_sessions`, `ccs_sous_agents`, `ccs_arreter_sous_agent`, `ccs_arreter_session`, `ccs_lancer_session`, proposés à l'IA locale et à Claude d'appoint ; section `[ccs]`
+- [x] 18.3 Confirmation : `Skill::prepare` (nouveau) avant la question d'un outil risqué ; arrêt simulé sans `confirme`, question de CCS lue, cible exacte (`chat_id`, `tool_id`) exécutée sur « oui », toute autre réponse annule
+- [x] 18.4 Raccourcis sans IA (état du réseau, sessions, sous-agents, arrêts, lancement) ; « lance une session… » n'ouvre plus d'appli
+- [x] 18.5 Tests unitaires avec un faux CCS (compétence et cerveau)
+- [x] 18.6 README, CHANGELOG
+- [ ] 18.7 CCS publié avec les méthodes `jarvis.*` (aujourd'hui « Méthode inconnue » sur le VPS)
+- [ ] 18.8 Nouveau `jarvis-pont-ccs` copié sur le serveur, `[ccs] enabled = true` sur laptop-maison, essai réel (latence SSH + réseau)
+- [ ] 18.9 Choix de Charles : nom de session mal entendu par Whisper (« Gli Gli ») ; ajouter des alias si besoin

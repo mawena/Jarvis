@@ -14,7 +14,7 @@ use crate::persona::Persona;
 use crate::system_skill::SystemSkill;
 use jarvis_protocol::metrics::Route;
 use jarvis_protocol::{EarId, Mode};
-use jarvis_skills::{Outcome, Reply, Risk, Skill, SkillError, ToolSpec};
+use jarvis_skills::{Outcome, Preparation, Reply, Risk, Skill, SkillError, ToolSpec};
 use std::io;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -662,9 +662,22 @@ impl Brain {
                 info!(tool = %intent.tool, "action risquée tapée : refusée, à demander à voix haute");
                 return Step::Answer(Reply::new(self.persona.addressed(ASK_ALOUD)).into());
             };
-            let question = skill
-                .confirmation(&intent.tool, &intent.args)
-                .unwrap_or_else(|| format!("{} Je lance ?", spec.description.trim()));
+            // Préparation (simulation côté service pour CCS) : question et cible exacte.
+            let limit = skill.timeout(&intent.tool).unwrap_or(self.skill_timeout);
+            let prepared =
+                tokio::time::timeout(limit, skill.prepare(&intent.tool, intent.args)).await;
+            let (question, args) = match prepared {
+                Ok(Ok(Preparation::Ask { question, args })) => (question, args),
+                Ok(Ok(Preparation::Answer(reply))) => return Step::Answer(reply.into()),
+                Ok(Err(e)) => return self.skill_error(&intent.tool, e),
+                Err(_) => {
+                    warn!(tool = %intent.tool, "délai de préparation dépassé");
+                    return Step::Answer(Reply::failed(TOO_SLOW).into());
+                }
+            };
+            let intent = Intent::new(intent.tool, args);
+            let question =
+                question.unwrap_or_else(|| format!("{} Je lance ?", spec.description.trim()));
             let question = self.persona.addressed(&question);
             info!(tool = %intent.tool, oreille = %ear, "action risquée : confirmation demandée");
             *self.pending.lock().unwrap() = Some(Pending {
@@ -707,17 +720,24 @@ impl Brain {
                 return Step::Answer(Reply::failed(TOO_SLOW).into());
             }
         };
-        let reply = match result {
+        match result {
             // Réussite sans phrase de la compétence (médias, volume) : accusé bref.
             Ok(reply) if reply.outcome == Outcome::Done && reply.speech.trim().is_empty() => {
-                Reply::done(DONE)
+                Step::Answer(Reply::done(DONE).into())
             }
-            Ok(reply) => reply,
-            Err(SkillError::NotFound(m)) => return Step::NotFound(m),
-            Err(SkillError::UnknownTool(_) | SkillError::BadArgs(_)) => {
+            Ok(reply) => Step::Answer(reply.into()),
+            Err(e) => self.skill_error(&tool, e),
+        }
+    }
+
+    /// Phrase d'une erreur de compétence.
+    fn skill_error(&self, tool: &str, e: SkillError) -> Step {
+        let reply = match e {
+            SkillError::NotFound(m) => return Step::NotFound(m),
+            SkillError::UnknownTool(_) | SkillError::BadArgs(_) => {
                 Reply::failed(self.persona.addressed(UNKNOWN))
             }
-            Err(SkillError::Failed(detail)) => {
+            SkillError::Failed(detail) => {
                 // Le détail est technique : journalisé, pas dit.
                 warn!(tool = %tool, detail = %detail, "échec de la compétence");
                 Reply::failed(self.persona.addressed(FAILED))
@@ -2256,5 +2276,150 @@ mod droits {
         assert_eq!(m.agent.calls().len(), 1);
         m.brain.answer_voice(&ear(), PHRASE_AGENT, false).await;
         assert_eq!(m.agent.calls().len(), 1);
+    }
+}
+
+/// Pilotage de CCS (phase 18) : la question vient d'une simulation de CCS, le « oui »
+/// exécute sur la cible exacte, toute autre réponse annule.
+#[cfg(test)]
+mod pilotage_ccs {
+    use super::*;
+    use crate::testing::{FakeLlm, ManualClock};
+    use jarvis_skills::ccs::CcsSkill;
+    use jarvis_skills::{CommandOutput, CommandRunner};
+    use serde_json::json;
+
+    /// Faux pont CCS : question sans `confirme`, arrêt fait avec ; note les ordres.
+    #[derive(Default)]
+    struct FauxPont {
+        ordres: Mutex<Vec<serde_json::Value>>,
+    }
+
+    impl CommandRunner for FauxPont {
+        fn run(&self, _program: &str, args: &[String]) -> io::Result<CommandOutput> {
+            let hex = args.last().unwrap();
+            let bytes: Vec<u8> = (0..hex.len())
+                .step_by(2)
+                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                .collect();
+            let params: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let confirme = params.get("confirme") == Some(&json!(true));
+            self.ordres.lock().unwrap().push(params);
+            let line = if confirme {
+                json!({"result": {"done": true, "message": "Arrêt demandé pour le sous-agent « Tests »."}})
+            } else {
+                json!({"result": {"done": false, "confirm_needed": true,
+                    "target": {"machine": "pc", "chat_id": "c1",
+                               "subagent": {"tool_id": "toolu_1"}},
+                    "question": "Arrêter le sous-agent 1 « Tests » de la session GliGli sur lp-work ?"}})
+            };
+            Ok(CommandOutput {
+                success: true,
+                stdout: format!("{line}\n"),
+            })
+        }
+        fn spawn_detached(&self, _: &str, _: &[String]) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct Banc {
+        brain: Brain,
+        pont: Arc<FauxPont>,
+        _dir: tempfile::TempDir,
+    }
+
+    fn banc() -> Banc {
+        let dir = tempfile::tempdir().unwrap();
+        let pont = Arc::new(FauxPont::default());
+        let skill = CcsSkill::new(&["ssh".into(), "vps".into()], pont.clone());
+        let llm = Arc::new(FakeLlm::new(Ok(Understanding::Answer("x".into()))));
+        let brain = Brain::new(
+            vec![Arc::new(skill)],
+            llm.clone(),
+            llm,
+            Arc::new(ModeStore::new(dir.path().join("mode"), Mode::Local)),
+        )
+        .with_clock(Arc::new(ManualClock::new()));
+        Banc {
+            brain,
+            pont,
+            _dir: dir,
+        }
+    }
+
+    impl Banc {
+        async fn demande(&self) {
+            let a = self
+                .brain
+                .answer_text(
+                    &EarId::new("test"),
+                    "tue le premier sous-agent de la session GliGli",
+                )
+                .await;
+            assert_eq!(
+                a.reply.speech,
+                "Arrêter le sous-agent 1 « Tests » de la session GliGli sur lp-work, Monsieur ?"
+            );
+            assert!(a.awaits_reply);
+            assert_eq!(
+                self.ordres(),
+                vec![json!({"session": "gligli", "index": 1})],
+                "simulation seulement"
+            );
+        }
+
+        async fn reponse(&self, text: &str) -> Answer {
+            self.brain
+                .answer_follow_up(
+                    &EarId::new("test"),
+                    text,
+                    self.brain.now(),
+                    ReplyVoice::Verified,
+                )
+                .await
+        }
+
+        fn ordres(&self) -> Vec<serde_json::Value> {
+            self.pont.ordres.lock().unwrap().clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn oui_arrete_le_sous_agent_vise() {
+        let b = banc();
+        b.demande().await;
+        let a = b.reponse("oui").await;
+        assert_eq!(a.reply.outcome, Outcome::Done);
+        assert_eq!(
+            a.reply.speech,
+            "Arrêt demandé pour le sous-agent « Tests »."
+        );
+        assert_eq!(
+            b.ordres()[1],
+            json!({"session": "c1", "machine": "pc", "tool_id": "toolu_1", "confirme": true})
+        );
+    }
+
+    #[tokio::test]
+    async fn toute_autre_reponse_annule() {
+        for reponse in ["non", "peut-être", "attends"] {
+            let b = banc();
+            b.demande().await;
+            b.reponse(reponse).await;
+            assert!(!b.brain.has_pending(), "{reponse}");
+            assert_eq!(b.ordres().len(), 1, "{reponse} : rien de confirmé");
+        }
+    }
+
+    #[tokio::test]
+    async fn texte_tape_ne_simule_meme_pas() {
+        let b = banc();
+        let r = b
+            .brain
+            .handle_text("tue le premier sous-agent de la session GliGli")
+            .await;
+        assert!(r.speech.contains("à voix haute"), "{}", r.speech);
+        assert!(b.ordres().is_empty());
     }
 }

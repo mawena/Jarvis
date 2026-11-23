@@ -8,6 +8,17 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ### Ajouté
 
+- **Pilotage du réseau CCS à la voix** (`[ccs]`) : état du réseau, sessions qui tournent,
+  sous-agents d'une session, arrêt d'un sous-agent ou d'une session, lancement d'une session sur
+  un projet, par les méthodes `jarvis.*` du pont CCS. Outils `ccs_*` proposés à l'IA locale et à
+  Claude d'appoint, phrases courantes reconnues sans IA. Les arrêts sont simulés d'abord : Jarvis
+  lit la question de CCS et n'agit, sur la cible exacte, qu'après un « oui » ; toute autre réponse
+  annule.
+- **Pont `scripts/jarvis-pont-ccs`** : ordre `jarvis <méthode> <hex>` (méthodes `jarvis.*`
+  publiques seulement), relayé au socket Unix du pont CCS de l'utilisateur.
+- **`Skill::prepare`** : une compétence peut préparer une action risquée (simulation côté
+  service, question rendue, arguments exacts du « oui ») avant que le cerveau ne la pose.
+
 - **Cerveau Claude d'appoint** (`[cerveau]`) : en mode local, les phrases non sensibles vont à
   Claude par `claude -p` et le compte de CCS (`ccs meilleur` sur limite) ; fichiers personnels,
   secrets, santé, argent et micros de la maison sans ordre explicite restent en local. Repli

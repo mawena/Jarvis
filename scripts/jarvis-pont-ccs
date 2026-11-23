@@ -10,8 +10,12 @@ Ordres (une ligne JSON en réponse, {"erreur": "…"} en cas de refus) :
   ajouter <projet> <consigne hex>  ajoute un grand chantier à la file de CCS
   voir <id>                        état d'un chantier (et résumé de Claude à la fin)
   annuler <id>                     annule un chantier en attente ou en cours
+  jarvis <méthode> <params hex>    appelle une méthode `jarvis.*` du pont CCS de cet utilisateur
+                                   (docs/protocole-ccs-jarvis.md) ; répond la réponse CCS telle
+                                   quelle : {"result": …} ou {"error": {"code", "message"}}
 
-Seuls les chantiers ajoutés par ce pont peuvent être vus ou annulés.
+Seuls les chantiers ajoutés par ce pont peuvent être vus ou annulés. Seules les méthodes
+`jarvis.*` publiques (état, sessions, sous-agents, arrêts, lancement) passent par `jarvis`.
 
 Réglages (variables d'environnement, ou fichier ~/.config/jarvis-pont/pont.env en KEY=valeur) :
   JARVIS_PONT_RACINES  dossiers des projets, séparés par « : »
@@ -19,10 +23,16 @@ Réglages (variables d'environnement, ou fichier ~/.config/jarvis-pont/pont.env 
   JARVIS_PONT_DROITS   droits de Claude : lecture, modifications ou tout (défaut : tout)
   JARVIS_PONT_MODELE   modèle (défaut : celui de CCS)
   JARVIS_PONT_QUAND    quota, nuit ou HH:MM (défaut : quota)
+  JARVIS_PONT_SOCKET   socket du pont CCS (défaut : /run/ccs/bridge/<utilisateur>/bridge.sock,
+                       sa clé « key » à côté ; sans clé, hello sans ticket : pont local)
 """
 
+import getpass
+import hashlib
+import hmac
 import json
 import os
+import socket
 import re
 import shlex
 import subprocess
@@ -37,6 +47,12 @@ NAME_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 ID_RE = re.compile(r"^[0-9]{1,9}$")
 HEX_RE = re.compile(r"^(?:[0-9a-f]{2}){1,8000}$")
 MAX_INSTRUCTION = 4000
+PILOT_METHODS = ("jarvis.state", "jarvis.sessions", "jarvis.subagents", "jarvis.stop_subagent",
+                 "jarvis.stop_session", "jarvis.start_session")
+PARAMS_HEX_RE = re.compile(r"^(?:[0-9a-f]{2}){0,16000}$")
+# Chaque machine a 20 s pour répondre au serveur CCS, toutes en même temps.
+PILOT_TIMEOUT = 35
+PILOT_SESSION_HASH = "jarvis-pont"
 SUMMARY_MAX = 1500
 
 BRIEF = """Grand chantier demandé à voix haute par Charles, par Jarvis :
@@ -188,6 +204,60 @@ def cancel(task_id):
     return {"id": task_id, "etat": t.get("state", "cancelled")}
 
 
+def bridge_socket(conf):
+    raw = conf.get("JARVIS_PONT_SOCKET")
+    if raw:
+        return Path(os.path.expanduser(raw))
+    return Path("/run/ccs/bridge") / getpass.getuser() / "bridge.sock"
+
+
+def _reply(stream, wanted):
+    """Réponse à la requête `wanted`, les événements poussés entre-temps sont sautés."""
+    while True:
+        line = stream.readline()
+        if not line:
+            raise ConnectionError("pont CCS fermé")
+        msg = json.loads(line)
+        if msg.get("id") == wanted:
+            return msg
+
+
+def pilot(conf, method, hexa):
+    """Appelle `method` sur le pont CCS local (socket Unix, une ligne JSON par message)."""
+    if method not in PILOT_METHODS:
+        return {"erreur": f"méthode refusée : {method[:40]}"}
+    if not PARAMS_HEX_RE.match(hexa):
+        return {"erreur": "paramètres invalides"}
+    try:
+        params = json.loads(bytes.fromhex(hexa).decode("utf-8")) if hexa else {}
+    except (UnicodeDecodeError, ValueError):
+        return {"erreur": "paramètres invalides"}
+    if not isinstance(params, dict):
+        return {"erreur": "paramètres invalides"}
+    path = bridge_socket(conf)
+    hello = {"protocol": 1}
+    key = path.with_name("key")
+    if key.is_file():
+        hello["session_hash"] = PILOT_SESSION_HASH
+        hello["ticket"] = hmac.new(key.read_bytes(), PILOT_SESSION_HASH.encode(),
+                                   hashlib.sha256).hexdigest()
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.settimeout(PILOT_TIMEOUT)
+            s.connect(str(path))
+            stream = s.makefile("rwb")
+            for mid, (m, p) in enumerate((("hello", hello), (method, params)), start=1):
+                stream.write(json.dumps({"id": mid, "method": m, "params": p},
+                                        ensure_ascii=False).encode() + b"\n")
+                stream.flush()
+                msg = _reply(stream, mid)
+                if m == "hello" and "error" in msg:
+                    return {"erreur": "le pont CCS a refusé la connexion"}
+            return {k: msg[k] for k in ("result", "error") if k in msg}
+    except (OSError, ValueError) as e:
+        return {"erreur": f"pont CCS injoignable : {type(e).__name__}"}
+
+
 def main():
     raw = os.environ.get("SSH_ORIGINAL_COMMAND")
     words = shlex.split(raw) if raw is not None else sys.argv[1:]
@@ -201,8 +271,10 @@ def main():
             out = show(task_id)
         case ["annuler", task_id]:
             out = cancel(task_id)
+        case ["jarvis", method, hexa]:
+            out = pilot(conf, method, hexa)
         case _:
-            out = {"erreur": "ordre inconnu (projets, ajouter, voir, annuler)"}
+            out = {"erreur": "ordre inconnu (projets, ajouter, voir, annuler, jarvis)"}
     print(json.dumps(out, ensure_ascii=False))
     return 0
 

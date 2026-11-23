@@ -23,6 +23,7 @@ Claude.
 | PC | « mets le PC en veille », « éteins le PC » (toujours confirmé par un « oui ») |
 | Agent de code | « finis les tests du projet Jarvis » : lance Claude Code en arrière-plan sur une branche à part ([docs/agent.md](docs/agent.md)) |
 | Grands chantiers | « grand chantier sur CCS : ajoute X » : une fonction entière confiée à Claude sur le serveur, par la file de tâches de CCS ([docs/chantiers.md](docs/chantiers.md)) |
+| Réseau CCS | « état du réseau », « quelles sessions tournent ? », « tue le premier sous-agent de la session GliGli », « lance une session sur le projet X » (arrêts et lancement confirmés par un « oui ») |
 | Conversation | « annule », « répète », questions libres répondues par l'IA |
 | Écoute | « coupe l'écoute », « réactive l'écoute », « passe en mode local / en ligne » |
 
@@ -154,6 +155,42 @@ Les mots sont comparés mot pour mot, sans accents ni majuscules (« pin » ne t
 (`SensitiveCategories`). Le mode « en ligne » (`jarvis mode en-ligne`, API Claude) n'est pas
 concerné : tout y part à Claude.
 
+## Piloter le réseau CCS
+
+Jarvis voit et pilote tout le réseau CCS (machines, sessions Claude, sous-agents) par les
+méthodes `jarvis.*` du pont CCS du serveur ([docs/protocole-ccs-jarvis.md](docs/protocole-ccs-jarvis.md)).
+Il passe par le même chemin que les grands chantiers : la commande SSH limitée au pont
+`scripts/jarvis-pont-ccs`, avec l'ordre `jarvis <méthode> <paramètres en hexadécimal>` ; le pont
+parle au socket Unix du pont CCS de l'utilisateur (ticket HMAC tiré de sa clé). Aucun jeton
+supplémentaire n'est gardé sur la machine de Jarvis.
+
+```toml
+[ccs]
+enabled = true
+# Vide : la commande de [chantier].
+command = []
+```
+
+| Outil | Phrase reconnue sans IA | Méthode CCS |
+|---|---|---|
+| `ccs_etat` | « état du réseau », « état de CCS » | `jarvis.state` |
+| `ccs_sessions` | « quelles sessions tournent ? », « liste les sessions » | `jarvis.sessions` |
+| `ccs_sous_agents` | « quels sous-agents tournent dans la session GliGli ? » | `jarvis.subagents` |
+| `ccs_arreter_sous_agent` | « tue le premier sous-agent de la session GliGli », « arrête le dernier sous-agent de GliGli » | `jarvis.stop_subagent` |
+| `ccs_arreter_session` | « arrête la session GliGli », « ferme la session GliGli » | `jarvis.stop_session` |
+| `ccs_lancer_session` | « lance une session sur le projet Jarvis (sur la machine lp-work) » | `jarvis.start_session` |
+
+Les six outils sont aussi proposés à l'IA locale et à Claude d'appoint. Les deux arrêts et le
+lancement sont risqués : pour un arrêt, Jarvis appelle d'abord CCS **sans** `confirme` (rien
+n'est fait), lit la question rendue (« Arrêter le sous-agent 1 « Lire le code » de la session
+GliGli sur lp-work ? ») et garde la cible exacte (`chat_id`, machine, `tool_id`). Seul un « oui »
+de Charles au tour suivant exécute, sur cette cible ; toute autre réponse annule. Une cible
+introuvable ou ambiguë est dite tout de suite (« Lequel ? »), sans question. Comme toute action
+risquée, rien de tout cela ne marche en texte tapé.
+
+Côté serveur : copier la nouvelle version de `scripts/jarvis-pont-ccs` à la place de l'ancienne
+(même clé SSH) ; CCS doit avoir les méthodes `jarvis.*`.
+
 ## Personnes et rôles
 
 Jarvis peut connaître plusieurs personnes, chacune avec un rôle (la liste de ce qu'elle peut
@@ -186,6 +223,7 @@ Le détail est dans [docs/recherche.md](docs/recherche.md) et
 - [docs/personnes.md](docs/personnes.md) : personnes, rôles et droits, qui parle, `people.toml`.
 - [docs/agent.md](docs/agent.md) : l'agent de code (Claude Code lancé par la voix, dans un worktree à part).
 - [docs/chantiers.md](docs/chantiers.md) : les grands chantiers, confiés par la voix à CCS sur le serveur (pont SSH restreint).
+- [docs/protocole-ccs-jarvis.md](docs/protocole-ccs-jarvis.md) : méthodes `jarvis.*` du pont CCS (pilotage du réseau).
 - [docs/recherche.md](docs/recherche.md) : recherche sur internet et vidéos.
 - [docs/ia-locale.md](docs/ia-locale.md) : choix du modèle local et de Whisper, mesures.
 - [docs/essais/](docs/essais/README.md) : fiches d'essai en conditions réelles.
