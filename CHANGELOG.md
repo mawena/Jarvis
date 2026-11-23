@@ -8,6 +8,11 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ### Ajouté
 
+- **Cerveau Claude d'appoint** (`[cerveau]`) : en mode local, les phrases non sensibles vont à
+  Claude par `claude -p` et le compte de CCS (`ccs meilleur` sur limite) ; fichiers personnels,
+  secrets, santé, argent et micros de la maison sans ordre explicite restent en local. Repli
+  automatique et silencieux sur l'IA locale. Réglage `routage = "auto" | "local" | "claude"`.
+
 - **Oreilles hors de la maison** : `scripts/jarvis-tunnel` relie une oreille Linux au cerveau
   par le tunnel Ricochet (TLS de bout en bout) ; oreille « bouton » (`wake` avec `score = 2.0`)
   pour les applis de CCS. Plan : [docs/oreilles-ccs.md](docs/oreilles-ccs.md).

@@ -93,6 +93,7 @@ fn copy_err(e: &LlmError) -> LlmError {
         LlmError::BadResponse(m) => LlmError::BadResponse(m.clone()),
         LlmError::MissingApiKey(m) => LlmError::MissingApiKey(m.clone()),
         LlmError::Rejected(m) => LlmError::Rejected(m.clone()),
+        LlmError::Quota(m) => LlmError::Quota(m.clone()),
     }
 }
 

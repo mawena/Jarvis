@@ -222,3 +222,19 @@ est suivi dans la ROADMAP de CCS (phase 36).*
 - [x] 16.7 Bouton Jarvis dans les applis CCS iPhone et Android (Codemagic), raccourci Siri ; installées le 22/11, serveur CCS en préversion 1.1.90
 - [ ] 16.8 Oreille Android : l'oreille existante (mot d'éveil) passe par CCS hors du Wi-Fi ; APK sur Codemagic
 - [ ] 16.9 Essais réels : Pixel en 4G, iPhone, une autre machine (Charles)
+
+## Phase 17 : cerveau Claude d'appoint
+*Branche `feature/cerveau-routage`. Demande de Charles : Claude répond quand la demande n'est pas
+sensible ; l'IA locale sinon, ou quand plus aucun compte Claude n'a de quota.*
+
+- [x] 17.1 Réglage `[cerveau] routage = "auto" | "local" | "claude"` (défaut `auto`)
+- [x] 17.2 Règle de sensibilité configurable : catégories (fichiers personnels, secrets, santé, argent), mots ajoutés, micros de la maison sans ordre explicite, voix non reconnue ; dans le doute, local
+- [x] 17.3 Claude par `claude -p` (aucun outil de Claude Code, réponse JSON structurée) ; sur limite, `ccs meilleur` puis un second essai
+- [x] 17.4 Repli automatique sur l'IA locale sans erreur (quota, réseau, délai), pause de Claude après un échec
+- [x] 17.5 Tests unitaires (règle, CLI simulée, repli, pause, cerveau)
+- [x] 17.6 README (configuration du routage), CHANGELOG
+- [ ] 17.7 Charles tranche la règle de sensibilité (micros de la maison, catégories, `oreilles_hors_maison`)
+- [ ] 17.8 Sur laptop-maison : `claude` et `ccs` installés et connectés pour l'utilisateur du service, essai réel (latence, repli)
+- [ ] 17.9 Résumés de recherche par Claude d'appoint (aujourd'hui : IA locale en mode local)
+- [ ] 17.10 `jarvisctl doctor` : ligne « cerveau d'appoint » (CLI trouvée, compte CCS)
+- [ ] 17.11 `scripts/check.sh` au vert, feature terminée dans `develop`

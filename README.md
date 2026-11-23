@@ -3,8 +3,9 @@
 Assistant vocal personnel en Rust, en français. On lui parle (« Jarvis, mets la musique en
 pause », « Jarvis, cherche la météo de demain à Lomé »), il comprend, agit sur le PC et répond
 à voix haute. L'écoute, la reconnaissance de la parole, la vérification de la voix et la voix de
-Jarvis tournent **entièrement sur le PC**. Seul le mode « en ligne », choisi exprès, envoie le
-texte des phrases à Claude.
+Jarvis tournent **entièrement sur le PC**. Seuls le mode « en ligne », choisi exprès, et le **cerveau
+d'appoint** (phrases non sensibles, voir plus bas) envoient le texte de certaines phrases à
+Claude.
 
 > **État :** préversion `0.4.0` sur `main`, utilisée au quotidien sur le PC de son auteur ; le
 > développement continue sur `develop`. La `1.0.0` viendra après la mise en service et les essais
@@ -108,6 +109,51 @@ Le détail est dans [docs/installation.md](docs/installation.md).
 Les réglages sont dans `~/.config/jarvis/config.toml` (cerveau) et `~/.config/jarvis/ear.toml`
 (oreille). Toutes les clés sont facultatives.
 
+## Cerveau Claude d'appoint
+
+En mode local, chaque phrase qui passe par l'IA est aiguillée : **Claude** si elle n'est pas
+sensible, **l'IA locale** sinon. Claude est appelé par la CLI `claude -p` avec le compte actif
+de CCS ; sur une limite atteinte, `ccs meilleur` bascule sur le compte le plus disponible et
+l'appel est refait une fois. Si Claude échoue (plus de quota sur aucun compte, réseau, délai,
+CLI absente), la phrase part à l'IA locale **sans message d'erreur**, et Claude n'est plus
+essayé pendant une pause (10 min sans quota, 1 min après un autre échec).
+
+Reste en local, en `auto` (dans le doute, local) :
+- un mot d'une catégorie sensible : **fichiers personnels**, **secrets** (mots de passe, clés,
+  jetons…), **santé**, **argent** ;
+- une phrase dite à **un micro de la maison** sans ordre explicite (« demande à Claude… ») ;
+- une voix non reconnue, une phrase vide.
+
+Le texte tapé (`jarvis say`) et les oreilles déclarées hors de la maison vont à Claude s'ils ne
+sont pas sensibles. Une phrase sensible ne part jamais à Claude, même avec « demande à Claude ».
+
+```toml
+# ~/.config/jarvis/config.toml
+[cerveau]
+routage = "auto"              # "local" : toujours l'IA locale ; "claude" : toujours Claude
+micros_maison = true          # voix des micros de la maison : local sauf ordre explicite
+ordres_explicites = ["demande a claude", "avec claude"]   # sans accents
+oreilles_hors_maison = []     # identifiants d'oreilles qui ne sont pas des micros de la maison
+mots_sensibles = ["projet zebre"]   # mots ajoutés ; « medic* » : préfixe
+
+[cerveau.categories]          # remplace la catégorie du même nom ; [] la désactive
+argent = []
+famille = ["ma soeur", "cousin*"]
+
+[cerveau.claude]
+commande = "claude"           # CLI Claude Code
+modele = "haiku"
+delai_s = 20                  # au-delà : repli local
+ccs = "ccs"                   # "" : pas de bascule de compte
+pause_sans_quota_min = 10
+pause_apres_echec_s = 60
+```
+
+Les mots sont comparés mot pour mot, sans accents ni majuscules (« pin » ne touche pas
+« sapin »). La liste complète des mots par défaut est dans `crates/jarvis-brain/src/config.rs`
+(`SensitiveCategories`). Le mode « en ligne » (`jarvis mode en-ligne`, API Claude) n'est pas
+concerné : tout y part à Claude.
+
 ## Personnes et rôles
 
 Jarvis peut connaître plusieurs personnes, chacune avec un rôle (la liste de ce qu'elle peut
@@ -123,7 +169,7 @@ clavier (`jarvis person …`, `jarvis role …`). Le détail est dans
 | | Mode local | Mode en ligne |
 | --- | --- | --- |
 | Son du micro | jamais (une autre oreille l'envoie au PC après « Jarvis », chiffré, sur le réseau local) | pareil |
-| Texte des phrases | reste sur le PC | phrases non reconnues par les raccourcis → Claude |
+| Texte des phrases | reste sur le PC, sauf phrases non sensibles → Claude d'appoint (`[cerveau]`) | phrases non reconnues par les raccourcis → Claude |
 | Recherche | SearXNG local, qui relaie la requête aux moteurs | pareil, résumé par Claude |
 
 Le détail est dans [docs/recherche.md](docs/recherche.md) et

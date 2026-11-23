@@ -1,6 +1,8 @@
 //! Compréhension d'une phrase par un modèle de langage (local ou en ligne).
 
+pub mod appoint;
 pub mod claude;
+pub mod claude_cli;
 pub mod lmstudio;
 pub mod ollama;
 pub mod router;
@@ -9,7 +11,9 @@ use crate::intent::Intent;
 use jarvis_skills::ToolSpec;
 use jarvis_skills::search::Source;
 
+pub use appoint::Appoint;
 pub use claude::ClaudeBackend;
+pub use claude_cli::ClaudeCliBackend;
 pub use lmstudio::LmStudioBackend;
 pub use ollama::OllamaBackend;
 
@@ -30,6 +34,9 @@ pub enum LlmError {
     Rejected(String),
     #[error("clé d'API absente (variable d'environnement {0})")]
     MissingApiKey(String),
+    /// Plus de quota sur le compte Claude (ni, après `ccs meilleur`, sur un autre).
+    #[error("quota Claude épuisé : {0}")]
+    Quota(String),
 }
 
 #[async_trait::async_trait]

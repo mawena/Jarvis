@@ -5,7 +5,8 @@
 
 use crate::fastpath::{BrainCommand, match_brain_command, match_confirmation, match_fast};
 use crate::intent::Intent;
-use crate::llm::{LlmBackend, LlmError, Understanding};
+use crate::llm::appoint::{Cible, Origine};
+use crate::llm::{Appoint, LlmBackend, LlmError, Understanding};
 use crate::metrics;
 use crate::mode_store::ModeStore;
 use crate::people::{Access, People, Speaker, Trust};
@@ -123,6 +124,9 @@ pub struct Brain {
     persona: Persona,
     /// Annuaire des personnes et des rôles (phase 8).
     people: Arc<People>,
+    /// Cerveau d'appoint (phase 17) : en mode local, Claude pour les phrases non
+    /// sensibles. `None` : toujours l'IA locale.
+    appoint: Option<Arc<Appoint>>,
 }
 
 /// Résultat d'une intention.
@@ -152,7 +156,14 @@ impl Brain {
             last_speech: Mutex::new(None),
             persona: Persona::default(),
             people: Arc::new(People::admin_only("Charles")),
+            appoint: None,
         }
+    }
+
+    /// Cerveau d'appoint : en mode local, Claude pour les phrases non sensibles.
+    pub fn with_appoint(mut self, appoint: Arc<Appoint>) -> Brain {
+        self.appoint = Some(appoint);
+        self
     }
 
     /// Annuaire des personnes et des rôles (défaut : Charles `admin` seul).
@@ -335,17 +346,30 @@ impl Brain {
             };
         }
         let mode = self.modes.get();
-        let (backend, route) = match mode {
-            Mode::Local => (&self.local, "local"),
-            Mode::Online => (&self.online, "online"),
-        };
-        debug!(route, "compréhension par IA");
-        metrics::note_route(match mode {
-            Mode::Local => Route::IaLocale,
-            Mode::Online => Route::IaEnLigne,
-        });
         let tools = self.tools();
-        match backend.understand(text, &tools).await {
+        let (understood, route) = match (mode, &self.appoint) {
+            (Mode::Local, Some(appoint)) => {
+                let origine = match source {
+                    Source::Voice { ear, who } => Origine::Voix {
+                        oreille: ear.as_str(),
+                        reconnue: who.trust == Trust::Recognized,
+                    },
+                    Source::Typed { .. } => Origine::Tape,
+                };
+                let (r, cible) = appoint
+                    .comprendre(text, origine, &tools, self.local.as_ref())
+                    .await;
+                match cible {
+                    Cible::Claude => (r, Route::IaEnLigne),
+                    Cible::Local(_) => (r, Route::IaLocale),
+                }
+            }
+            (Mode::Local, None) => (self.local.understand(text, &tools).await, Route::IaLocale),
+            (Mode::Online, _) => (self.online.understand(text, &tools).await, Route::IaEnLigne),
+        };
+        debug!(?route, "compréhension par IA");
+        metrics::note_route(route);
+        match understood {
             Ok(Understanding::Tool(intent)) => {
                 // Outil réservé aux raccourcis (agent de code) : jamais lancé par l'IA,
                 // même si elle en invente le nom.
@@ -753,6 +777,7 @@ fn llm_error_phrase(e: &LlmError, mode: Mode) -> String {
             format!("Il manque la clé de l'IA en ligne, à définir dans {var}.")
         }
         (LlmError::BadResponse(_), _) => BAD_RESPONSE.into(),
+        (LlmError::Quota(_), _) => ONLINE_UNREACHABLE.into(),
     }
 }
 
@@ -845,6 +870,55 @@ mod tests {
         let r = s.brain.handle_text("quel temps fait-il").await;
         assert_eq!(r.speech, "Il fait beau.");
         assert_eq!((s.local.calls(), s.online.calls()), (1, 0));
+    }
+
+    /// Cerveau avec Claude d'appoint (faux) : tapé → Claude ; micro de la maison et
+    /// phrase sensible → local ; Claude en échec → réponse locale, sans erreur.
+    #[tokio::test]
+    async fn appoint_claude_et_repli_local() {
+        let s = setup(answer("du local"), answer("y"));
+        let claude = Arc::new(answer("de Claude"));
+        let brain = Brain::new(
+            vec![s.skill.clone()],
+            s.local.clone(),
+            s.online.clone(),
+            Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
+        )
+        .with_appoint(Arc::new(Appoint::new(
+            &crate::config::CerveauConfig::default(),
+            claude.clone(),
+        )));
+        assert_eq!(
+            brain.handle_text("raconte une blague").await.speech,
+            "de Claude"
+        );
+        assert_eq!(
+            brain.handle_text("quel est mon mot de passe").await.speech,
+            "du local"
+        );
+        let a = brain.answer_voice(&ear(), "raconte une blague", true).await;
+        assert_eq!(a.reply.speech, "du local");
+        assert_eq!(
+            (claude.calls(), s.local.calls(), s.online.calls()),
+            (1, 2, 0)
+        );
+
+        let en_panne = Arc::new(FakeLlm::new(Err(LlmError::Quota("épuisé".into()))));
+        let brain = Brain::new(
+            vec![s.skill.clone()],
+            s.local.clone(),
+            s.online.clone(),
+            Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
+        )
+        .with_appoint(Arc::new(Appoint::new(
+            &crate::config::CerveauConfig::default(),
+            en_panne.clone(),
+        )));
+        assert_eq!(
+            brain.handle_text("raconte une blague").await.speech,
+            "du local"
+        );
+        assert_eq!(en_panne.calls(), 1);
     }
 
     #[tokio::test]
