@@ -123,6 +123,26 @@ brain_address = "192.168.1.20"     # hôte[:port], port 7341 par défaut
 
 Elle est essayée avant les adresses déjà connues et la découverte mDNS.
 
+## Hors de la maison : par Ricochet ou par CCS
+
+Une oreille Linux hors du Wi-Fi rejoint le cerveau par le tunnel Ricochet (le port 7341 doit
+figurer dans `[tunnel] ports` de l'agent Ricochet de la machine du cerveau) :
+
+```bash
+scripts/jarvis-tunnel installer laptop-maison     # service utilisateur, 127.0.0.1:17341
+jarvis-ear pair --code 482913 --address 127.0.0.1:17341   # code de `jarvis pair` ; comparez l'empreinte
+```
+
+puis `brain_address = "127.0.0.1:17341"` dans `ear.toml`. Le TLS reste de bout en bout : le
+relais ne voit que des octets chiffrés.
+
+Les téléphones et la version web passent par CCS (page ou bouton « Jarvis », relais
+`/api/jarvis/oreille` de ccs-serveur) : voir [oreilles-ccs.md](oreilles-ccs.md).
+
+**Oreille « bouton »** (sans mot d'éveil) : elle envoie `wake` avec `score = 2.0`,
+`level_db = 0`, `muted = false`, puis le son et `listen_end`. Une vraie oreille a un score sous
+1 : l'appui gagne toujours l'arbitrage. La voix reste vérifiée par le cerveau.
+
 ## Profil de test
 
 Une seconde oreille sur la même machine (un autre micro) ou une oreille d'essai :

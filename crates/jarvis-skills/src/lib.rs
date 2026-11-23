@@ -4,6 +4,7 @@ pub mod agent;
 pub mod announce;
 pub mod apps;
 pub mod browser;
+pub mod ccs;
 pub mod chantier;
 pub mod power;
 pub mod runner;
@@ -103,6 +104,19 @@ pub struct Shortcut {
     pub args: serde_json::Value,
 }
 
+/// Préparation d'une action risquée, avant la question (voir [`Skill::prepare`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Preparation {
+    /// Poser `question` (`None` : question générale du cerveau) ; sur « oui »,
+    /// exécuter l'outil avec `args`, qui peuvent préciser la cible vue en préparant.
+    Ask {
+        question: Option<String>,
+        args: serde_json::Value,
+    },
+    /// Rien à confirmer (cible introuvable, ambiguë…) : réponse dite tout de suite.
+    Answer(Reply),
+}
+
 #[async_trait::async_trait]
 pub trait Skill: Send + Sync {
     /// Tous les outils, appelables par les raccourcis et l'IA.
@@ -125,6 +139,20 @@ pub trait Skill: Send + Sync {
     /// `None` : le cerveau formule une question générale.
     fn confirmation(&self, _tool: &str, _args: &serde_json::Value) -> Option<String> {
         None
+    }
+
+    /// Avant la question d'un outil `Risky` : par défaut, [`Self::confirmation`] et
+    /// les mêmes arguments. Une compétence peut y interroger un service (simulation
+    /// sans effet) pour lire la question qu'il formule et figer la cible exacte.
+    async fn prepare(
+        &self,
+        tool: &str,
+        args: serde_json::Value,
+    ) -> Result<Preparation, SkillError> {
+        Ok(Preparation::Ask {
+            question: self.confirmation(tool, &args),
+            args,
+        })
     }
 
     /// Délai propre à un outil. `None` : le délai commun du cerveau (5 s).
