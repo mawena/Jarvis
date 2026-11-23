@@ -141,7 +141,9 @@ Les téléphones et la version web passent par CCS (page ou bouton « Jarvis »,
 
 **Oreille « bouton »** (sans mot d'éveil) : elle envoie `wake` avec `score = 2.0`,
 `level_db = 0`, `muted = false`, puis le son et `listen_end`. Une vraie oreille a un score sous
-1 : l'appui gagne toujours l'arbitrage. La voix reste vérifiée par le cerveau.
+1 : l'appui gagne toujours l'arbitrage (avant le niveau, le biais et la coupure de l'oreille)
+et il est élu dès son arrivée, sans attendre la fin de la fenêtre ; deux appuis simultanés :
+le premier arrivé. La voix reste vérifiée par le cerveau.
 
 ## Profil de test
 

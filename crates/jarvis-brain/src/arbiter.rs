@@ -4,12 +4,23 @@
 //! Une phrase à la fois : le premier réveil ouvre une fenêtre ; à sa fin, une seule
 //! oreille est élue, les autres reçoivent `Stop`. La phrase reste en cours jusqu'à
 //! [`Arbiter::finished`] (ou son abandon) : tout autre réveil reçoit `Stop`.
+//!
+//! Plusieurs oreilles qui entendent la même phrase (téléphones, PC, micros de la maison)
+//! ne la font donc traiter qu'une fois : une seule réponse, sur l'oreille élue.
+//!
+//! Une oreille « bouton » (`score` ≥ [`MANUAL_SCORE`]) gagne toujours, quels que soient
+//! le niveau, le biais ou la coupure des autres ; elle n'attend pas la fin de la fenêtre :
+//! personne ne peut plus la battre, la décision tombe à son arrivée.
 
 use jarvis_protocol::EarId;
 use std::time::{Duration, Instant};
 
 /// Fenêtre de regroupement des réveils, comptée à l'arrivée au cerveau.
 pub const DEFAULT_WINDOW: Duration = Duration::from_millis(300);
+
+/// Score d'un réveil « bouton » (appui volontaire, sans mot d'éveil). Un vrai mot
+/// d'éveil a un score sous 1.
+pub const MANUAL_SCORE: f32 = 2.0;
 
 /// Réveil d'une oreille, avec ses réglages (`ears.toml`).
 #[derive(Debug, Clone, PartialEq)]
@@ -27,6 +38,11 @@ pub struct WakeReport {
 pub fn rank(report: &WakeReport) -> f32 {
     let level = ((report.level_db + 60.0) / 60.0).clamp(0.0, 1.0);
     report.score + 0.5 * level + report.bias
+}
+
+/// Réveil par un bouton (score ≥ [`MANUAL_SCORE`] ; NaN : non).
+pub fn is_manual(report: &WakeReport) -> bool {
+    report.score >= MANUAL_SCORE
 }
 
 /// Rang comparable : une valeur invalide (NaN) ne gagne jamais.
@@ -96,6 +112,8 @@ impl Arbiter {
     pub fn wake(&mut self, report: WakeReport, now: Instant) -> Vec<ArbiterAction> {
         // Fenêtre échue mais pas encore tranchée : la décision tombe d'abord.
         let mut actions = self.tick(now);
+        let manual = is_manual(&report);
+        let mut joined = false;
         match &mut self.state {
             State::Idle => {
                 let ducked = report.duck;
@@ -107,6 +125,7 @@ impl Arbiter {
                     candidates: vec![report],
                     ducked,
                 };
+                joined = true;
             }
             State::Window {
                 candidates, ducked, ..
@@ -122,6 +141,7 @@ impl Arbiter {
                         actions.push(ArbiterAction::Duck);
                     }
                     candidates.push(report);
+                    joined = true;
                 }
             }
             State::Phrase { ear, utterance, .. } => {
@@ -129,6 +149,13 @@ impl Arbiter {
                     actions.push(stop(report));
                 }
             }
+        }
+        // Bouton entré dans la fenêtre : il gagne de toute façon, inutile d'attendre.
+        if manual && joined {
+            if let State::Window { deadline, .. } = &mut self.state {
+                *deadline = now;
+            }
+            actions.extend(self.tick(now));
         }
         actions
     }
@@ -153,13 +180,16 @@ impl Arbiter {
         else {
             unreachable!()
         };
-        // Ouverte avant coupée, puis meilleur rang, puis première arrivée.
+        // Bouton avant mot d'éveil, ouverte avant coupée, puis meilleur rang, puis
+        // première arrivée.
         let mut best = 0;
         for (i, c) in candidates.iter().enumerate().skip(1) {
             let b = &candidates[best];
-            let better = match (c.muted, b.muted) {
-                (false, true) => true,
-                (true, false) => false,
+            let better = match (is_manual(c), is_manual(b), c.muted, b.muted) {
+                (true, false, _, _) => true,
+                (false, true, _, _) => false,
+                (_, _, false, true) => true,
+                (_, _, true, false) => false,
                 _ => sort_key(c) > sort_key(b),
             };
             if better {
@@ -624,6 +654,104 @@ mod tests {
             a.wake(report("b", 1, 0.9), t0 + ms(400)),
             vec![elect("a", 1), stop("b", 1)]
         );
+    }
+
+    /// Réveil « bouton », comme l'envoient les oreilles CCS (iPhone, web, bureau).
+    fn button(ear: &str, utterance: u32) -> WakeReport {
+        WakeReport {
+            level_db: 0.0,
+            ..report(ear, utterance, MANUAL_SCORE)
+        }
+    }
+
+    #[test]
+    fn deux_eveils_proches_un_seul_gagnant() {
+        // Pixel et PC entendent la même phrase à 250 ms d'écart : un seul traitement.
+        let mut a = arbiter();
+        let t0 = Instant::now();
+        a.wake(report("pixel", 1, 0.7), t0);
+        assert!(a.wake(report("pc", 4, 0.9), t0 + ms(250)).is_empty());
+        assert_eq!(
+            a.tick(t0 + DEFAULT_WINDOW),
+            vec![elect("pc", 4), stop("pixel", 1)]
+        );
+        assert_eq!(a.ended(&id("pixel"), 1), EndVerdict::Ignore);
+        assert_eq!(a.ended(&id("pc"), 4), EndVerdict::Process);
+        // Écho tardif de la même phrase (relais lent) pendant le traitement : arrêté.
+        assert_eq!(
+            a.wake(report("iphone", 2, 0.95), t0 + ms(600)),
+            vec![stop("iphone", 2)]
+        );
+    }
+
+    #[test]
+    fn eveils_eloignes_deux_traitements() {
+        let mut a = arbiter();
+        let t0 = Instant::now();
+        a.wake(report("pixel", 1, 0.7), t0);
+        assert_eq!(a.tick(t0 + DEFAULT_WINDOW), vec![elect("pixel", 1)]);
+        assert_eq!(a.ended(&id("pixel"), 1), EndVerdict::Process);
+        a.finished(&id("pixel"), 1);
+        // Phrase suivante, sur une autre oreille, bien après : traitée aussi.
+        let t1 = t0 + ms(5000);
+        assert_eq!(a.wake(report("pc", 3, 0.6), t1), vec![ArbiterAction::Duck]);
+        assert_eq!(a.tick(t1 + DEFAULT_WINDOW), vec![elect("pc", 3)]);
+        assert_eq!(a.ended(&id("pc"), 3), EndVerdict::Process);
+    }
+
+    #[test]
+    fn bouton_gagne_toujours() {
+        // Contre un mot d'éveil sûr, fort, très favorisé, arrivé avant.
+        let mut favori = report("pc", 1, 0.99);
+        favori.level_db = 0.0;
+        favori.bias = 5.0;
+        let mut a = arbiter();
+        let t0 = Instant::now();
+        a.wake(favori, t0);
+        // Décision sans attendre la fin de la fenêtre.
+        assert_eq!(
+            a.wake(button("iphone", 2), t0 + ms(100)),
+            vec![elect("iphone", 2), stop("pc", 1)]
+        );
+        assert_eq!(a.deadline(), None);
+        // Même sur une oreille coupée.
+        let mut coupe = button("web", 1);
+        coupe.muted = true;
+        let mut a = arbiter();
+        a.wake(report("pixel", 1, 0.9), t0);
+        assert_eq!(
+            a.wake(coupe, t0 + ms(10)),
+            vec![elect("web", 1), stop("pixel", 1)]
+        );
+    }
+
+    #[test]
+    fn bouton_seul_elu_sans_attendre() {
+        let mut a = arbiter();
+        let t0 = Instant::now();
+        assert_eq!(
+            a.wake(button("iphone", 1), t0),
+            vec![ArbiterAction::Duck, elect("iphone", 1)]
+        );
+        // Le mot d'éveil d'une autre oreille, juste après : arrêté.
+        assert_eq!(
+            a.wake(report("pixel", 1, 0.9), t0 + ms(50)),
+            vec![stop("pixel", 1)]
+        );
+        // Deux boutons : le premier arrivé.
+        assert_eq!(a.wake(button("web", 1), t0 + ms(60)), vec![stop("web", 1)]);
+        assert_eq!(a.ended(&id("iphone"), 1), EndVerdict::Process);
+    }
+
+    #[test]
+    fn fenetre_reglable() {
+        let mut a = Arbiter::new(ms(400));
+        let t0 = Instant::now();
+        a.wake(report("a", 1, 0.5), t0);
+        assert_eq!(a.deadline(), Some(t0 + ms(400)));
+        // À 350 ms : encore dans la fenêtre (elle serait close à 300 ms par défaut).
+        assert!(a.wake(report("b", 1, 0.9), t0 + ms(350)).is_empty());
+        assert_eq!(a.tick(t0 + ms(400)), vec![elect("b", 1), stop("a", 1)]);
     }
 
     #[test]

@@ -53,7 +53,10 @@ Garde-fous :
   joue les bips et la voix de Jarvis, et affiche une icône avec un menu (couper l'écoute, mode,
   statut). Sur le PC, et sur toute machine Linux de la maison appairée par `jarvis pair`
   (réseau local, TLS) ; téléphone Android (voir [docs/android.md](docs/android.md)), iPhone prévu. Si plusieurs oreilles entendent
-  « Jarvis », une seule répond.
+  « Jarvis » (téléphones, PC, micros de la maison), la phrase n'est traitée qu'une fois et une
+  seule répond : la plus sûre et la plus proche, sur une fenêtre réglable (`[network]
+  arbiter_window_ms`, 300 ms par défaut) ; un appui sur le bouton Jarvis gagne toujours, sans
+  attendre. Les autres s'arrêtent sans rien dire.
 - **Le cerveau** transcrit la phrase (Whisper), vérifie la voix (CAM++), comprend la demande
   et exécute la bonne compétence. Il répond avec une voix française (Piper).
 - **Aucun son n'est enregistré sur le disque** : seule une empreinte de la voix est gardée,
