@@ -119,9 +119,10 @@ l'appel est refait une fois. Si Claude échoue (plus de quota sur aucun compte, 
 CLI absente), la phrase part à l'IA locale **sans message d'erreur**, et Claude n'est plus
 essayé pendant une pause (10 min sans quota, 1 min après un autre échec).
 
-Reste en local, en `auto` (dans le doute, local) :
+Par défaut `routage = "local"` : tout reste sur l'IA locale (choix de Charles, 23/11/2026, tant que
+la règle n'est pas validée en vrai). Avec `routage = "auto"`, reste en local (dans le doute, local) :
 - un mot d'une catégorie sensible : **fichiers personnels**, **secrets** (mots de passe, clés,
-  jetons…), **santé**, **argent** ;
+  jetons…), **santé**, **argent**, **famille**, **adresse** (et position) ;
 - une phrase dite à **un micro de la maison** sans ordre explicite (« demande à Claude… ») ;
 - une voix non reconnue, une phrase vide.
 
@@ -131,7 +132,7 @@ sont pas sensibles. Une phrase sensible ne part jamais à Claude, même avec « 
 ```toml
 # ~/.config/jarvis/config.toml
 [cerveau]
-routage = "auto"              # "local" : toujours l'IA locale ; "claude" : toujours Claude
+routage = "local"             # défaut ; "auto" : règle ci-dessus ; "claude" : toujours Claude
 micros_maison = true          # voix des micros de la maison : local sauf ordre explicite
 ordres_explicites = ["demande a claude", "avec claude"]   # sans accents
 oreilles_hors_maison = []     # identifiants d'oreilles qui ne sont pas des micros de la maison

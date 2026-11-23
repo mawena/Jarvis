@@ -143,7 +143,7 @@ pub struct CerveauConfig {
 impl Default for CerveauConfig {
     fn default() -> Self {
         Self {
-            routage: Routage::Auto,
+            routage: Routage::Local,
             micros_maison: true,
             ordres_explicites: [
                 "demande a claude",
@@ -178,13 +178,16 @@ impl Default for SensitiveCategories {
                 cat(&[
                     "fichier*",
                     "dossier*",
-                    "document*",
+                    "mes documents",
+                    "mon document",
+                    "documents perso*",
                     "photo",
                     "photos",
                     "repertoire*",
                     "pdf",
                     "telechargement*",
-                    "disque*",
+                    "mon disque",
+                    "disque dur",
                     "mes notes",
                     "journal intime",
                     "mes mails",
@@ -194,7 +197,8 @@ impl Default for SensitiveCategories {
                     "mes sms",
                     "courriel*",
                     "mes contacts",
-                    "historique",
+                    "mon historique",
+                    "historique de navigation",
                 ]),
             ),
             (
@@ -254,7 +258,8 @@ impl Default for SensitiveCategories {
                     "vaccin*",
                     "analyse de sang",
                     "diagnostic*",
-                    "tension",
+                    "ma tension",
+                    "tension arterielle",
                 ]),
             ),
             (
@@ -269,7 +274,10 @@ impl Default for SensitiveCategories {
                     "impot*",
                     "dette*",
                     "credit*",
-                    "pret",
+                    "mon pret",
+                    "un pret",
+                    "pret bancaire",
+                    "pret immobilier",
                     "emprunt*",
                     "virement*",
                     "carte bleue",
@@ -288,6 +296,48 @@ impl Default for SensitiveCategories {
                     "mobile money",
                     "epargne*",
                     "loyer*",
+                ]),
+            ),
+            (
+                "famille".to_string(),
+                cat(&[
+                    "ma femme",
+                    "mon mari",
+                    "ma copine",
+                    "mon copain",
+                    "ma compagne",
+                    "mon compagnon",
+                    "mes enfants",
+                    "mon fils",
+                    "ma fille",
+                    "mes parents",
+                    "ma mere",
+                    "mon pere",
+                    "ma maman",
+                    "mon papa",
+                    "mon frere",
+                    "ma soeur",
+                    "ma famille",
+                    "mon couple",
+                    "dispute*",
+                ]),
+            ),
+            (
+                "adresse".to_string(),
+                cat(&[
+                    "mon adresse",
+                    "notre adresse",
+                    "adresse de la maison",
+                    "ou j habite",
+                    "ou on habite",
+                    "chez moi",
+                    "code postal",
+                    "mon numero",
+                    "numero de telephone",
+                    "ma position",
+                    "localisation",
+                    "geolocalisation",
+                    "gps",
                 ]),
             ),
         ]))
@@ -650,12 +700,12 @@ mod tests {
     }
 
     #[test]
-    fn cerveau_par_defaut_auto_et_prudent() {
+    fn cerveau_par_defaut_local_et_prudent() {
         let c = Config::default().cerveau;
-        assert_eq!(c.routage, Routage::Auto);
+        assert_eq!(c.routage, Routage::Local);
         assert!(c.micros_maison);
         assert!(c.oreilles_hors_maison.is_empty());
-        for cat in ["fichiers_personnels", "secrets", "sante", "argent"] {
+        for cat in ["fichiers_personnels", "secrets", "sante", "argent", "famille", "adresse"] {
             assert!(!c.categories.0[cat].is_empty(), "{cat}");
         }
         assert_eq!(c.claude.commande, "claude");
