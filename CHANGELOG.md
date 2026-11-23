@@ -6,6 +6,8 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.6.0] - 2026-11-23
+
 ### Ajouté
 
 - **Pilotage du réseau CCS à la voix** (`[ccs]`) : état du réseau, sessions qui tournent,
@@ -22,7 +24,8 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 - **Cerveau Claude d'appoint** (`[cerveau]`) : en mode local, les phrases non sensibles vont à
   Claude par `claude -p` et le compte de CCS (`ccs meilleur` sur limite) ; fichiers personnels,
   secrets, santé, argent et micros de la maison sans ordre explicite restent en local. Repli
-  automatique et silencieux sur l'IA locale. Réglage `routage = "auto" | "local" | "claude"`.
+  automatique et silencieux sur l'IA locale. Réglage `routage = "auto" | "local" | "claude"`, `local` par défaut
+  tant que la règle n'est pas validée ; catégories famille et adresse, mots trop larges resserrés.
 
 - **Oreilles hors de la maison** : `scripts/jarvis-tunnel` relie une oreille Linux au cerveau
   par le tunnel Ricochet (TLS de bout en bout) ; oreille « bouton » (`wake` avec `score = 2.0`)
