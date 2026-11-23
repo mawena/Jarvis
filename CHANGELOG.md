@@ -6,6 +6,8 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.6.1] - 2026-11-23
+
 ### Modifié
 
 - **Oreilles multiples** : le bouton Jarvis (`wake` avec `score ≥ 2.0`, applis CCS) gagne
