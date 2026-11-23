@@ -256,8 +256,13 @@ mod tests {
     use super::*;
     use crate::testing::FakeLlm;
 
+    /// Les tests de la règle partent du mode `auto` (le défaut est `local`).
+    fn auto() -> CerveauConfig {
+        CerveauConfig { routage: Routage::Auto, ..CerveauConfig::default() }
+    }
+
     fn regle(f: impl FnOnce(&mut CerveauConfig)) -> Regle {
-        let mut cfg = CerveauConfig::default();
+        let mut cfg = auto();
         f(&mut cfg);
         Regle::new(&cfg)
     }
@@ -397,7 +402,7 @@ mod tests {
     async fn claude_repond() {
         let claude = Arc::new(reponse("de Claude"));
         let local = reponse("du local");
-        let a = Appoint::new(&CerveauConfig::default(), claude.clone());
+        let a = Appoint::new(&auto(), claude.clone());
         let (r, c) = a.comprendre("raconte une blague", TAPE, &[], &local).await;
         assert_eq!(r.unwrap(), Understanding::Answer("de Claude".into()));
         assert_eq!(c, Cible::Claude);
@@ -408,7 +413,7 @@ mod tests {
     async fn sensible_ne_va_jamais_a_claude() {
         let claude = Arc::new(reponse("de Claude"));
         let local = reponse("du local");
-        let a = Appoint::new(&CerveauConfig::default(), claude.clone());
+        let a = Appoint::new(&auto(), claude.clone());
         let (r, _) = a.comprendre("mon mot de passe", TAPE, &[], &local).await;
         assert_eq!(r.unwrap(), Understanding::Answer("du local".into()));
         assert_eq!((claude.calls(), local.calls()), (0, 1));
@@ -418,7 +423,7 @@ mod tests {
     async fn repli_sans_erreur_puis_pause_quota() {
         let claude = Arc::new(FakeLlm::new(Err(LlmError::Quota("épuisé".into()))));
         let local = reponse("du local");
-        let a = Appoint::new(&CerveauConfig::default(), claude.clone());
+        let a = Appoint::new(&auto(), claude.clone());
         let (r, c) = a.comprendre("raconte une blague", TAPE, &[], &local).await;
         // L'utilisateur reçoit la réponse locale, pas l'erreur.
         assert_eq!(r.unwrap(), Understanding::Answer("du local".into()));
@@ -437,7 +442,7 @@ mod tests {
     async fn echec_reseau_pause_courte() {
         let claude = Arc::new(FakeLlm::new(Err(LlmError::Unreachable("délai".into()))));
         let local = reponse("du local");
-        let a = Appoint::new(&CerveauConfig::default(), claude.clone());
+        let a = Appoint::new(&auto(), claude.clone());
         let (r, _) = a.comprendre("raconte une blague", TAPE, &[], &local).await;
         assert!(r.is_ok());
         tokio::time::advance(Duration::from_secs(61)).await;
@@ -449,7 +454,7 @@ mod tests {
     async fn erreur_locale_remonte_telle_quelle() {
         let claude = Arc::new(FakeLlm::new(Err(LlmError::Unreachable("x".into()))));
         let local = FakeLlm::new(Err(LlmError::Unreachable("LM Studio".into())));
-        let a = Appoint::new(&CerveauConfig::default(), claude);
+        let a = Appoint::new(&auto(), claude);
         let (r, c) = a.comprendre("raconte une blague", TAPE, &[], &local).await;
         assert!(matches!(r, Err(LlmError::Unreachable(_))));
         assert!(matches!(c, Cible::Local(_)));

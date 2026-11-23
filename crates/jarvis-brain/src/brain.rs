@@ -885,7 +885,7 @@ mod tests {
             Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
         )
         .with_appoint(Arc::new(Appoint::new(
-            &crate::config::CerveauConfig::default(),
+            &crate::config::CerveauConfig { routage: crate::config::Routage::Auto, ..crate::config::CerveauConfig::default() },
             claude.clone(),
         )));
         assert_eq!(
@@ -911,7 +911,7 @@ mod tests {
             Arc::new(ModeStore::new(s.path.clone(), Mode::Local)),
         )
         .with_appoint(Arc::new(Appoint::new(
-            &crate::config::CerveauConfig::default(),
+            &crate::config::CerveauConfig { routage: crate::config::Routage::Auto, ..crate::config::CerveauConfig::default() },
             en_panne.clone(),
         )));
         assert_eq!(
