@@ -21,7 +21,9 @@ lui parler, **même hors de la maison**, sans ouvrir de port sur la box.
 Une oreille envoie `Hello` (jeton d'appairage), puis pour chaque phrase `Wake`, des trames
 `MicAudio` (PCM 16 kHz, 16 bits), `ListenEnd`, et reçoit `Response` (texte et voix de Jarvis en
 PCM). Une oreille « bouton » envoie un `Wake` marqué **manuel** : le cerveau ne l'arbitre pas
-contre les autres oreilles par le score et n'exige pas de mot d'éveil. La voix reste vérifiée sur
+contre les autres oreilles par le score (il gagne toujours, élu dès son arrivée) et n'exige pas
+de mot d'éveil. Les autres oreilles qui ont entendu la même phrase reçoivent `Stop` : une seule
+réponse. La voix reste vérifiée sur
 le cerveau (empreinte CAM++) : les droits (agent, chantiers) suivent la personne reconnue.
 
 ## Le relais d'oreilles dans ccs-serveur

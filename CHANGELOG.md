@@ -6,6 +6,15 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+### Modifié
+
+- **Oreilles multiples** : le bouton Jarvis (`wake` avec `score ≥ 2.0`, applis CCS) gagne
+  toujours l'arbitrage, même contre une oreille favorisée par son biais ou quand l'oreille est
+  coupée, et il est élu dès son arrivée, sans attendre la fin de la fenêtre. Une phrase
+  entendue par plusieurs oreilles (iPhone, Pixel, PC, micros de la maison) reste traitée une
+  seule fois, les autres reçoivent `Stop` ; fenêtre réglable par `[network]
+  arbiter_window_ms` (300 ms par défaut).
+
 ## [0.6.0] - 2026-11-23
 
 ### Ajouté
