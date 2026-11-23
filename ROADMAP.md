@@ -222,6 +222,7 @@ est suivi dans la ROADMAP de CCS (phase 36).*
 - [x] 16.7 Bouton Jarvis dans les applis CCS iPhone et Android (Codemagic), raccourci Siri ; installées le 22/11, serveur CCS en préversion 1.1.90
 - [ ] 16.8 Oreille Android : l'oreille existante (mot d'éveil) passe par CCS hors du Wi-Fi ; APK sur Codemagic
 - [ ] 16.9 Essais réels : Pixel en 4G, iPhone, une autre machine (Charles)
+- [x] 16.10 Dédoublonnage des oreilles (ROADMAP CCS 40.3) : une phrase entendue par plusieurs oreilles n'est traitée qu'une fois ; le bouton (`score ≥ 2.0`) gagne toujours (avant le biais, le niveau et la coupure) et est élu dès son arrivée ; fenêtre `[network] arbiter_window_ms` ; tests de l'arbitre
 
 ## Phase 17 : cerveau Claude d'appoint
 *Branche `feature/cerveau-routage`. Demande de Charles : Claude répond quand la demande n'est pas
