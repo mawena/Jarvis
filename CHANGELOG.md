@@ -6,6 +6,31 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.6.0] - 2026-11-23
+
+### Ajouté
+
+- **Pilotage du réseau CCS à la voix** (`[ccs]`) : état du réseau, sessions qui tournent,
+  sous-agents d'une session, arrêt d'un sous-agent ou d'une session, lancement d'une session sur
+  un projet, par les méthodes `jarvis.*` du pont CCS. Outils `ccs_*` proposés à l'IA locale et à
+  Claude d'appoint, phrases courantes reconnues sans IA. Les arrêts sont simulés d'abord : Jarvis
+  lit la question de CCS et n'agit, sur la cible exacte, qu'après un « oui » ; toute autre réponse
+  annule.
+- **Pont `scripts/jarvis-pont-ccs`** : ordre `jarvis <méthode> <hex>` (méthodes `jarvis.*`
+  publiques seulement), relayé au socket Unix du pont CCS de l'utilisateur.
+- **`Skill::prepare`** : une compétence peut préparer une action risquée (simulation côté
+  service, question rendue, arguments exacts du « oui ») avant que le cerveau ne la pose.
+
+- **Cerveau Claude d'appoint** (`[cerveau]`) : en mode local, les phrases non sensibles vont à
+  Claude par `claude -p` et le compte de CCS (`ccs meilleur` sur limite) ; fichiers personnels,
+  secrets, santé, argent et micros de la maison sans ordre explicite restent en local. Repli
+  automatique et silencieux sur l'IA locale. Réglage `routage = "auto" | "local" | "claude"`, `local` par défaut
+  tant que la règle n'est pas validée ; catégories famille et adresse, mots trop larges resserrés.
+
+- **Oreilles hors de la maison** : `scripts/jarvis-tunnel` relie une oreille Linux au cerveau
+  par le tunnel Ricochet (TLS de bout en bout) ; oreille « bouton » (`wake` avec `score = 2.0`)
+  pour les applis de CCS. Plan : [docs/oreilles-ccs.md](docs/oreilles-ccs.md).
+
 ## [0.5.0] - 2026-11-22
 
 ### Ajouté

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Relie une oreille Linux au cerveau de Jarvis par le tunnel Ricochet, hors du Wi-Fi de la maison.
+#
+#   jarvis-tunnel installer [machine] [port local]   service utilisateur jarvis-tunnel (défaut : laptop-maison, 17341)
+#   jarvis-tunnel retirer                            arrête et supprime le service
+#   jarvis-tunnel lancer [machine] [port local]      au premier plan (essai)
+#
+# Le service écoute sur 127.0.0.1:<port local> et ouvre, pour chaque connexion,
+# `ricochet-agent tunnel <machine> --port 7341`. Le TLS reste de bout en bout entre l'oreille et
+# le cerveau (empreinte épinglée) : le relais Ricochet ne voit que des octets chiffrés.
+# Ensuite, dans ~/.config/jarvis/ear.toml : brain_address = "127.0.0.1:17341".
+set -euo pipefail
+
+MACHINE="${2:-laptop-maison}"
+LOCAL_PORT="${3:-17341}"
+UNIT="$HOME/.config/systemd/user/jarvis-tunnel.service"
+
+need() { command -v "$1" >/dev/null || { echo "$1 manquant : $2" >&2; exit 1; }; }
+
+check() {
+    need socat "sudo apt install socat"
+    need ricochet-agent "installez ricochet-agent (https://apt.mawena.cloud/)"
+    [[ -r "$HOME/.config/ricochet/client.toml" ]] \
+        || { echo "~/.config/ricochet/client.toml manquant (relais et jeton des tunnels)" >&2; exit 1; }
+    [[ "$LOCAL_PORT" =~ ^[0-9]{2,5}$ ]] || { echo "port local invalide" >&2; exit 1; }
+    [[ "$MACHINE" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || { echo "machine invalide" >&2; exit 1; }
+}
+
+command_line() {
+    printf 'socat TCP-LISTEN:%s,bind=127.0.0.1,reuseaddr,fork EXEC:"%s tunnel %s --port 7341"' \
+        "$LOCAL_PORT" "$(command -v ricochet-agent)" "$MACHINE"
+}
+
+case "${1:-}" in
+    installer)
+        check
+        mkdir -p "$(dirname "$UNIT")"
+        cat >"$UNIT" <<EOF
+[Unit]
+Description=Tunnel Ricochet vers le cerveau de Jarvis ($MACHINE)
+
+[Service]
+ExecStart=$(command_line)
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+EOF
+        systemctl --user daemon-reload
+        systemctl --user enable --now jarvis-tunnel.service
+        echo "Tunnel prêt sur 127.0.0.1:$LOCAL_PORT → $MACHINE:7341."
+        echo "Dans ~/.config/jarvis/ear.toml : brain_address = \"127.0.0.1:$LOCAL_PORT\""
+        echo "Appairage : jarvis pair sur $MACHINE, puis jarvis-ear pair --code <code> --address 127.0.0.1:$LOCAL_PORT"
+        ;;
+    retirer)
+        systemctl --user disable --now jarvis-tunnel.service 2>/dev/null || true
+        rm -f "$UNIT"
+        systemctl --user daemon-reload
+        echo "Tunnel retiré."
+        ;;
+    lancer)
+        check
+        eval "exec $(command_line)"
+        ;;
+    *)
+        sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+        exit 1
+        ;;
+esac

@@ -511,7 +511,11 @@ fn launch(phrase: &str) -> Option<Intent> {
         return None;
     }
     // « Lance un grand chantier sur… » : compétence des chantiers, jamais une appli.
-    if rest.split(' ').any(|w| w == "chantier" || w == "chantiers") {
+    // « Lance une session sur… » : pilotage de CCS, jamais une appli non plus.
+    if rest
+        .split(' ')
+        .any(|w| matches!(w, "chantier" | "chantiers" | "session" | "sessions"))
+    {
         return None;
     }
     if rest == "la video"
@@ -926,6 +930,9 @@ mod tests {
         }
         assert_eq!(match_fast("ouvre le"), None);
         assert_eq!(match_fast("lance moi la"), None);
+        // Pilotage de CCS : jamais une appli.
+        assert_eq!(match_fast("lance une session sur le projet Jarvis"), None);
+        assert_eq!(match_fast("ouvre une nouvelle session dans GliGli"), None);
     }
 
     #[test]

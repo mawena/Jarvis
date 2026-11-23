@@ -1,11 +1,11 @@
 use anyhow::Context;
 use jarvis_brain::announce::AnnouncementBoard;
 use jarvis_brain::brain::{Brain, SystemClock};
-use jarvis_brain::config::{Config, LocalLlmConfig};
+use jarvis_brain::config::{Config, LocalLlmConfig, Routage};
 use jarvis_brain::ducking::{Ducker, WpctlDucker};
 use jarvis_brain::ears::EarRegistry;
 use jarvis_brain::listen::{ListenService, NoTranscriber};
-use jarvis_brain::llm::{ClaudeBackend, LlmBackend, local_backend};
+use jarvis_brain::llm::{Appoint, ClaudeBackend, ClaudeCliBackend, LlmBackend, local_backend};
 use jarvis_brain::logging::init_logging;
 use jarvis_brain::metrics::MetricsLog;
 use jarvis_brain::mode_store::ModeStore;
@@ -83,6 +83,25 @@ async fn main() -> anyhow::Result<()> {
             "grands chantiers prêts (CCS sur le serveur)"
         );
         skills.push(Arc::new(chantier));
+    }
+    // Pilotage du réseau CCS : avant l'agent, pour que « …sous-agent… » lui revienne.
+    if config.ccs.enabled {
+        let command = if config.ccs.command.is_empty() {
+            &config.chantier.command
+        } else {
+            &config.ccs.command
+        };
+        if command.is_empty() {
+            warn!(
+                "[ccs] activé sans commande (ni celle de [chantier]) : pilotage de CCS désactivé"
+            );
+        } else {
+            info!("pilotage du réseau CCS prêt");
+            skills.push(Arc::new(jarvis_skills::ccs::CcsSkill::new(
+                command,
+                runner.clone(),
+            )));
+        }
     }
     let mut agent_tasks = None;
     match Registry::open(tasks_dir()) {
@@ -195,12 +214,21 @@ async fn main() -> anyhow::Result<()> {
         None => prune_people(&people),
     }
 
-    let brain = Arc::new(
-        Brain::new(skills, local.clone(), online, modes)
-            .with_local_model(config.local.model.clone())
-            .with_people(people)
-            .with_persona(Persona::from(&config)),
-    );
+    let brain = Brain::new(skills, local.clone(), online, modes)
+        .with_local_model(config.local.model.clone())
+        .with_people(people)
+        .with_persona(Persona::from(&config));
+    // Cerveau d'appoint (phase 17) : Claude par `claude -p` et CCS, sauf `routage = "local"`.
+    let brain = Arc::new(if config.cerveau.routage == Routage::Local {
+        brain
+    } else {
+        info!(routage = ?config.cerveau.routage, "cerveau d'appoint : Claude par CCS");
+        let claude = Arc::new(ClaudeCliBackend::systeme(
+            &config.cerveau.claude,
+            &config.address,
+        ));
+        brain.with_appoint(Arc::new(Appoint::new(&config.cerveau, claude)))
+    });
     let _ = warm_tools.set(brain.tools());
     if brain.mode() == Mode::Local {
         let tools = brain.tools();

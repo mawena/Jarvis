@@ -1,6 +1,7 @@
 use anyhow::Context;
 use jarvis_protocol::Mode;
 use jarvis_skills::agent::AgentSettings;
+use jarvis_skills::ccs::CcsSettings;
 use jarvis_skills::chantier::ChantierSettings;
 use jarvis_skills::search::SearchSettings;
 use serde::{Deserialize, Deserializer};
@@ -29,10 +30,15 @@ pub struct Config {
     pub agent: AgentSettings,
     /// Grands chantiers confiés à CCS sur le serveur (section `[chantier]`).
     pub chantier: ChantierSettings,
+    /// Pilotage du réseau CCS à la voix (section `[ccs]`).
+    pub ccs: CcsSettings,
     /// Oreilles en réseau (section `[network]`).
     pub network: NetworkConfig,
     /// Personnes et rôles (section `[people]`).
     pub people: PeopleConfig,
+    /// Cerveau d'appoint : Claude (par CCS) pour les demandes non sensibles (section
+    /// `[cerveau]`).
+    pub cerveau: CerveauConfig,
 }
 
 /// Annuaire des personnes : réglages à la création du fichier.
@@ -92,8 +98,290 @@ impl Default for Config {
             search: SearchSettings::default(),
             agent: AgentSettings::default(),
             chantier: ChantierSettings::default(),
+            ccs: CcsSettings::default(),
             network: NetworkConfig::default(),
             people: PeopleConfig::default(),
+            cerveau: CerveauConfig::default(),
+        }
+    }
+}
+
+/// Qui comprend les phrases en mode local (section `[cerveau] routage`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Routage {
+    /// Toujours l'IA locale (comportement d'avant la phase 17).
+    Local,
+    /// Toujours Claude, quelle que soit la demande ; repli local s'il échoue.
+    Claude,
+    /// Claude pour les demandes non sensibles, l'IA locale sinon (défaut).
+    Auto,
+}
+
+/// Section `[cerveau]` : routage entre l'IA locale et Claude d'appoint.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct CerveauConfig {
+    pub routage: Routage,
+    /// Les phrases dites aux micros de la maison restent en local, sauf ordre explicite.
+    pub micros_maison: bool,
+    /// Débuts ou morceaux de phrase qui demandent Claude exprès (« demande à Claude… »).
+    /// Écrits sans accents ni ponctuation : ils sont comparés au texte normalisé.
+    pub ordres_explicites: Vec<String>,
+    /// Identifiants d'oreilles qui ne sont pas des micros de la maison (téléphone par
+    /// CCS hors du Wi-Fi…). Vide : toutes les oreilles sont des micros de la maison.
+    pub oreilles_hors_maison: Vec<String>,
+    /// Mots sensibles ajoutés aux catégories (même syntaxe : `*` final = préfixe).
+    pub mots_sensibles: Vec<String>,
+    /// Catégories de mots sensibles. Une catégorie du fichier remplace celle du même nom ;
+    /// une liste vide la désactive ; un nouveau nom en ajoute une.
+    pub categories: SensitiveCategories,
+    /// Appel de Claude par la CLI `claude -p` (section `[cerveau.claude]`).
+    pub claude: ClaudeCliConfig,
+}
+
+impl Default for CerveauConfig {
+    fn default() -> Self {
+        Self {
+            routage: Routage::Local,
+            micros_maison: true,
+            ordres_explicites: [
+                "demande a claude",
+                "demande le a claude",
+                "demande ca a claude",
+                "avec claude",
+                "par claude",
+                "via claude",
+                "claude dis moi",
+                "claude reponds",
+            ]
+            .map(String::from)
+            .to_vec(),
+            oreilles_hors_maison: Vec::new(),
+            mots_sensibles: Vec::new(),
+            categories: SensitiveCategories::default(),
+            claude: ClaudeCliConfig::default(),
+        }
+    }
+}
+
+/// Catégories de mots sensibles, par nom. `*` en fin de mot : préfixe (« medic* »).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SensitiveCategories(pub std::collections::BTreeMap<String, Vec<String>>);
+
+impl Default for SensitiveCategories {
+    fn default() -> Self {
+        let cat = |mots: &[&str]| mots.iter().map(|m| m.to_string()).collect::<Vec<_>>();
+        Self(std::collections::BTreeMap::from([
+            (
+                "fichiers_personnels".to_string(),
+                cat(&[
+                    "fichier*",
+                    "dossier*",
+                    "mes documents",
+                    "mon document",
+                    "documents perso*",
+                    "photo",
+                    "photos",
+                    "repertoire*",
+                    "pdf",
+                    "telechargement*",
+                    "mon disque",
+                    "disque dur",
+                    "mes notes",
+                    "journal intime",
+                    "mes mails",
+                    "mes emails",
+                    "mes e mails",
+                    "mes messages",
+                    "mes sms",
+                    "courriel*",
+                    "mes contacts",
+                    "mon historique",
+                    "historique de navigation",
+                ]),
+            ),
+            (
+                "secrets".to_string(),
+                cat(&[
+                    "mot de passe",
+                    "mots de passe",
+                    "mdp",
+                    "password*",
+                    "passphrase*",
+                    "secret*",
+                    "cle",
+                    "cles",
+                    "clef*",
+                    "code pin",
+                    "pin",
+                    "code secret",
+                    "jeton*",
+                    "token*",
+                    "identifiant*",
+                    "ssh",
+                    "gpg",
+                    "api",
+                    "otp",
+                    "2fa",
+                    "code de verification",
+                    "code de confirmation",
+                ]),
+            ),
+            (
+                "sante".to_string(),
+                cat(&[
+                    "sante",
+                    "medecin*",
+                    "medic*",
+                    "docteur*",
+                    "maladie*",
+                    "malade*",
+                    "symptome*",
+                    "douleur*",
+                    "mal au",
+                    "mal a la",
+                    "mal aux",
+                    "hopital*",
+                    "urgence*",
+                    "ordonnance*",
+                    "traitement*",
+                    "pharmacie*",
+                    "enceinte",
+                    "grossesse",
+                    "depression",
+                    "anxiete",
+                    "therapie*",
+                    "therapeute*",
+                    "psy*",
+                    "allergi*",
+                    "vaccin*",
+                    "analyse de sang",
+                    "diagnostic*",
+                    "ma tension",
+                    "tension arterielle",
+                ]),
+            ),
+            (
+                "argent".to_string(),
+                cat(&[
+                    "argent",
+                    "banque*",
+                    "bancaire*",
+                    "compte en banque",
+                    "salaire*",
+                    "facture*",
+                    "impot*",
+                    "dette*",
+                    "credit*",
+                    "mon pret",
+                    "un pret",
+                    "pret bancaire",
+                    "pret immobilier",
+                    "emprunt*",
+                    "virement*",
+                    "carte bleue",
+                    "carte bancaire",
+                    "iban",
+                    "rib",
+                    "budget*",
+                    "depense*",
+                    "paiement*",
+                    "payer",
+                    "paye",
+                    "euro",
+                    "euros",
+                    "fcfa",
+                    "dollar*",
+                    "mobile money",
+                    "epargne*",
+                    "loyer*",
+                ]),
+            ),
+            (
+                "famille".to_string(),
+                cat(&[
+                    "ma femme",
+                    "mon mari",
+                    "ma copine",
+                    "mon copain",
+                    "ma compagne",
+                    "mon compagnon",
+                    "mes enfants",
+                    "mon fils",
+                    "ma fille",
+                    "mes parents",
+                    "ma mere",
+                    "mon pere",
+                    "ma maman",
+                    "mon papa",
+                    "mon frere",
+                    "ma soeur",
+                    "ma famille",
+                    "mon couple",
+                    "dispute*",
+                ]),
+            ),
+            (
+                "adresse".to_string(),
+                cat(&[
+                    "mon adresse",
+                    "notre adresse",
+                    "adresse de la maison",
+                    "ou j habite",
+                    "ou on habite",
+                    "chez moi",
+                    "code postal",
+                    "mon numero",
+                    "numero de telephone",
+                    "ma position",
+                    "localisation",
+                    "geolocalisation",
+                    "gps",
+                ]),
+            ),
+        ]))
+    }
+}
+
+impl<'de> Deserialize<'de> for SensitiveCategories {
+    /// Les catégories de l'utilisateur remplacent ou complètent celles par défaut.
+    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = HashMap::<String, Vec<String>>::deserialize(d)?;
+        let mut cats = SensitiveCategories::default();
+        cats.0.extend(raw);
+        Ok(cats)
+    }
+}
+
+/// Section `[cerveau.claude]` : Claude par la CLI `claude -p`, compte choisi par CCS.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct ClaudeCliConfig {
+    /// Programme `claude` (Claude Code).
+    pub commande: String,
+    /// Modèle passé à `--model` (alias accepté : « haiku », « sonnet »).
+    pub modele: String,
+    /// Délai maximal d'une réponse de Claude, en secondes ; au-delà, repli local.
+    pub delai_s: u64,
+    /// Programme `ccs` : sur une limite atteinte, `ccs meilleur` bascule sur le compte le
+    /// plus disponible, puis Claude est rappelé une fois. Vide : pas de bascule.
+    pub ccs: String,
+    /// Plus aucun compte n'a de quota : Claude n'est plus essayé pendant ce temps.
+    pub pause_sans_quota_min: u64,
+    /// Autre échec (réseau, délai, réponse illisible) : pause plus courte.
+    pub pause_apres_echec_s: u64,
+}
+
+impl Default for ClaudeCliConfig {
+    fn default() -> Self {
+        Self {
+            commande: "claude".to_string(),
+            modele: "haiku".to_string(),
+            delai_s: 20,
+            ccs: "ccs".to_string(),
+            pause_sans_quota_min: 10,
+            pause_apres_echec_s: 60,
         }
     }
 }
@@ -400,6 +688,54 @@ mod tests {
         assert_eq!(c.online.model, "claude-haiku-5-5");
         assert_eq!(c.address, "Monsieur");
         assert!(!c.inhibit_sleep_on_ac);
+    }
+
+    #[test]
+    fn section_ccs_lue_et_desactivee_par_defaut() {
+        assert!(!Config::default().ccs.enabled);
+        let (_d, p) = write("[ccs]\nenabled = true\ncommand = [\"ssh\", \"vps\"]\n");
+        let c = Config::load(&p).unwrap().ccs;
+        assert!(c.enabled);
+        assert_eq!(c.command, ["ssh", "vps"]);
+    }
+
+    #[test]
+    fn cerveau_par_defaut_local_et_prudent() {
+        let c = Config::default().cerveau;
+        assert_eq!(c.routage, Routage::Local);
+        assert!(c.micros_maison);
+        assert!(c.oreilles_hors_maison.is_empty());
+        for cat in ["fichiers_personnels", "secrets", "sante", "argent", "famille", "adresse"] {
+            assert!(!c.categories.0[cat].is_empty(), "{cat}");
+        }
+        assert_eq!(c.claude.commande, "claude");
+        assert_eq!(c.claude.ccs, "ccs");
+    }
+
+    #[test]
+    fn cerveau_lu_et_categories_fusionnees() {
+        let (_d, p) = write(
+            "[cerveau]\nroutage = \"local\"\nmicros_maison = false\n\
+             oreilles_hors_maison = [\"pixel\"]\n\
+             [cerveau.categories]\nargent = []\nfamille = [\"ma femme\"]\n\
+             [cerveau.claude]\nmodele = \"sonnet\"\nccs = \"\"\n",
+        );
+        let c = Config::load(&p).unwrap().cerveau;
+        assert_eq!(c.routage, Routage::Local);
+        assert!(!c.micros_maison);
+        assert_eq!(c.oreilles_hors_maison, vec!["pixel".to_string()]);
+        assert!(c.categories.0["argent"].is_empty());
+        assert_eq!(c.categories.0["famille"], vec!["ma femme".to_string()]);
+        assert!(!c.categories.0["sante"].is_empty());
+        assert_eq!(c.claude.modele, "sonnet");
+        assert!(c.claude.ccs.is_empty());
+        assert_eq!(c.claude.delai_s, 20);
+    }
+
+    #[test]
+    fn routage_inconnu_refuse() {
+        let (_d, p) = write("[cerveau]\nroutage = \"peut-etre\"\n");
+        assert!(Config::load(&p).is_err());
     }
 
     #[test]

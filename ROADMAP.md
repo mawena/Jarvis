@@ -206,3 +206,50 @@ Assistant vocal personnel en Rust : un cerveau sur le PC, des oreilles partout (
 - [x] 15.9 `jarvisctl doctor` : ligne « chantiers » (pont joint, projets connus)
 - [ ] 15.10 Sur laptop-maison : `xdotool` et `libclang-dev` (via `sudo apt`, Charles) et chemin du projet de l'agent de code
 
+
+## Phase 16 : toutes les machines et les téléphones comme micro, par CCS
+*Choix de Charles (22/11/2026) : le cerveau reste sur laptop-maison ; les oreilles passent par
+CCS et Ricochet, donc marchent aussi hors de la maison. Pixel : mot d'éveil ; iPhone, web et
+bureau : bouton pour parler. Plan : [docs/oreilles-ccs.md](docs/oreilles-ccs.md). Le côté CCS
+est suivi dans la ROADMAP de CCS (phase 36).*
+
+- [x] 16.1 Plan (`docs/oreilles-ccs.md`)
+- [x] 16.2 Oreille « bouton » : aucun changement du cerveau, `wake` avec `score = 2.0` gagne l'arbitrage (documenté dans `docs/reseau.md`)
+- [x] 16.3 Tunnel Ricochet vers le port 7341 de laptop-maison (`[tunnel] ports` de l'agent : `ccs root`, Charles)
+- [x] 16.4 `scripts/jarvis-tunnel` : une machine Linux hors du Wi-Fi rejoint le cerveau par le tunnel Ricochet (service socat, TLS de bout en bout)
+- [x] 16.5 Relais d'oreilles dans `ccs-serveur` (côté CCS) : WebSocket authentifié par CCS ↔ cerveau (TLS épinglé, par le tunnel)
+- [x] 16.6 Bouton Jarvis dans la version web de CCS (branche CCS `feature/oreilles-jarvis`) ; bureau GTK à faire côté CCS
+- [x] 16.7 Bouton Jarvis dans les applis CCS iPhone et Android (Codemagic), raccourci Siri ; installées le 22/11, serveur CCS en préversion 1.1.90
+- [ ] 16.8 Oreille Android : l'oreille existante (mot d'éveil) passe par CCS hors du Wi-Fi ; APK sur Codemagic
+- [ ] 16.9 Essais réels : Pixel en 4G, iPhone, une autre machine (Charles)
+
+## Phase 17 : cerveau Claude d'appoint
+*Branche `feature/cerveau-routage`. Demande de Charles : Claude répond quand la demande n'est pas
+sensible ; l'IA locale sinon, ou quand plus aucun compte Claude n'a de quota.*
+
+- [x] 17.1 Réglage `[cerveau] routage = "auto" | "local" | "claude"` (défaut `auto`)
+- [x] 17.2 Règle de sensibilité configurable : catégories (fichiers personnels, secrets, santé, argent), mots ajoutés, micros de la maison sans ordre explicite, voix non reconnue ; dans le doute, local
+- [x] 17.3 Claude par `claude -p` (aucun outil de Claude Code, réponse JSON structurée) ; sur limite, `ccs meilleur` puis un second essai
+- [x] 17.4 Repli automatique sur l'IA locale sans erreur (quota, réseau, délai), pause de Claude après un échec
+- [x] 17.5 Tests unitaires (règle, CLI simulée, repli, pause, cerveau)
+- [x] 17.6 README (configuration du routage), CHANGELOG
+- [ ] 17.7 Charles tranche la règle de sensibilité (micros de la maison, catégories, `oreilles_hors_maison`)
+- [ ] 17.8 Sur laptop-maison : `claude` et `ccs` installés et connectés pour l'utilisateur du service, essai réel (latence, repli)
+- [ ] 17.9 Résumés de recherche par Claude d'appoint (aujourd'hui : IA locale en mode local)
+- [ ] 17.10 `jarvisctl doctor` : ligne « cerveau d'appoint » (CLI trouvée, compte CCS)
+- [ ] 17.11 `scripts/check.sh` au vert, feature terminée dans `develop`
+
+## Phase 18 : piloter le réseau CCS à la voix
+*Branche `feature/outils-ccs` (sur `feature/cerveau-routage`). Demande de Charles : « tue le
+premier sous-agent de la session GliGli », « quelles sessions tournent ? », « lance une session
+sur le projet X ». Côté CCS : méthodes `jarvis.*` ([docs/protocole-ccs-jarvis.md](docs/protocole-ccs-jarvis.md)).*
+
+- [x] 18.1 Transport : ordre `jarvis <méthode> <hex>` du pont SSH `scripts/jarvis-pont-ccs` (socket Unix du pont CCS, ticket HMAC), même clé que les chantiers ; essayé sur le VPS (connexion acceptée)
+- [x] 18.2 Compétence `ccs` : outils `ccs_etat`, `ccs_sessions`, `ccs_sous_agents`, `ccs_arreter_sous_agent`, `ccs_arreter_session`, `ccs_lancer_session`, proposés à l'IA locale et à Claude d'appoint ; section `[ccs]`
+- [x] 18.3 Confirmation : `Skill::prepare` (nouveau) avant la question d'un outil risqué ; arrêt simulé sans `confirme`, question de CCS lue, cible exacte (`chat_id`, `tool_id`) exécutée sur « oui », toute autre réponse annule
+- [x] 18.4 Raccourcis sans IA (état du réseau, sessions, sous-agents, arrêts, lancement) ; « lance une session… » n'ouvre plus d'appli
+- [x] 18.5 Tests unitaires avec un faux CCS (compétence et cerveau)
+- [x] 18.6 README, CHANGELOG
+- [ ] 18.7 CCS publié avec les méthodes `jarvis.*` (aujourd'hui « Méthode inconnue » sur le VPS)
+- [ ] 18.8 Nouveau `jarvis-pont-ccs` copié sur le serveur, `[ccs] enabled = true` sur laptop-maison, essai réel (latence SSH + réseau)
+- [ ] 18.9 Choix de Charles : nom de session mal entendu par Whisper (« Gli Gli ») ; ajouter des alias si besoin
