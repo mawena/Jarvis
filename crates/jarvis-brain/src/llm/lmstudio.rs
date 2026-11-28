@@ -6,17 +6,22 @@ use super::{LlmBackend, LlmError, Understanding, chat_prompt, system_prompt};
 use crate::config::{LocalLlmConfig, keep_alive_secs};
 use jarvis_skills::ToolSpec;
 use serde_json::{Value, json};
+use std::sync::Mutex;
 use std::time::Duration;
-use tracing::debug;
+use tracing::{debug, info};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
 /// Le premier chargement du modèle en mémoire peut dépasser largement TIMEOUT.
 const WARM_UP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Délai pour lire la liste des modèles (`/v1/models`).
+const MODELS_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct LmStudioBackend {
     client: reqwest::Client,
     url: String,
     model: String,
+    /// Identifiant réel du modèle dans LM Studio, trouvé à partir de `model`.
+    resolved: Mutex<Option<String>>,
     /// Secondes d'inactivité avant que LM Studio décharge le modèle (`ttl`).
     ttl: Option<u64>,
     address: String,
@@ -28,6 +33,7 @@ impl LmStudioBackend {
             client: reqwest::Client::new(),
             url: cfg.url.trim_end_matches('/').to_string(),
             model: cfg.model.clone(),
+            resolved: Mutex::new(None),
             ttl: keep_alive_secs(&cfg.keep_alive),
             address: address.to_string(),
         }
@@ -78,12 +84,53 @@ impl LmStudioBackend {
         body
     }
 
+    /// Identifiant à envoyer : celui de la configuration s'il existe tel quel dans LM Studio,
+    /// sinon le modèle de même nom précédé d'un éditeur (`qwen3.5-4b` → `qwen/qwen3.5-4b`).
+    /// Un identifiant inconnu ferait charger à LM Studio une seconde copie du modèle.
+    async fn model_id(&self) -> String {
+        if let Some(id) = self.resolved.lock().unwrap().clone() {
+            return id;
+        }
+        let ids = match self.model_ids().await {
+            Some(ids) => ids,
+            None => return self.model.clone(),
+        };
+        let id = resolve_model(&self.model, &ids).unwrap_or_else(|| self.model.clone());
+        if id != self.model {
+            info!(configure = %self.model, lm_studio = %id, "identifiant du modèle local");
+        }
+        *self.resolved.lock().unwrap() = Some(id.clone());
+        id
+    }
+
+    async fn model_ids(&self) -> Option<Vec<String>> {
+        let v: Value = self
+            .client
+            .get(format!("{}/v1/models", self.url))
+            .timeout(MODELS_TIMEOUT)
+            .send()
+            .await
+            .ok()?
+            .json()
+            .await
+            .ok()?;
+        Some(
+            v.get("data")?
+                .as_array()?
+                .iter()
+                .filter_map(|m| m.get("id")?.as_str().map(str::to_string))
+                .collect(),
+        )
+    }
+
     async fn post(&self, body: &Value, timeout: Duration) -> Result<Value, LlmError> {
+        let mut body = body.clone();
+        body["model"] = json!(self.model_id().await);
         let resp = self
             .client
             .post(format!("{}/v1/chat/completions", self.url))
             .timeout(timeout)
-            .json(body)
+            .json(&body)
             .send()
             .await
             .map_err(|e| LlmError::Unreachable(e.to_string()))?;
@@ -100,6 +147,18 @@ impl LmStudioBackend {
             .await
             .map_err(|e| LlmError::BadResponse(e.to_string()))
     }
+}
+
+/// Modèle de LM Studio qui correspond à `wanted` : le même identifiant, ou le même
+/// précédé d'un éditeur (`qwen/qwen3.5-4b` pour `qwen3.5-4b`).
+fn resolve_model(wanted: &str, ids: &[String]) -> Option<String> {
+    if ids.iter().any(|id| id == wanted) {
+        return Some(wanted.to_string());
+    }
+    let suffix = format!("/{}", wanted.to_lowercase());
+    ids.iter()
+        .find(|id| id.to_lowercase().ends_with(&suffix))
+        .cloned()
 }
 
 /// Coupe la réflexion de Qwen3.5 : sinon les 100 jetons de la réponse vocale partent
@@ -211,7 +270,8 @@ mod tests {
 
     async fn corps(server: &MockServer) -> Value {
         let reqs = server.received_requests().await.unwrap();
-        serde_json::from_slice(&reqs[0].body).unwrap()
+        let post = reqs.iter().find(|r| r.method.as_str() == "POST").unwrap();
+        serde_json::from_slice(&post.body).unwrap()
     }
 
     #[tokio::test]
@@ -360,5 +420,34 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, LlmError::Unreachable(_)), "{err:?}");
+    }
+
+    #[test]
+    fn identifiant_du_modele_avec_ou_sans_editeur() {
+        let ids = vec!["qwen/qwen3.5-4b".to_string(), "nomic-embed".to_string()];
+        assert_eq!(resolve_model("qwen3.5-4b", &ids).as_deref(), Some("qwen/qwen3.5-4b"));
+        assert_eq!(resolve_model("qwen/qwen3.5-4b", &ids).as_deref(), Some("qwen/qwen3.5-4b"));
+        assert_eq!(resolve_model("Qwen3.5-4B", &ids).as_deref(), Some("qwen/qwen3.5-4b"));
+        assert_eq!(resolve_model("3.5-4b", &ids), None);
+        assert_eq!(resolve_model("llama3.2:3b", &ids), None);
+    }
+
+    #[tokio::test]
+    async fn envoie_l_identifiant_connu_de_lm_studio() {
+        let server = serveur(json!({"content": "Bonjour."})).await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"data": [{"id": "qwen/qwen3.5-4b"}, {"id": "nomic-embed"}]}),
+            ))
+            .mount(&server)
+            .await;
+        let b = backend(&server.uri());
+        b.understand("bonjour", &[]).await.unwrap();
+        b.understand("bonjour", &[]).await.unwrap();
+        assert_eq!(corps(&server).await["model"], "qwen/qwen3.5-4b");
+        let reqs = server.received_requests().await.unwrap();
+        let lists = reqs.iter().filter(|r| r.method.as_str() == "GET").count();
+        assert_eq!(lists, 1, "la liste des modèles n'est lue qu'une fois");
     }
 }

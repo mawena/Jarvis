@@ -729,6 +729,13 @@ fn local_model(paths: &Paths) -> String {
     local_settings(paths).model
 }
 
+/// Vrai si l'identifiant de LM Studio `id` désigne le modèle configuré `wanted`, éditeur
+/// compris ou non (`qwen/qwen3.5-4b` pour `qwen3.5-4b`), comme le fait le cerveau.
+fn same_model(id: &str, wanted: &str) -> bool {
+    let (id, wanted) = (id.to_lowercase(), wanted.to_lowercase());
+    id == wanted || id.ends_with(&format!("/{wanted}"))
+}
+
 /// Modèles de LM Studio (`/api/v0/models`) : (identifiant, chargé en mémoire).
 fn lmstudio_models(json: &str) -> Vec<(String, bool)> {
     serde_json::from_str::<serde_json::Value>(json)
@@ -852,7 +859,7 @@ pub fn status(
         match sys.http_get(&local.addr, "/api/v0/models") {
             Some(body) => {
                 let models = lmstudio_models(&body);
-                let state = match models.iter().find(|(id, _)| *id == model) {
+                let state = match models.iter().find(|(id, _)| same_model(id, &model)) {
                     Some((_, true)) => "modèle chargé",
                     Some((_, false)) => "modèle non chargé (chargé à la demande)",
                     None => "modèle introuvable (voir `lms ls`)",
@@ -992,7 +999,7 @@ pub fn doctor(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<i3
             "lancez `lms server start` (ou redémarrez le cerveau : `jarvisctl restart cerveau`)",
         )?;
         let downloaded = models
-            .map(|b| lmstudio_models(&b).iter().any(|(id, _)| *id == local.model))
+            .map(|b| lmstudio_models(&b).iter().any(|(id, _)| same_model(id, &local.model)))
             .unwrap_or(false);
         check(
             out,
@@ -2222,7 +2229,7 @@ WantedBy=graphical-session.target
         sys.brain = Some((Mode::Local, "0.1.0".into(), String::new()));
         sys.http.insert(
             "/api/v0/models".into(),
-            r#"{"data":[{"id":"qwen3.5-4b","state":"loaded"}]}"#.into(),
+            r#"{"data":[{"id":"qwen/qwen3.5-4b","state":"loaded"}]}"#.into(),
         );
         let mut out = Vec::new();
         assert_eq!(status(&paths, &sys, &Service::ALL, &mut out).unwrap(), 0);
