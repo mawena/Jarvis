@@ -6,6 +6,18 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.6.2] - 2026-11-28
+
+### Corrigé
+
+- **Cerveau lancé sans bureau ouvert** : l'unité `jarvis-brain` dépend de la session systemd de
+  l'utilisateur (`default.target`) et non plus du bureau (`graphical-session.target`). Un PC
+  redémarré sans session graphique (linger, couvercle fermé) sert de nouveau les oreilles ;
+  avant, Jarvis restait injoignable (« connexion au port 7341 refusée »).
+  `jarvisctl update` refait le lien d'activation si le cerveau était activé.
+- **LM Studio au démarrage du PC** : `jarvis-lmstudio` réessaie toutes les 20 s quand
+  `lms daemon up` échoue au démarrage (« no valid installation was found »).
+
 ## [0.6.1] - 2026-11-23
 
 ### Modifié
