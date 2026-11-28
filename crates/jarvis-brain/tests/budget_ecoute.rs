@@ -132,3 +132,17 @@ fn pire_cas_en_ligne_tient_dans_le_delai_d_ecoute_de_l_oreille() {
         "pire cas {worst:?} > délai de l'oreille {ear:?}"
     );
 }
+
+#[test]
+fn conversation_locale_tient_dans_le_pire_cas() {
+    // Une conversation n'appelle aucune compétence : son délai plus long reste sous
+    // le pire cas d'une commande suivie de la recherche.
+    let conversation = STT_MARGIN
+        + const_secs(LOCAL_SRC, "CONVERSATION_TIMEOUT")
+        + const_secs(TTS_SRC, "SYNTH_DEADLINE");
+    assert!(
+        conversation <= worst_case(Mode::Local),
+        "conversation {conversation:?} > pire cas {:?}",
+        worst_case(Mode::Local)
+    );
+}

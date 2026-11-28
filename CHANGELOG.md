@@ -6,6 +6,17 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.6.4] - 2026-11-28
+
+### Corrigé
+- Conversation libre en local : délai de réponse porté de 20 à 35 s. Sur un vieux
+  processeur, le modèle lisait encore la question quand le cerveau abandonnait
+  (« L'IA locale ne répond pas »). Le budget d'attente des oreilles est respecté.
+
+### Documentation
+- `docs/ia-locale.md` : régler les threads, le contexte et les requêtes parallèles
+  de LM Studio sur une petite machine sans carte graphique.
+
 ## [0.6.3] - 2026-11-28
 
 ### Corrigé

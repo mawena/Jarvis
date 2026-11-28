@@ -55,6 +55,28 @@ quand il existe, est rendu à part dans `message.reasoning_content` : le cerveau
 `content`. Vérifier si le modèle change : `curl localhost:1234/v1/chat/completions` avec ce champ,
 `usage.completion_tokens_details.reasoning_tokens` doit valoir 0.
 
+### Petite machine sans carte graphique
+
+Sans réglage, LM Studio peut ne prendre qu'un seul cœur, ouvrir 4 requêtes parallèles et un
+contexte de 8192 jetons : la mémoire sature (sans swap, la machine se fige) et la réponse
+arrive trop tard. Réglage par défaut du modèle, relu à chaque chargement (même à la demande) :
+
+```bash
+d=~/.lmstudio/.internal/user-concrete-model-default-config/qwen; mkdir -p "$d"
+cat > "$d/qwen3.5-4b.json" <<'JSON'
+{"preset":"","operation":{"fields":[]},"load":{"fields":[
+  {"key":"llm.load.llama.cpuThreadPoolSize","value":3},
+  {"key":"llm.load.contextLength","value":4096},
+  {"key":"llm.load.numParallelSessions","value":1}]}}
+JSON
+lms unload --all && lms load qwen/qwen3.5-4b -y && lms ps   # CONTEXT 4096, PARALLEL 1
+```
+
+`cpuThreadPoolSize` : nombre de cœurs moins un. Les journaux du serveur
+(`~/.lmstudio/server-logs`) affichent `n_threads = 3`. Sur un ThinkPad L470 (i5 de
+7e génération, 4 cœurs) : la consigne se lit à 14 jetons/s, la réponse s'écrit à 5 jetons/s,
+et « Qui est le président du Togo ? » prend 13 s.
+
 ## Mesurer un modèle
 
 Le jeu de phrases (`crates/jarvis-brain/tests/fixtures/phrases.toml`) est rejoué contre le modèle ;
