@@ -11,6 +11,11 @@ use std::time::Duration;
 use tracing::{debug, info};
 
 const TIMEOUT: Duration = Duration::from_secs(20);
+/// Conversation libre : aucune compétence n'est appelée ensuite, la réponse peut donc
+/// prendre le délai du modèle plus celui de la compétence la plus lente (recherche,
+/// 15 s) sans sortir du budget de l'oreille (test `budget_ecoute`). Sur un vieux
+/// processeur, lire la consigne prend déjà 10 s et chaque mot 0,2 s.
+const CONVERSATION_TIMEOUT: Duration = Duration::from_secs(35);
 /// Le premier chargement du modèle en mémoire peut dépasser largement TIMEOUT.
 const WARM_UP_TIMEOUT: Duration = Duration::from_secs(120);
 /// Délai pour lire la liste des modèles (`/v1/models`).
@@ -193,7 +198,11 @@ impl LlmBackend for LmStudioBackend {
             Route::Command => (self.chat_body(text, tools), tools),
             Route::Conversation => (self.conversation_body(text), &[][..]),
         };
-        let v = self.post(&body, TIMEOUT).await?;
+        let limit = match route {
+            Route::Command => TIMEOUT,
+            Route::Conversation => CONVERSATION_TIMEOUT,
+        };
+        let v = self.post(&body, limit).await?;
         if route == Route::Conversation {
             return content(&v)
                 .map(Understanding::Answer)
