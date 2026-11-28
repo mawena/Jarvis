@@ -25,7 +25,8 @@ Description=Jarvis — cerveau de l'assistant vocal
 After=graphical-session.target jarvis-lmstudio.service
 # Serveur du modèle local, dans son propre cgroup : il survit au redémarrage du cerveau.
 Wants=jarvis-lmstudio.service
-PartOf=graphical-session.target
+# Lancé avec la session systemd de l'utilisateur, pas avec le bureau : un PC sans session
+# graphique ouverte (linger, couvercle fermé) sert quand même les oreilles du réseau.
 
 [Service]
 Type=simple
@@ -37,7 +38,7 @@ Restart=on-failure
 RestartSec=3
 
 [Install]
-WantedBy=graphical-session.target
+WantedBy=default.target
 "
     .to_string()
 }
@@ -86,6 +87,9 @@ RemainAfterExit=yes
 ExecStart=%h/.lmstudio/bin/lms daemon up
 ExecStart=%h/.lmstudio/bin/lms server start
 ExecStop=-%h/.lmstudio/bin/lms server stop
+# Au démarrage du PC, `lms daemon up` peut échouer (« no valid installation ») : on réessaie.
+Restart=on-failure
+RestartSec=20
 
 [Install]
 WantedBy=default.target
@@ -425,10 +429,16 @@ pub fn update(paths: &Paths, sys: &dyn System, out: &mut dyn Write) -> Result<()
     copy_binaries(&source, paths, out)?;
     copy_libraries(&source, paths, out)?;
     // Une installation antérieure à l'oreille en service n'a que l'unité du cerveau.
+    let old_brain = fs::read_to_string(&paths.unit_path).ok();
     let (created, written) = write_units(paths, out)?;
+    let brain_rewritten = old_brain.is_some_and(|u| u != brain_unit());
     let (lm_created, lm_written) = write_lmstudio_unit(paths, out)?;
     if written || lm_written {
         systemctl(sys, &["daemon-reload"])?;
+    }
+    // La cible d'activation du cerveau a changé (bureau → session) : on refait le lien.
+    if brain_rewritten && systemctl(sys, &["is-enabled", SERVICE])?.stdout.trim() == "enabled" {
+        systemctl(sys, &["reenable", SERVICE])?;
     }
     if lm_created {
         start_lmstudio(sys, out)?;
@@ -1884,6 +1894,7 @@ mod tests {
         assert!(u.contains("ExecStart=%h/.lmstudio/bin/lms server start\n"));
         assert!(u.contains("ConditionPathExists=%h/.lmstudio/bin/lms\n"));
         assert!(u.contains("RemainAfterExit=yes"));
+        assert!(u.contains("Restart=on-failure\n"));
         assert!(!u.contains("load"), "aucun modèle n'est chargé par l'unité");
         let b = brain_unit();
         assert!(b.contains("Wants=jarvis-lmstudio.service\n"));
@@ -1947,7 +1958,8 @@ mod tests {
         assert!(u.contains("EnvironmentFile=-%h/.config/jarvis/env\n"));
         assert!(u.contains("Environment=TMPDIR=%t\n"));
         assert!(u.contains("Restart=on-failure\nRestartSec=3\n"));
-        assert!(u.ends_with("[Install]\nWantedBy=graphical-session.target\n"));
+        assert!(u.ends_with("[Install]\nWantedBy=default.target\n"));
+        assert!(!u.contains("PartOf="));
     }
 
     #[test]
@@ -2677,7 +2689,7 @@ WantedBy=graphical-session.target
 
     #[test]
     fn update_garde_le_choix_d_activation_et_recharge_si_l_unite_change() {
-        let (_home, paths, sys) = installed();
+        let (_home, paths, mut sys) = installed();
         enroll_wakeword(&paths);
         let mut out = Vec::new();
         update(&paths, &sys, &mut out).unwrap();
@@ -2708,9 +2720,23 @@ WantedBy=graphical-session.target
             systemctl_cmds(&sys),
             vec![
                 "systemctl --user daemon-reload",
+                "systemctl --user is-enabled jarvis-brain.service",
                 "systemctl --user restart jarvis-brain.service",
                 "systemctl --user restart jarvis-ear.service"
             ]
+        );
+
+        // Cerveau activé avec une unité ancienne : le lien d'activation est refait.
+        sys.cmds.borrow_mut().clear();
+        sys.replies.insert(
+            "systemctl --user is-enabled jarvis-brain.service".into(),
+            (0, "enabled\n".into()),
+        );
+        fs::write(&paths.unit_path, "[Unit]\nancienne\n").unwrap();
+        update(&paths, &sys, &mut Vec::new()).unwrap();
+        assert!(
+            systemctl_cmds(&sys)
+                .contains(&"systemctl --user reenable jarvis-brain.service".to_string())
         );
     }
 
