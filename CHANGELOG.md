@@ -6,6 +6,16 @@ Toutes les évolutions notables de Jarvis. Format inspiré de
 
 ## [Non publié]
 
+## [0.6.3] - 2026-11-28
+
+### Corrigé
+
+- Le cerveau envoie à LM Studio l'identifiant exact du modèle, éditeur compris
+  (`qwen/qwen3.5-4b` quand la configuration dit `qwen3.5-4b`). Avant, LM Studio
+  tentait de charger une seconde copie du modèle, manquait de mémoire, et Jarvis
+  répondait « L'IA locale ne répond pas ».
+- `jarvisctl status` et `jarvisctl doctor` reconnaissent aussi le modèle sous ce nom.
+
 ## [0.6.2] - 2026-11-28
 
 ### Corrigé
